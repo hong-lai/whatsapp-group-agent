@@ -13,6 +13,7 @@
   "devDependencies": {
     "@types/node": "^26.2.0",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/sqlite3": "^5.1.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   },
@@ -20,6 +21,9 @@
     "@cacheable/node-cache": "^3.1.1",
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
-    "qrcode-terminal": "^0.12.0"
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^6.0.1"
   }
 }

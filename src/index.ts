@@ -1,182 +1,236 @@
-import makeWASocket, { DisconnectReason, downloadMediaMessage, getContentType, type GroupMetadata, isJidGroup, useMultiFileAuthState } from '@whiskeysockets/baileys'
+import makeWASocket, {
+    Browsers,
+    DisconnectReason,
+    downloadMediaMessage,
+    getContentType,
+    type GroupMetadata,
+    isJidGroup,
+    jidNormalizedUser,
+    useMultiFileAuthState,
+    type WAMessage
+} from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
 import NodeCache from '@cacheable/node-cache'
-import { createWriteStream } from 'fs'
+import { createWriteStream, existsSync, mkdirSync } from 'fs'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
-import fs from 'node:fs'
+import pino from 'pino'
+import sqlite3 from 'sqlite3'
+import { open, Database } from 'sqlite'
 
 const groupCache = new NodeCache<GroupMetadata>({ stdTTL: 0, useClones: false })
+const testGroupPattern = /Supergroup/i
+
+const fileTypes: Record<string, string> = {
+    'imageMessage': 'jpeg',
+    'videoMessage': 'mp4',
+    'stickerMessage': 'webp',
+    'documentMessage': 'pdf',
+    'audioMessage': 'ogg'
+}
+
+let db: Database;
+
+// 🗄️ Initialize SQLite Database
+async function initDB() {
+    db = await open({
+        filename: './whatsapp_messages.db',
+        driver: sqlite3.Database
+    })
+
+    await db.exec(`
+        CREATE TABLE IF NOT EXISTS messages (
+            message_id TEXT PRIMARY KEY,
+            group_jid TEXT,
+            group_name TEXT,
+            sender TEXT,
+            push_name TEXT,
+            message_type TEXT,
+            text_content TEXT,
+            media_path TEXT,
+            timestamp INTEGER,
+            is_history BOOLEAN
+        )
+    `)
+    console.log('✅ SQLite Database initialized')
+}
+
+// 🛠️ Process and download media/messages from matched groups
+async function processMessage(m: WAMessage, sock: any, isHistory = false) {
+    if (!m.message || !m.key.remoteJid) return
+
+    const jid = m.key.remoteJid
+    if (!isJidGroup(jid)) return // Skip Direct Messages
+
+    // Fetch/Verify group metadata
+    let groupMetadata = groupCache.get(jid)
+    if (!groupMetadata) {
+        // try {
+        //     groupMetadata = await sock.groupMetadata(jid)
+        //     if (groupMetadata) groupCache.set(jid, groupMetadata)
+        // } catch {
+        //     return
+        // }
+        return
+    }
+
+    const groupName = groupMetadata.subject
+    // Filter out groups that don't match the pattern
+    if (!testGroupPattern.test(groupName)) return
+
+    const messageId = m.key.id
+    const messageType = getContentType(m.message) || 'unknown'
+    const rawSender = m.key.fromMe
+        ? (sock.user?.id || sock.user?.jid)
+        : (m.key.participant || m.participant)
+
+    const sender = rawSender ? jidNormalizedUser(rawSender) : jid
+    const pushName = m.pushName || ''
+    const timestamp = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000)
+
+    if (messageType === 'protocolMessage') return
+
+    console.log(`\n--- [${isHistory ? 'HISTORY' : 'LIVE'}] ${groupName} ---`)
+    console.log('ID:        ', messageId)
+    console.log('Sender:    ', sender)
+    console.log('Push Name: ', pushName)
+    console.log('Type:      ', messageType)
+    console.log('Date:      ', new Date(timestamp * 1000).toLocaleString())
+
+    // 1. Extract Text Content
+    const textContent =
+        m.message?.conversation ||
+        m.message?.extendedTextMessage?.text ||
+        m.message?.imageMessage?.caption ||
+        m.message?.videoMessage?.caption ||
+        null
+
+    if (textContent) {
+        console.log(`💬 Text: ${textContent}`)
+    }
+
+    let mediaPath: string | null = null;
+
+    // 2. Process Media Downloads
+    if (messageType && fileTypes[messageType]) {
+        try {
+            const stream = await downloadMediaMessage(
+                m,
+                'stream',
+                {},
+                {
+                    logger,
+                    reuploadRequest: sock.updateMediaMessage
+                }
+            )
+
+            const safeFolderName = groupName.replace(/[/\\?%*:|"<>]/g, '_')
+            const folderPath = `./downloads/${safeFolderName}`
+
+            if (!existsSync(folderPath)) {
+                mkdirSync(folderPath, { recursive: true })
+            }
+
+            const fileName = `${folderPath}/${Date.now()}_${messageId}.${fileTypes[messageType]}`
+            const writeStream = createWriteStream(fileName)
+            stream.pipe(writeStream)
+
+            mediaPath = fileName;
+            console.log(`📁 Media saved to: ${fileName}`)
+        } catch (err) {
+            console.error('❌ Error downloading media:', err)
+        }
+    }
+
+    // 3. Save to SQLite Database
+    if (messageId) {
+        try {
+            await db.run(
+                `INSERT OR IGNORE INTO messages 
+                (message_id, group_jid, group_name, sender, push_name, message_type, text_content, media_path, timestamp, is_history) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [messageId, jid, groupName, sender, pushName, messageType, textContent, mediaPath, timestamp, isHistory]
+            )
+            console.log(`💾 Message ${messageId} saved to DB.`)
+        } catch (err) {
+            console.error(`❌ DB Insert Error for ${messageId}:`, err)
+        }
+    }
+}
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys')
 
     const sock = makeWASocket({
         auth: state,
-        cachedGroupMetadata: async (jid) => {
-            console.log('cached group metadata for', jid)
-            return groupCache.get(jid)
-        }
+        logger: pino({ level: 'silent' }),
+        cachedGroupMetadata: async (jid) => groupCache.get(jid),
+        syncFullHistory: true,
+        shouldSyncHistoryMessage: () => true,
     })
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
-        if (qr) {
-            qrcode.generate(qr, { small: true })
-        }
+        if (qr) qrcode.generate(qr, { small: true })
+
         if (connection === 'close') {
             const shouldReconnect =
                 (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut
-            console.log('connection closed due to', lastDisconnect?.error, ', reconnecting:', shouldReconnect)
-            if (shouldReconnect) {
-                connectToWhatsApp()
-            }
+            console.log('Connection closed, reconnecting:', shouldReconnect)
+            if (shouldReconnect) connectToWhatsApp()
         } else if (connection === 'open') {
-            console.log('opened connection')
+            console.log('✅ Connected to WhatsApp')
 
+            // Populate cache for all participating groups
             const response = await sock.groupFetchAllParticipating()
             for (const key in response) {
-                if (isJidGroup(key)) {
-                    const groupMetadata = response[key];
-                    if (groupMetadata) {
-                        addSpecificGroup(groupMetadata.id, groupMetadata)
-                    }
+                if (response[key] && testGroupPattern.test(response[key].subject)) {
+                    groupCache.set(key, response[key])
                 }
             }
+            console.log(`📦 Pre-cached ${groupCache.keys().length} matching groups`)
+        }
+    })
+
+    // 📩 Process historical messages on connect
+    sock.ev.on('messaging-history.set', async ({ messages, syncType }) => {
+        console.log(`📥 Processing history sync (Type: ${syncType}, Items: ${messages?.length || 0})`)
+        for (const m of messages) {
+            await processMessage(m, sock, true)
+        }
+    })
+
+    // ⚡ Real-time messages
+    sock.ev.on('messages.upsert', async (event) => {
+        if (event.type !== 'notify') return
+        for (const m of event.messages) {
+            await processMessage(m, sock, false)
         }
     })
 
     sock.ev.on('groups.update', async ([event]) => {
         if (event?.id) {
             const groupMetadata = await sock.groupMetadata(event.id)
+            const groupName = groupMetadata?.subject
+            if (!groupName || !testGroupPattern.test(groupName)) return
             groupCache.set(groupMetadata.id, groupMetadata)
-            console.log('Updated group metadata for', event.id, 'with name', groupMetadata.subject)
+            console.log('Updated group metadata for', event.id, 'with name', groupName)
         }
     })
 
     sock.ev.on('group-participants.update', async (event) => {
         const groupMetadata = await sock.groupMetadata(event.id)
+        const groupName = groupMetadata?.subject
+        if (!groupName || !testGroupPattern.test(groupName)) return
         groupCache.set(groupMetadata.id, groupMetadata)
-        console.log('Updated group participants for', event.id)
+        console.log('Updated group participants for', event.id, 'with name', groupName)
     })
 
-    sock.ev.on('messages.upsert', async (event) => {
-        if (event.type !== 'notify') return
-        for (const m of event.messages) {
-            if (!m.message) continue
-            // if (m.key.fromMe) continue
-
-            // if Jid is int the cache group, then we simply capture it.
-            if (m.key.remoteJid && groupCache.has(m.key.remoteJid)) {
-                const messageType = getContentType(m.message)
-                const groupMetadata = groupCache.get(m.key.remoteJid)
-                const groupName = groupMetadata?.subject ?? 'UNNAMED'
-                const sender = m.key.participant;
-                const timestamp = m.messageTimestamp;
-
-
-                console.log('GROUP NAME: ', groupName)
-                console.log('Sender Id: ', sender)
-                console.log('Push Name: ', m.pushName)
-                console.log('Message Type: ', messageType)
-                console.log('Date: ', new Date(timestamp as number * 1000).toLocaleString())
-
-                // 1. Check for standard text message
-                const textContent = m.message?.conversation || m.message?.extendedTextMessage?.text;
-                if (textContent) {
-                    console.log(`Text from ${sender}: ${textContent}`);
-                }
-
-                const fileTypes = {
-                    'imageMessage': 'jpeg',
-                    'videoMessage': 'mp4',
-                    'stickerMessage': 'webp'
-                }
-
-                if (messageType == 'imageMessage' || messageType == 'stickerMessage' || messageType == 'videoMessage') {
-                    const stream = await downloadMediaMessage(
-                        m,
-                        'stream',
-                        {},
-                        {
-                            logger,
-                            reuploadRequest: sock.updateMediaMessage
-                        }
-                    );
-
-                    try {
-                        if (!fs.existsSync(`groups/${groupName}`)) {
-                            fs.mkdirSync(`groups/${groupName}`, { recursive: true });
-                        }
-                    } catch (err) {
-                        console.error(err)
-                    }
-
-                    const writeStream = createWriteStream(`groups/${groupName}/image_${Date.now()}.${fileTypes[messageType]}`);
-                    stream.pipe(writeStream);
-                }
-
-                // 2. Check for image message
-                // const imageMessage = m.message?.imageMessage;
-                // if (imageMessage) {
-                //     console.log(`Image received from ${sender}. Caption: ${imageMessage.caption || 'None'}`);
-
-                //     try {
-                //         // Download image as a binary buffer
-                //         const buffer = await downloadMediaMessage(
-                //             m,
-                //             'buffer',
-                //             {},
-                //             {
-                //                 logger: console as any,
-                //             }
-                //         );
-
-                //         // Save the image locally
-                //         const filename = `image_${Date.now()}.jpeg`;
-                //         await fs.promises.writeFile(filename, buffer);
-                //         console.log(`Saved image to ${filename}`);
-
-                //     } catch (error) {
-                //         console.error('Failed to download image:', error);
-                //     }
-                // }
-                // console.log(sender, messageContent)
-            }
-
-            // console.log('replying to', m.key.remoteJid)
-            // await sock.sendMessage(m.key.remoteJid!, { text: 'Hello from Baileys!' })
-        }
-    })
-
-
-
-
-    // Save credentials whenever they are updated
     sock.ev.on('creds.update', saveCreds)
 }
 
-connectToWhatsApp()
-
-
-const testGroupPattern = /義合|CLP 報工|Yee Hop/
-const testGroupPattern2 = /Supergroup/
-
-function addSpecificGroup(jid: string, groupMetadata: GroupMetadata) {
-    const groupName = groupMetadata?.["subject"] ?? 'UNK'
-    console.log(`Checking group ${jid} with name ${groupName} against pattern ${testGroupPattern2}`)
-    if (testGroupPattern.test(groupName) && groupMetadata?.id) {
-        groupCache.set(groupMetadata.id, groupMetadata)
-        console.log(`Added group ${jid} with name ${groupName} to cache`)
-    }
-}
-
-process.on('SIGINT', () => {
-    const groups = groupCache.mget(groupCache.keys())
-
-    for (const [key, value] of Object.entries(groups)) {
-        console.log(value?.subject ?? 'UNK')
-    }
-
-    process.exit(0)
-})
+// Boot up sequence
+(async () => {
+    await initDB();
+    await connectToWhatsApp();
+})();
