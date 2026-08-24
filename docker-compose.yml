@@ -1,0 +1,54 @@
+# Scan the first-login QR from: docker compose logs -f app
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: whatsapp
+      POSTGRES_PASSWORD: whatsapp
+      POSTGRES_DB: whatsapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whatsapp -d whatsapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
+      REDIS_URL: redis://redis:6379
+      AUTH_DIR: /app/auth_info_baileys
+      DOWNLOAD_DIR: /app/downloads
+      GROUP_PATTERN: "${GROUP_PATTERN:-富山邨|錦田}"
+      HISTORY_DELAY_MIN_MS: ${HISTORY_DELAY_MIN_MS:-800}
+      HISTORY_DELAY_MAX_MS: ${HISTORY_DELAY_MAX_MS:-2000}
+      MEDIA_DELAY_MIN_MS: ${MEDIA_DELAY_MIN_MS:-1500}
+      MEDIA_DELAY_MAX_MS: ${MEDIA_DELAY_MAX_MS:-4000}
+    volumes:
+      - ./auth_info_baileys:/app/auth_info_baileys
+      - ./downloads:/app/downloads
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

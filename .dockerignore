@@ -1,0 +1,9 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env
+auth_info_baileys
+downloads
+whatsapp_messages.db
+dist
