@@ -22,6 +22,7 @@ import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
 import pino from 'pino'
+import { startApi } from './api.js'
 import { config, matchesGroupPattern } from './config.js'
 import {
     deleteGroupMetadata,
@@ -397,5 +398,6 @@ async function connectToWhatsApp() {
 
 ;(async () => {
     await initDb()
+    startApi()
     await connectToWhatsApp()
 })()

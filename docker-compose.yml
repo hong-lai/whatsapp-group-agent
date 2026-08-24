@@ -39,6 +39,9 @@ services:
     environment:
       DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
       REDIS_URL: redis://redis:6379
+      WEB_PORT: 3000
+      DASHBOARD_PAGE_SIZE: ${DASHBOARD_PAGE_SIZE:-50}
+      DASHBOARD_MAX_PAGE_SIZE: ${DASHBOARD_MAX_PAGE_SIZE:-100}
       AUTH_DIR: /app/auth_info_baileys
       DOWNLOAD_DIR: /app/downloads
       GROUP_PATTERN: "${GROUP_PATTERN:-富山邨|錦田}"
@@ -49,6 +52,8 @@ services:
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
       - ./downloads:/app/downloads
+    ports:
+      - "${WEB_HOST_PORT:-3001}:3000"
     stdin_open: true
     tty: true
     restart: unless-stopped

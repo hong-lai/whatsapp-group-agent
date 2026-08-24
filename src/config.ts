@@ -36,6 +36,9 @@ function envInt(name: string, fallback: number): number {
 export const config = {
     databaseUrl: env('DATABASE_URL', 'postgres://whatsapp:whatsapp@localhost:5433/whatsapp'),
     redisUrl: env('REDIS_URL', 'redis://localhost:6380'),
+    webPort: envInt('WEB_PORT', 3000),
+    dashboardPageSize: envInt('DASHBOARD_PAGE_SIZE', 50),
+    dashboardMaxPageSize: envInt('DASHBOARD_MAX_PAGE_SIZE', 100),
     groupPattern: new RegExp(env('GROUP_PATTERN', '富山邨|錦田'), 'i'),
     authDir: env('AUTH_DIR', 'auth_info_baileys'),
     downloadDir: env('DOWNLOAD_DIR', './downloads'),

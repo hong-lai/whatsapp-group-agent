@@ -35,6 +35,9 @@ export async function initDb(): Promise<void> {
             is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
             is_history BOOLEAN NOT NULL DEFAULT FALSE
         );
+
+        CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
+            ON messages (group_jid, timestamp DESC, message_id DESC);
     `)
         console.log('Postgres schema ready')
     } catch (err) {
@@ -138,4 +141,194 @@ export async function markMessagesDeleted(messageIds: string[]): Promise<void> {
         'UPDATE messages SET is_deleted = TRUE WHERE message_id = ANY($1::text[])',
         [messageIds]
     )
+}
+
+export type DashboardGroup = {
+    jid: string
+    name: string
+    tracked: boolean
+    deletedAt: string | null
+    messageCount: number
+    senderCount: number
+    latestTimestamp: number | null
+    latestText: string | null
+}
+
+type DashboardGroupRow = {
+    jid: string
+    name: string
+    tracked: boolean
+    deleted_at: Date | null
+    message_count: number
+    sender_count: number
+    latest_timestamp: string | null
+    latest_text: string | null
+}
+
+export async function listDashboardGroups(
+    fromTimestamp: number,
+    toTimestamp: number
+): Promise<DashboardGroup[]> {
+    const result = await pool.query<DashboardGroupRow>(
+        `SELECT
+            g.jid,
+            g.name,
+            g.tracked,
+            g.deleted_at,
+            COUNT(m.message_id)::int AS message_count,
+            COUNT(DISTINCT m.sender_jid)::int AS sender_count,
+            latest.timestamp::text AS latest_timestamp,
+            latest.text_content AS latest_text
+         FROM groups g
+         LEFT JOIN messages m
+           ON m.group_jid = g.jid
+          AND m.timestamp >= $1
+          AND m.timestamp < $2
+         LEFT JOIN LATERAL (
+            SELECT timestamp, text_content
+            FROM messages
+            WHERE group_jid = g.jid
+              AND timestamp >= $1
+              AND timestamp < $2
+            ORDER BY timestamp DESC, message_id DESC
+            LIMIT 1
+         ) latest ON TRUE
+         GROUP BY
+            g.jid, g.name, g.tracked, g.deleted_at,
+            latest.timestamp, latest.text_content
+         ORDER BY
+            (COUNT(m.message_id) > 0) DESC,
+            latest.timestamp DESC NULLS LAST,
+            g.tracked DESC,
+            g.name ASC`,
+        [fromTimestamp, toTimestamp]
+    )
+
+    return result.rows.map((row) => ({
+        jid: row.jid,
+        name: row.name,
+        tracked: row.tracked,
+        deletedAt: row.deleted_at?.toISOString() ?? null,
+        messageCount: row.message_count,
+        senderCount: row.sender_count,
+        latestTimestamp: row.latest_timestamp === null ? null : Number(row.latest_timestamp),
+        latestText: row.latest_text,
+    }))
+}
+
+export type MessageCursor = {
+    timestamp: number
+    messageId: string
+}
+
+export type DashboardMessage = {
+    messageId: string
+    senderJid: string | null
+    senderName: string | null
+    messageType: string
+    textContent: string | null
+    replyToId: string | null
+    quotedMessage: string | null
+    timestamp: number
+    isEdited: boolean
+    isDeleted: boolean
+    isHistory: boolean
+    hasMedia: boolean
+}
+
+type DashboardMessageRow = {
+    message_id: string
+    sender_jid: string | null
+    sender_name: string | null
+    message_type: string
+    text_content: string | null
+    reply_to_id: string | null
+    quoted_message: string | null
+    timestamp: string
+    is_edited: boolean
+    is_deleted: boolean
+    is_history: boolean
+    has_media: boolean
+}
+
+export async function listDashboardMessages(
+    groupJid: string,
+    fromTimestamp: number,
+    toTimestamp: number,
+    limit: number,
+    cursor?: MessageCursor
+): Promise<{ messages: DashboardMessage[]; nextCursor: MessageCursor | null }> {
+    const result = await pool.query<DashboardMessageRow>(
+        `SELECT
+            m.message_id,
+            m.sender_jid,
+            s.display_name AS sender_name,
+            m.message_type,
+            m.text_content,
+            m.reply_to_id,
+            m.quoted_message,
+            m.timestamp::text,
+            m.is_edited,
+            m.is_deleted,
+            m.is_history,
+            (m.media_path IS NOT NULL) AS has_media
+         FROM messages m
+         LEFT JOIN senders s ON s.jid = m.sender_jid
+         WHERE m.group_jid = $1
+           AND m.timestamp >= $2
+           AND m.timestamp < $3
+           AND (
+                $4::bigint IS NULL
+                OR m.timestamp < $4
+                OR (m.timestamp = $4 AND m.message_id < $5)
+           )
+         ORDER BY m.timestamp DESC, m.message_id DESC
+         LIMIT $6`,
+        [
+            groupJid,
+            fromTimestamp,
+            toTimestamp,
+            cursor?.timestamp ?? null,
+            cursor?.messageId ?? null,
+            limit + 1,
+        ]
+    )
+
+    const hasMore = result.rows.length > limit
+    const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows
+    const last = pageRows.at(-1)
+
+    return {
+        messages: pageRows.map((row) => ({
+            messageId: row.message_id,
+            senderJid: row.sender_jid,
+            senderName: row.sender_name,
+            messageType: row.message_type,
+            textContent: row.text_content,
+            replyToId: row.reply_to_id,
+            quotedMessage: row.quoted_message,
+            timestamp: Number(row.timestamp),
+            isEdited: row.is_edited,
+            isDeleted: row.is_deleted,
+            isHistory: row.is_history,
+            hasMedia: row.has_media,
+        })),
+        nextCursor:
+            hasMore && last
+                ? { timestamp: Number(last.timestamp), messageId: last.message_id }
+                : null,
+    }
+}
+
+export async function getDashboardMedia(
+    messageId: string
+): Promise<{ mediaPath: string; messageType: string } | undefined> {
+    const result = await pool.query<{ media_path: string; message_type: string }>(
+        `SELECT media_path, message_type
+         FROM messages
+         WHERE message_id = $1 AND media_path IS NOT NULL`,
+        [messageId]
+    )
+    const row = result.rows[0]
+    return row ? { mediaPath: row.media_path, messageType: row.message_type } : undefined
 }
