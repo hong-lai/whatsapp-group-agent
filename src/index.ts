@@ -1,13 +1,18 @@
 import makeWASocket, {
+    aesDecryptGCM,
     Browsers,
     DisconnectReason,
     downloadMediaMessage,
     getContentType,
     type GroupMetadata,
+    hmacSign,
     isJidGroup,
+    jidDecode,
     jidNormalizedUser,
+    proto,
     useMultiFileAuthState,
-    type WAMessage
+    type WAMessage,
+    WAProto
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
@@ -19,7 +24,8 @@ import sqlite3 from 'sqlite3'
 import { open, Database } from 'sqlite'
 
 const groupCache = new NodeCache<GroupMetadata>({ stdTTL: 0, useClones: false })
-const testGroupPattern = /Supergroup/i
+// const contactNameStore = new Map<string, string>();
+const testGroupPattern = /富山邨|錦田/i
 
 const fileTypes: Record<string, string> = {
     'imageMessage': 'jpeg',
@@ -41,18 +47,39 @@ async function initDB() {
     await db.exec(`
         CREATE TABLE IF NOT EXISTS messages (
             message_id TEXT PRIMARY KEY,
+            message_secret TEXT,
             group_jid TEXT,
             group_name TEXT,
-            sender TEXT,
-            push_name TEXT,
+            sender_id TEXT,
+            sender_name TEXT,
             message_type TEXT,
             text_content TEXT,
             media_path TEXT,
+            reply_to_id TEXT,
+            quoted_message TEXT,
             timestamp INTEGER,
+            is_edited BOOLEAN,
+            is_deleted BOOLEAN,
             is_history BOOLEAN
         )
     `)
     console.log('✅ SQLite Database initialized')
+}
+
+const decryptEditedMessage = ({ encPayload, encIv }, { secret, id, sender }) => {
+    const toBinary = (txt: string) => Buffer.from(txt)
+    const senderBuf = toBinary(sender)
+    const sign = Buffer.concat([
+        toBinary(id),
+        senderBuf,
+        senderBuf,
+        toBinary('Message Edit'),
+        new Uint8Array([1])
+    ])
+    const key = hmacSign(secret, new Uint8Array(32))
+    const decKey = hmacSign(sign, key)
+    const decrypted = aesDecryptGCM(encPayload, decKey, encIv, '')
+    return proto.Message.decode(decrypted)
 }
 
 // 🛠️ Process and download media/messages from matched groups
@@ -84,16 +111,17 @@ async function processMessage(m: WAMessage, sock: any, isHistory = false) {
         ? (sock.user?.id || sock.user?.jid)
         : (m.key.participant || m.participant)
 
-    const sender = rawSender ? jidNormalizedUser(rawSender) : jid
-    const pushName = m.pushName || ''
+    const senderId = rawSender ? jidNormalizedUser(rawSender) : jid
+    const senderName = m.pushName || jidDecode(senderId)?.user || ''
     const timestamp = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000)
+    // const replyMessageId = m.key.
 
     if (messageType === 'protocolMessage') return
 
     console.log(`\n--- [${isHistory ? 'HISTORY' : 'LIVE'}] ${groupName} ---`)
     console.log('ID:        ', messageId)
-    console.log('Sender:    ', sender)
-    console.log('Push Name: ', pushName)
+    console.log('Sender ID:    ', senderId)
+    console.log('Push Name: ', senderName)
     console.log('Type:      ', messageType)
     console.log('Date:      ', new Date(timestamp * 1000).toLocaleString())
 
@@ -104,6 +132,16 @@ async function processMessage(m: WAMessage, sock: any, isHistory = false) {
         m.message?.imageMessage?.caption ||
         m.message?.videoMessage?.caption ||
         null
+
+    const replyToId = m.message?.extendedTextMessage?.contextInfo?.stanzaId || null
+    const quotedMessage = m.message.extendedTextMessage?.contextInfo?.quotedMessage?.conversation || m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption || null
+
+    const reactionMessage = m.message.reactionMessage?.text
+    console.log(reactionMessage) // create a reaction table for storing this information.
+    let messageSecret = m.message.messageContextInfo?.messageSecret ?? null
+    if (messageSecret) {
+        messageSecret = JSON.stringify(Array.from(messageSecret))
+    }
 
     if (textContent) {
         console.log(`💬 Text: ${textContent}`)
@@ -123,15 +161,22 @@ async function processMessage(m: WAMessage, sock: any, isHistory = false) {
                     reuploadRequest: sock.updateMediaMessage
                 }
             )
+            const hktDate = new Intl.DateTimeFormat('en-CA', {
+                timeZone: 'Asia/Hong_Kong',
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit'
+            }).format(timestamp * 1000);
 
             const safeFolderName = groupName.replace(/[/\\?%*:|"<>]/g, '_')
-            const folderPath = `./downloads/${safeFolderName}`
+            const folderPath = `./downloads/${safeFolderName}/${hktDate}`
 
             if (!existsSync(folderPath)) {
                 mkdirSync(folderPath, { recursive: true })
             }
 
-            const fileName = `${folderPath}/${Date.now()}_${messageId}.${fileTypes[messageType]}`
+            const fileName = `${folderPath}/${timestamp}_${messageId}.${fileTypes[messageType]}`
+
             const writeStream = createWriteStream(fileName)
             stream.pipe(writeStream)
 
@@ -147,9 +192,9 @@ async function processMessage(m: WAMessage, sock: any, isHistory = false) {
         try {
             await db.run(
                 `INSERT OR IGNORE INTO messages 
-                (message_id, group_jid, group_name, sender, push_name, message_type, text_content, media_path, timestamp, is_history) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [messageId, jid, groupName, sender, pushName, messageType, textContent, mediaPath, timestamp, isHistory]
+                (message_id, message_secret, group_jid, group_name, sender_id, sender_name, message_type, text_content, media_path, reply_to_id, quoted_message, timestamp, is_edited, is_deleted, is_history) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [messageId, messageSecret, jid, groupName, senderId, senderName, messageType, textContent, mediaPath, replyToId, quotedMessage, timestamp, 0, 0, isHistory]
             )
             console.log(`💾 Message ${messageId} saved to DB.`)
         } catch (err) {
@@ -181,7 +226,7 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             console.log('✅ Connected to WhatsApp')
 
-            // Populate cache for all participating groups
+            // Populate cache for all participating groups <<-- is this necessary?
             const response = await sock.groupFetchAllParticipating()
             for (const key in response) {
                 if (response[key] && testGroupPattern.test(response[key].subject)) {
@@ -193,20 +238,71 @@ async function connectToWhatsApp() {
     })
 
     // 📩 Process historical messages on connect
-    sock.ev.on('messaging-history.set', async ({ messages, syncType }) => {
+    sock.ev.on('messaging-history.set', async ({ messages, contacts, syncType }) => {
         console.log(`📥 Processing history sync (Type: ${syncType}, Items: ${messages?.length || 0})`)
+
+        for (const c of contacts) {
+            console.log(c)
+        }
         for (const m of messages) {
             await processMessage(m, sock, true)
         }
     })
 
+    const MessageEditEncType = proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
+
     // ⚡ Real-time messages
     sock.ev.on('messages.upsert', async (event) => {
-        if (event.type !== 'notify') return
-        for (const m of event.messages) {
-            await processMessage(m, sock, false)
+        if (event.type == 'notify') {
+            console.log("Total messages:", event.messages.length)
+            for (const m of event.messages) {
+                const secEncMsg = m.message?.secretEncryptedMessage
+                if (secEncMsg?.secretEncType === MessageEditEncType) {
+                    const targetMsgId = secEncMsg.targetMessageKey?.id
+                    const response = await db.get('select message_secret from messages where message_id=?', [targetMsgId])
+                    if (response) {
+                        const msgSec = new Uint8Array(JSON.parse(response.message_secret))
+                        try {
+                            const decryptedMessage: WAProto.IMessage = decryptEditedMessage(secEncMsg, { secret: msgSec, id: targetMsgId, sender: m.key.participant || m.participant || m.key.remoteJid })
+                            console.log(decryptedMessage)
+                            const editedMessage = decryptedMessage.protocolMessage?.editedMessage?.conversation ?? decryptedMessage.protocolMessage?.editedMessage?.imageMessage?.caption ?? ''
+                            await db.run('update messages set text_content=?, is_edited=? where message_id=?', [editedMessage, 1, targetMsgId])
+
+                        } catch (err) {
+                            console.log('❌ Failed to decrypt the edited message.')
+                        }
+                    }
+                } else {
+                    await processMessage(m, sock, false)
+                }
+            }
         }
     })
+
+    sock.ev.on('messages.update', async (updates) => {
+        for (const u of updates) {
+            // Deletion?? why it is not in the messages.delete event??
+            if (u.update.messageStubType === 1) {
+                const msgId = u.key.id
+                await db.run("update from messages set is_deleted = ? where message_id = ?", [1, msgId])
+            }
+        }
+    })
+
+    sock.ev.on('messages.delete', async (e) => {
+        // What is the purpose of this event?? When does this fire?
+        console.log('deletion')
+    })
+
+    // sock.ev.on('contacts.upsert', (contacts) => {
+    //     for (const contact of contacts) {
+    //         console.log(contact)
+    //         const name = contact.notify || contact.name;
+    //         if (name) {
+    //             contactNameStore.set(contact.id, name);
+    //         }
+    //     }
+    // });
 
     sock.ev.on('groups.update', async ([event]) => {
         if (event?.id) {
