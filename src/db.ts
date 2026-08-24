@@ -4,7 +4,8 @@ import { config } from './config.js'
 export const pool = new Pool({ connectionString: config.databaseUrl })
 
 export async function initDb(): Promise<void> {
-    await pool.query(`
+    try {
+        await pool.query(`
         CREATE TABLE IF NOT EXISTS groups (
             jid TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -35,7 +36,16 @@ export async function initDb(): Promise<void> {
             is_history BOOLEAN NOT NULL DEFAULT FALSE
         );
     `)
-    console.log('Postgres schema ready')
+        console.log('Postgres schema ready')
+    } catch (err) {
+        const e = err as { code?: string }
+        if (e.code === '28000') {
+            console.error(
+                'Postgres has no matching role. Use `docker compose up` (the app service), or copy .env.example to .env so DATABASE_URL points at Compose Postgres on localhost:5433.'
+            )
+        }
+        throw err
+    }
 }
 
 export async function upsertGroup(jid: string, name: string, tracked: boolean): Promise<void> {

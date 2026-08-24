@@ -16,7 +16,8 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
-import { createWriteStream, existsSync, mkdirSync } from 'fs'
+import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync } from 'fs'
+import { join } from 'path'
 import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
@@ -228,6 +229,13 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false) {
     }
 }
 
+function clearAuthContents(dir: string): void {
+    mkdirSync(dir, { recursive: true })
+    for (const name of readdirSync(dir)) {
+        rmSync(join(dir, name), { recursive: true, force: true })
+    }
+}
+
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir)
 
@@ -241,13 +249,20 @@ async function connectToWhatsApp() {
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
-        if (qr) qrcode.generate(qr, { small: true })
+        if (qr) {
+            console.log('Scan this WhatsApp QR in the phone app:')
+            qrcode.generate(qr, { small: true })
+        }
 
         if (connection === 'close') {
-            const shouldReconnect =
-                (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut
-            console.log('Connection closed, reconnecting:', shouldReconnect)
-            if (shouldReconnect) connectToWhatsApp()
+            const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
+            const loggedOut = statusCode === DisconnectReason.loggedOut
+            console.log('Connection closed, status:', statusCode, 'loggedOut:', loggedOut)
+            if (loggedOut) {
+                console.log('WhatsApp session is logged out. Clearing auth files so a new QR can be scanned.')
+                clearAuthContents(config.authDir)
+            }
+            connectToWhatsApp()
         } else if (connection === 'open') {
             console.log('✅ Connected to WhatsApp')
 
