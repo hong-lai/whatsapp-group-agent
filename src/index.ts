@@ -5,7 +5,11 @@ import makeWASocket, {
     type Contact,
     type GroupMetadata,
     type LIDMapping,
+    isHostedLidUser,
+    isHostedPnUser,
     isJidGroup,
+    isLidUser,
+    isPnUser,
     jidNormalizedUser,
     normalizeMessageContent,
     proto,
@@ -75,6 +79,11 @@ const pnToLid = new Map<string, string>()
 
 type NamedContact = Pick<Contact, 'id' | 'lid' | 'phoneNumber' | 'name' | 'notify' | 'verifiedName'>
 
+function isPersonJid(jid: string | undefined | null): jid is string {
+    if (!jid) return false
+    return Boolean(isPnUser(jid) || isLidUser(jid) || isHostedPnUser(jid) || isHostedLidUser(jid))
+}
+
 function usableDisplayName(value: string | undefined | null): string {
     const name = value?.trim() ?? ''
     if (!name) return ''
@@ -100,7 +109,7 @@ function linkedJids(...jids: Array<string | undefined | null>): string[] {
     const out: string[] = []
     const seen = new Set<string>()
     for (const jid of jids) {
-        if (!jid) continue
+        if (!isPersonJid(jid)) continue
         const key = jidNormalizedUser(jid)
         const extras = [key, lidToPn.get(key), pnToLid.get(key)]
         for (const extra of extras) {
@@ -155,11 +164,21 @@ async function rememberContacts(contacts: Array<Partial<NamedContact>> | undefin
         const name = contactDisplayName(contact)
         if (!name) continue
         const pn =
-            contact.phoneNumber ||
-            (contact.id?.includes('@s.whatsapp.net') ? contact.id : undefined)
-        const lid = contact.lid || (contact.id?.includes('@lid') ? contact.id : undefined)
+            isPersonJid(contact.phoneNumber)
+                ? contact.phoneNumber
+                : contact.id?.includes('@s.whatsapp.net')
+                  ? contact.id
+                  : undefined
+        const lid =
+            isPersonJid(contact.lid)
+                ? contact.lid
+                : contact.id?.includes('@lid')
+                  ? contact.id
+                  : undefined
         if (pn && lid) noteLidMapping(pn, lid)
-        for (const jid of linkedJids(contact.id, contact.lid, contact.phoneNumber)) {
+        const ids = linkedJids(contact.id, contact.lid, contact.phoneNumber).filter(isPersonJid)
+        if (ids.length === 0) continue
+        for (const jid of ids) {
             if (seen.has(jid)) continue
             seen.add(jid)
             cacheSenderName(jid, name)
@@ -176,6 +195,7 @@ async function rememberLidMappings(mappings: LIDMapping[] | undefined): Promise<
     for (const mapping of mappings) {
         if (!mapping.pn || !mapping.lid) continue
         const [pnJid, lidJid] = noteLidMapping(mapping.pn, mapping.lid)
+        if (!isPersonJid(pnJid) || !isPersonJid(lidJid)) continue
         const name = cachedSenderName(pnJid, lidJid)
         if (!name) continue
         for (const jid of [pnJid, lidJid]) {
@@ -197,9 +217,9 @@ async function rememberMessageSender(
     altSender: string | undefined,
     senderName: string
 ): Promise<void> {
-    await upsertSenders(
-        linkedJids(senderId, altSender).map((jid) => ({ jid, displayName: senderName }))
-    )
+    const jids = linkedJids(senderId, altSender).filter(isPersonJid)
+    if (jids.length === 0) return
+    await upsertSenders(jids.map((jid) => ({ jid, displayName: senderName })))
 }
 
 function isRateOverlimit(err: unknown): boolean {
@@ -300,6 +320,37 @@ function albumParentIdOf(message: proto.IMessage | null | undefined): string | n
         return null
     }
     return parentId
+}
+
+function contextInfoOf(content: proto.IMessage | null | undefined): proto.IContextInfo | undefined {
+    if (!content) return undefined
+    return (
+        content.extendedTextMessage?.contextInfo ||
+        content.imageMessage?.contextInfo ||
+        content.videoMessage?.contextInfo ||
+        content.documentMessage?.contextInfo ||
+        content.audioMessage?.contextInfo ||
+        content.stickerMessage?.contextInfo ||
+        content.buttonsMessage?.contextInfo ||
+        content.templateMessage?.contextInfo ||
+        content.listMessage?.contextInfo ||
+        content.interactiveMessage?.contextInfo ||
+        undefined
+    )
+}
+
+function mentionedJidsOf(content: proto.IMessage | null | undefined): string[] {
+    const ctx = contextInfoOf(content)
+    const mentioned = (ctx?.mentionedJid || []).filter(isPersonJid).map((jid) => jidNormalizedUser(jid))
+    const quoted = ctx?.quotedMessage ? mentionedJidsOf(ctx.quotedMessage) : []
+    const seen = new Set<string>()
+    const out: string[] = []
+    for (const jid of [...mentioned, ...quoted]) {
+        if (seen.has(jid)) continue
+        seen.add(jid)
+        out.push(jid)
+    }
+    return out
 }
 
 async function storeMediaFile(
@@ -410,13 +461,15 @@ async function processMessage(
     const messageId = m.key.id
     const content = normalizeMessageContent(m.message) || m.message
     const messageType = getContentType(content) || 'unknown'
+    const me = ownUser(sock)
     const rawSender = m.key.fromMe
-        ? sock.user?.id
+        ? me?.id || me?.lid
         : (m.key.participant || m.participant)
 
-    const senderId = rawSender ? jidNormalizedUser(rawSender) : jid
-    const altSender = m.key.participantAlt ? jidNormalizedUser(m.key.participantAlt) : undefined
-    const me = ownUser(sock)
+    const senderId = isPersonJid(rawSender) ? jidNormalizedUser(rawSender) : ''
+    const altSender = isPersonJid(m.key.participantAlt)
+        ? jidNormalizedUser(m.key.participantAlt)
+        : undefined
     const senderName =
         cachedSenderName(senderId, altSender, m.key.fromMe ? me?.lid : undefined) ||
         usableDisplayName(m.pushName) ||
@@ -424,8 +477,8 @@ async function processMessage(
         nameFromGroup(groupMetadata, senderId, altSender) ||
         ''
     if (senderName) {
-        for (const jid of linkedJids(senderId, altSender)) {
-            cacheSenderName(jid, senderName)
+        for (const personJid of linkedJids(senderId, altSender)) {
+            cacheSenderName(personJid, senderName)
         }
     }
     const timestamp = unixSeconds(m.messageTimestamp)
@@ -458,6 +511,7 @@ async function processMessage(
         const emoji = reaction.text?.trim() || ''
         const reactedAt = secondsFromMillis(reaction.senderTimestampMs, timestamp)
         try {
+            if (!senderId) return 'ignored'
             await upsertGroup(jid, groupName, true)
             await rememberMessageSender(senderId, altSender, senderName)
             if (emoji) {
@@ -511,8 +565,9 @@ async function processMessage(
     }
 
     const textContent = textFromMessage(content)
-    const replyToId = content.extendedTextMessage?.contextInfo?.stanzaId || null
-    const quotedMessage =
+    const ctx = contextInfoOf(content)
+    const replyToId = ctx?.stanzaId || content.extendedTextMessage?.contextInfo?.stanzaId || null
+    const quotedMessage = textFromMessage(ctx?.quotedMessage) ||
         content.extendedTextMessage?.contextInfo?.quotedMessage?.conversation ||
         content.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption ||
         null
@@ -522,18 +577,30 @@ async function processMessage(
         !albumParentId &&
         (messageType === 'imageMessage' || messageType === 'videoMessage')
     ) {
-        albumParentId = await findRecentAlbumParent(jid, senderId, timestamp)
+        albumParentId = await findRecentAlbumParent(jid, senderId || null, timestamp)
     }
 
     if (!messageId) return 'ignored'
 
     try {
         await upsertGroup(jid, groupName, true)
-        await rememberMessageSender(senderId, altSender, senderName)
+        if (senderId) await rememberMessageSender(senderId, altSender, senderName)
+        const mentioned = mentionedJidsOf(content)
+        if (mentioned.length > 0) {
+            await upsertSenders(
+                mentioned.map((personJid) => ({
+                    jid: personJid,
+                    displayName:
+                        cachedSenderName(personJid) ||
+                        nameFromGroup(groupMetadata, personJid) ||
+                        '',
+                }))
+            )
+        }
         await insertMessage({
             messageId,
             groupJid: jid,
-            senderJid: senderId,
+            senderJid: senderId || null,
             messageSecret,
             messageType,
             textContent,
@@ -550,7 +617,7 @@ async function processMessage(
             await attachNearbyAlbumMedia({
                 parentId: messageId,
                 groupJid: jid,
-                senderJid: senderId,
+                senderJid: senderId || null,
                 timestamp,
             })
         }

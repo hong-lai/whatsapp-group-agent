@@ -74,6 +74,26 @@ export async function initDb(): Promise<void> {
             log.info({ count: placeholders.rowCount }, 'db.placeholder_sender_names_cleared')
         }
 
+        const groupSenders = await pool.query<{ jid: string }>(
+            `SELECT jid FROM senders
+             WHERE jid LIKE '%@g.us'
+                OR jid LIKE '%@broadcast'
+                OR jid LIKE '%@newsletter'`
+        )
+        if (groupSenders.rowCount) {
+            const groupJids = groupSenders.rows.map((row) => row.jid)
+            await pool.query(
+                `DELETE FROM reactions WHERE sender_jid = ANY($1::text[])`,
+                [groupJids]
+            )
+            await pool.query(
+                `UPDATE messages SET sender_jid = NULL WHERE sender_jid = ANY($1::text[])`,
+                [groupJids]
+            )
+            await pool.query(`DELETE FROM senders WHERE jid = ANY($1::text[])`, [groupJids])
+            log.info({ count: groupJids.length }, 'db.group_senders_removed')
+        }
+
         // Reactions used to be stored as empty message rows that carried neither
         // the emoji nor the message they belonged to, so there is nothing to migrate.
         const legacy = await pool.query(
@@ -224,6 +244,17 @@ export async function findRecentAlbumParent(
     return result.rows[0]?.message_id ?? null
 }
 
+function isPersonJid(jid: string): boolean {
+    const server = jid.split('@')[1] || ''
+    return (
+        server === 's.whatsapp.net' ||
+        server === 'lid' ||
+        server === 'c.us' ||
+        server === 'hosted' ||
+        server === 'hosted.lid'
+    )
+}
+
 export async function upsertGroup(jid: string, name: string, tracked: boolean): Promise<void> {
     await pool.query(
         `INSERT INTO groups (jid, name, tracked, deleted_at, updated_at)
@@ -247,7 +278,8 @@ export async function markGroupDeleted(jid: string): Promise<void> {
 export async function upsertSenders(
     entries: Array<{ jid: string; displayName: string }>
 ): Promise<void> {
-    if (entries.length === 0) return
+    const people = entries.filter((entry) => isPersonJid(entry.jid))
+    if (people.length === 0) return
     await pool.query(
         `INSERT INTO senders (jid, display_name, updated_at)
          SELECT jid, NULLIF(name, ''), NOW()
@@ -255,7 +287,7 @@ export async function upsertSenders(
          ON CONFLICT (jid) DO UPDATE SET
             display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), senders.display_name),
             updated_at = NOW()`,
-        [entries.map((entry) => entry.jid), entries.map((entry) => entry.displayName)]
+        [people.map((entry) => entry.jid), people.map((entry) => entry.displayName)]
     )
 }
 
@@ -590,6 +622,7 @@ export async function listDashboardGroups(
         [fromTimestamp, toTimestamp, groupJids]
     )
 
+    const withMentions = await resolveMentionedText(result.rows.map((row) => row.latest_text))
     return result.rows.map((row) => ({
         jid: row.jid,
         name: row.name,
@@ -598,7 +631,7 @@ export async function listDashboardGroups(
         messageCount: row.message_count,
         senderCount: row.sender_count,
         latestTimestamp: row.latest_timestamp === null ? null : Number(row.latest_timestamp),
-        latestText: row.latest_text,
+        latestText: withMentions(row.latest_text),
     }))
 }
 
@@ -637,6 +670,51 @@ type DashboardMessageRow = {
     is_deleted: boolean
     is_history: boolean
     has_media: boolean
+}
+
+const MENTION_RE = /@(\d{8,})/g
+
+function mentionUsersIn(...texts: Array<string | null | undefined>): string[] {
+    const users = new Set<string>()
+    for (const text of texts) {
+        if (!text) continue
+        for (const match of text.matchAll(MENTION_RE)) {
+            if (match[1]) users.add(match[1])
+        }
+    }
+    return [...users]
+}
+
+function applyMentionNames(text: string | null, names: Map<string, string>): string | null {
+    if (!text) return text
+    return text.replace(MENTION_RE, (full, user: string) => {
+        const name = names.get(user)
+        return name ? `@${name}` : full
+    })
+}
+
+async function loadMentionNames(users: string[]): Promise<Map<string, string>> {
+    const names = new Map<string, string>()
+    if (users.length === 0) return names
+    const result = await pool.query<{ user_part: string; display_name: string }>(
+        `SELECT split_part(jid, '@', 1) AS user_part, display_name
+         FROM senders
+         WHERE split_part(jid, '@', 1) = ANY($1::text[])
+           AND NULLIF(btrim(display_name), '') IS NOT NULL
+           AND display_name !~ '^[0-9]{8,}$'`,
+        [users]
+    )
+    for (const row of result.rows) {
+        if (!names.has(row.user_part)) names.set(row.user_part, row.display_name)
+    }
+    return names
+}
+
+async function resolveMentionedText(
+    texts: Array<string | null | undefined>
+): Promise<(text: string | null) => string | null> {
+    const names = await loadMentionNames(mentionUsersIn(...texts))
+    return (text) => applyMentionNames(text, names)
 }
 
 function toDashboardMessage(
@@ -757,15 +835,30 @@ export async function listDashboardMessages(
         ...[...childrenByParent.values()].flat().map((row) => row.message_id),
     ]
     const reactions = await loadReactions(reactionIds)
+    const withMentions = await resolveMentionedText([
+        ...pageRows.flatMap((row) => [row.text_content, row.quoted_message]),
+        ...[...childrenByParent.values()].flat().flatMap((row) => [row.text_content, row.quoted_message]),
+    ])
 
     return {
         messages: pageRows.map((row) => {
             const childRows = childrenByParent.get(row.message_id) ?? []
             return toDashboardMessage(
-                row,
+                {
+                    ...row,
+                    text_content: withMentions(row.text_content),
+                    quoted_message: withMentions(row.quoted_message),
+                },
                 reactions.get(row.message_id) ?? [],
                 childRows.map((child) =>
-                    toDashboardMessage(child, reactions.get(child.message_id) ?? [])
+                    toDashboardMessage(
+                        {
+                            ...child,
+                            text_content: withMentions(child.text_content),
+                            quoted_message: withMentions(child.quoted_message),
+                        },
+                        reactions.get(child.message_id) ?? []
+                    )
                 )
             )
         }),
@@ -866,6 +959,7 @@ export async function listAlbumMedia(
     const hasMore = result.rows.length > limit
     const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows
     const last = pageRows.at(-1)
+    const withMentions = await resolveMentionedText(pageRows.map((row) => row.text_content))
     return {
         items: pageRows.map((row) => ({
             messageId: row.message_id,
@@ -873,7 +967,7 @@ export async function listAlbumMedia(
             groupName: row.group_name,
             senderName: row.sender_name,
             messageType: row.message_type,
-            textContent: row.text_content,
+            textContent: withMentions(row.text_content),
             timestamp: Number(row.timestamp),
         })),
         nextCursor:
@@ -979,13 +1073,14 @@ export async function getAlbumMediaForDownload(
         [messageIds, fromTimestamp, toTimestamp, messageTypes, allowedJids, scopedJid]
     )
 
+    const withMentions = await resolveMentionedText(result.rows.map((row) => row.text_content))
     return result.rows.map((row) => ({
         messageId: row.message_id,
         groupJid: row.group_jid,
         groupName: row.group_name,
         senderName: row.sender_name,
         messageType: row.message_type,
-        textContent: row.text_content,
+        textContent: withMentions(row.text_content),
         timestamp: Number(row.timestamp),
         mediaPath: row.media_path,
     }))
