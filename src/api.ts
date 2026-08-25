@@ -5,6 +5,7 @@ import { stat } from 'node:fs/promises'
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
+import { log } from './log.js'
 import {
     countAlbumMedia,
     getAlbumMediaForDownload,
@@ -350,9 +351,11 @@ export function createApiApp() {
             response.setHeader('Cache-Control', 'no-store')
 
             const archive = new ZipArchive({ zlib: { level: 6 } })
-            archive.on('warning', (warning: Error) => console.warn('Album archive warning:', warning))
+            archive.on('warning', (warning: Error) => {
+                log.warn({ err: warning, archiveName }, 'album.archive_warning')
+            })
             archive.on('error', (error: Error) => {
-                console.error('Album archive error:', error)
+                log.error({ err: error, archiveName }, 'album.archive_failed')
                 response.destroy(error)
             })
             request.on('aborted', () => archive.abort())
@@ -402,11 +405,15 @@ export function createApiApp() {
     }
 
     app.use((error: unknown, request: Request, response: Response, next: NextFunction) => {
-        void request
         void next
         const message = error instanceof Error ? error.message : 'Unexpected error'
         const status = message.startsWith('Invalid') || message.includes('date must') ? 400 : 500
-        if (status === 500) console.error('Dashboard API error:', error)
+        if (status === 500) {
+            log.error(
+                { err: error, method: request.method, path: request.path },
+                'api.error'
+            )
+        }
         response.status(status).json({ error: status === 500 ? 'Internal server error' : message })
     })
 
@@ -415,7 +422,7 @@ export function createApiApp() {
 
 export function startApi(): void {
     createApiApp().listen(config.webPort, '0.0.0.0', () => {
-        console.log(`Dashboard available at http://localhost:${config.webPort}`)
+        log.info({ port: config.webPort }, 'dashboard.listening')
     })
 }
 

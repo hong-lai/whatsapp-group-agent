@@ -33,6 +33,14 @@ function envInt(name: string, fallback: number): number {
     return Number.isFinite(n) ? n : fallback
 }
 
+export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
+
+function envLogLevel(name: string, fallback: LogLevel): LogLevel {
+    const raw = (process.env[name] || '').toLowerCase()
+    if (raw === 'error' || raw === 'warn' || raw === 'info' || raw === 'debug') return raw
+    return fallback
+}
+
 const GROUP_PATTERN_SOURCE = env('GROUP_PATTERN', '富山邨|錦田')
 
 export const config = {
@@ -52,6 +60,7 @@ export const config = {
     historyDelayMaxMs: envInt('HISTORY_DELAY_MAX_MS', 2000),
     mediaDelayMinMs: envInt('MEDIA_DELAY_MIN_MS', 1500),
     mediaDelayMaxMs: envInt('MEDIA_DELAY_MAX_MS', 4000),
+    logLevel: envLogLevel('LOG_LEVEL', 'info'),
 }
 
 export function matchesGroupPattern(name: string | undefined | null): boolean {

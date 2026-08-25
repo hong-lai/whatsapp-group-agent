@@ -1,5 +1,6 @@
 import { Pool } from 'pg'
 import { config, matchesGroupPattern } from './config.js'
+import { log } from './log.js'
 
 export const pool = new Pool({ connectionString: config.databaseUrl })
 
@@ -61,14 +62,19 @@ export async function initDb(): Promise<void> {
             `DELETE FROM messages WHERE message_type = 'reactionMessage'`
         )
         if (legacy.rowCount) {
-            console.log(`Removed ${legacy.rowCount} legacy reaction rows from messages`)
+            log.info({ count: legacy.rowCount }, 'db.legacy_reactions_removed')
         }
-        console.log('Postgres schema ready')
+        log.info('db.schema_ready')
     } catch (err) {
         const e = err as { code?: string }
         if (e.code === '28000') {
-            console.error(
-                'Postgres has no matching role. Use `docker compose up` (the app service), or copy .env.example to .env so DATABASE_URL points at Compose Postgres on localhost:5433.'
+            log.error(
+                {
+                    err,
+                    code: e.code,
+                    hint: 'Use docker compose up, or set DATABASE_URL to Compose Postgres on localhost:5433',
+                },
+                'db.role_missing'
             )
         }
         throw err
