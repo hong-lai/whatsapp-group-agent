@@ -83,14 +83,14 @@ function addDays(date: string, days: number): string {
 }
 
 function initials(name: string): string {
-    return (
-        name
-            .trim()
-            .split(/\s+/)
-            .slice(0, 2)
-            .map((part) => part[0]?.toUpperCase())
-            .join('') || '?'
-    )
+    const letters = name
+        .trim()
+        .split(/\s+/)
+        .filter((part) => /\p{L}/u.test(part))
+        .slice(0, 2)
+        .map((part) => part.match(/\p{L}/u)?.[0]?.toUpperCase())
+        .filter((letter): letter is string => Boolean(letter))
+    return letters.join('') || '?'
 }
 
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
