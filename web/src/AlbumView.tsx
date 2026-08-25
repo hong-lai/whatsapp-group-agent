@@ -67,7 +67,7 @@ const emptyCounts: Record<MediaCategory, number> = {
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
     timeZone: 'Asia/Hong_Kong',
     dateStyle: 'medium',
-    timeStyle: 'short',
+    timeStyle: 'medium',
 })
 
 function albumUrl(

@@ -60,7 +60,7 @@ function initialMediaCategories(params: URLSearchParams): MediaCategory[] {
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
     timeZone: 'Asia/Hong_Kong',
     dateStyle: 'medium',
-    timeStyle: 'short',
+    timeStyle: 'medium',
 })
 
 const shortHkDate = new Intl.DateTimeFormat('en-HK', {
