@@ -78,6 +78,8 @@ export function createCatchup(sock: WASocket) {
     const pages = new Map<string, number>()
     const jobs = new Map<string, CatchupJob>()
     const awaitingOnDemand = new Set<string>()
+    const pendingPdoOrder: string[] = []
+    const backfillFinished = new Set<string>()
     const pdoAttempts = new Map<string, number>()
     const chatHeads = new Map<string, { key: WAMessageKey; timestamp: number }>()
     let trackedJids: string[] = []
@@ -95,6 +97,19 @@ export function createCatchup(sock: WASocket) {
     async function isTrackedGroup(groupJid: string): Promise<boolean> {
         const cached = await getGroupMetadata(groupJid)
         return cached ? matchesGroupPattern(cached.subject) : false
+    }
+
+    function finishBackfill(groupJid: string, why: string): void {
+        awaitingOnDemand.delete(groupJid)
+        const index = pendingPdoOrder.indexOf(groupJid)
+        if (index >= 0) pendingPdoOrder.splice(index, 1)
+        backfillFinished.add(groupJid)
+        log.info({ groupJid, why }, 'catchup.backfill_complete')
+    }
+
+    function rememberPendingPdo(groupJid: string): void {
+        if (!awaitingOnDemand.has(groupJid)) pendingPdoOrder.push(groupJid)
+        awaitingOnDemand.add(groupJid)
     }
 
     function historyKeyFromStored(groupJid: string, stored: LatestGroupMessage): WAMessageKey {
@@ -141,8 +156,9 @@ export function createCatchup(sock: WASocket) {
             return
         }
         for (const groupJid of trackedJids) {
-            if (jobs.has(groupJid)) continue
-            if (awaitingOnDemand.has(groupJid)) awaitingOnDemand.delete(groupJid)
+            if (backfillFinished.has(groupJid) || jobs.has(groupJid) || awaitingOnDemand.has(groupJid)) {
+                continue
+            }
             const attempts = pdoAttempts.get(groupJid) ?? 0
             if (attempts >= config.catchupBackfillMaxPages) continue
             const page = pages.get(groupJid) ?? 0
@@ -165,17 +181,9 @@ export function createCatchup(sock: WASocket) {
             }
             if (!oldest?.messageId) continue
             if (oldest.timestamp <= backfillUntil) {
-                log.info(
-                    {
-                        groupJid,
-                        oldestTimestamp: oldest.timestamp,
-                        latestTimestamp: latest?.timestamp ?? null,
-                        backfillUntil,
-                        pages: page,
-                    },
-                    latest && latest.timestamp < backfillUntil
-                        ? 'catchup.backfill_inactive'
-                        : 'catchup.backfill_complete'
+                finishBackfill(
+                    groupJid,
+                    latest && latest.timestamp < backfillUntil ? 'inactive' : 'already-covers-window'
                 )
                 continue
             }
@@ -207,7 +215,7 @@ export function createCatchup(sock: WASocket) {
 
             await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
             if (isBackfillReason(reason)) {
-                awaitingOnDemand.add(groupJid)
+                rememberPendingPdo(groupJid)
                 if (reason === 'tracked-backfill') {
                     pdoAttempts.set(groupJid, (pdoAttempts.get(groupJid) ?? 0) + 1)
                 }
@@ -247,9 +255,6 @@ export function createCatchup(sock: WASocket) {
         } finally {
             draining = false
             if (!stopped && allowingRequests && jobs.size > 0) void drain()
-            else if (!stopped && awaitingOnDemand.size > 0) {
-                scheduleSettle('awaiting-on-demand')
-            }
         }
     }
 
@@ -283,7 +288,15 @@ export function createCatchup(sock: WASocket) {
         syncType: unknown,
         latestBefore: Map<string, number | undefined>
     ): Promise<void> {
-        if (stopped || !isMessageHistorySync(syncType) || messages.length === 0) return
+        if (stopped || !isMessageHistorySync(syncType)) return
+        const onDemand =
+            historySyncNumber(syncType) === proto.HistorySync.HistorySyncType.ON_DEMAND
+        if (onDemand && messages.length === 0) {
+            const groupJid = pendingPdoOrder[0]
+            if (groupJid) finishBackfill(groupJid, 'empty-on-demand')
+            return
+        }
+        if (messages.length === 0) return
 
         const byGroup = new Map<string, WAMessage[]>()
         for (const message of messages) {
@@ -295,10 +308,10 @@ export function createCatchup(sock: WASocket) {
         }
 
         for (const [groupJid, list] of byGroup) {
-            const onDemand =
-                historySyncNumber(syncType) === proto.HistorySync.HistorySyncType.ON_DEMAND
             if (onDemand) {
                 awaitingOnDemand.delete(groupJid)
+                const pendingIndex = pendingPdoOrder.indexOf(groupJid)
+                if (pendingIndex >= 0) pendingPdoOrder.splice(pendingIndex, 1)
                 pages.set(groupJid, (pages.get(groupJid) ?? 0) + 1)
             }
             if (!(await isTrackedGroup(groupJid))) continue
@@ -312,18 +325,7 @@ export function createCatchup(sock: WASocket) {
                 const reachedWindow = oldestTs <= backfillUntil
                 const lastPage = list.length < config.catchupPageSize
                 if (reachedWindow || lastPage) {
-                    log.info(
-                        {
-                            groupJid,
-                            oldestTimestamp: oldestTs,
-                            backfillUntil,
-                            pageSize: list.length,
-                            pages: pages.get(groupJid) ?? 0,
-                            reachedWindow,
-                            lastPage,
-                        },
-                        reachedWindow ? 'catchup.backfill_complete' : 'catchup.backfill_ended_early'
-                    )
+                    finishBackfill(groupJid, reachedWindow ? 'reached-window' : 'short-page')
                     continue
                 }
                 enqueue({
@@ -365,7 +367,14 @@ export function createCatchup(sock: WASocket) {
         },
         noteHistoryChunk(syncType?: unknown) {
             if (isBulkHistorySync(syncType)) seenBulkHistory = true
-            scheduleSettle('history.chunk')
+            const n = historySyncNumber(syncType)
+            if (
+                n === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
+                n === proto.HistorySync.HistorySyncType.FULL ||
+                n === proto.HistorySync.HistorySyncType.RECENT
+            ) {
+                scheduleSettle('history.chunk')
+            }
         },
         noteHistoryStatus(syncType: unknown, status?: string) {
             if (!shouldSettleOnSyncStatus(syncType)) return
