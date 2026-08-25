@@ -184,8 +184,14 @@ function mediaUrl(messageId: string): string {
     return `/api/media/${encodeURIComponent(messageId)}`
 }
 
-function ConversationAlbum({ items }: { items: Message[] }) {
-    const visible = items.filter((item) => !item.isDeleted && item.hasMedia)
+function ConversationAlbum({
+    items,
+    includeDeleted = false,
+}: {
+    items: Message[]
+    includeDeleted?: boolean
+}) {
+    const visible = items.filter((item) => (includeDeleted || !item.isDeleted) && item.hasMedia)
     const preview = visible.slice(0, 4)
     const extra = visible.length - preview.length
     const [openIndex, setOpenIndex] = useState<number | null>(null)
@@ -312,27 +318,77 @@ function ConversationAlbum({ items }: { items: Message[] }) {
     )
 }
 
-function MessageBody({ message }: { message: Message }) {
+function hasStoredContent(message: Message): boolean {
+    if (message.textContent || message.hasMedia || message.quotedMessage) return true
+    return (message.albumItems ?? []).some((item) => item.hasMedia || item.textContent)
+}
+
+function MessageBody({ message, revealed }: { message: Message; revealed: boolean }) {
     const albumItems = message.albumItems ?? []
     const caption =
         message.textContent || albumItems.find((item) => item.textContent)?.textContent
 
-    if (message.isDeleted) {
+    if (message.isDeleted && !revealed) {
         return <p className="deleted-copy">This message was deleted.</p>
     }
     if (message.messageType === 'albumMessage') {
         return (
             <>
                 {caption && <p>{caption}</p>}
-                <ConversationAlbum items={albumItems} />
+                <ConversationAlbum items={albumItems} includeDeleted={revealed} />
             </>
         )
     }
     return (
         <>
-            <p>{caption || (message.hasMedia ? null : 'No text content')}</p>
+            {caption ? <p>{caption}</p> : message.hasMedia ? null : <p>No text content</p>}
             <MediaPreview message={message} />
         </>
+    )
+}
+
+function MessageCard({ message }: { message: Message }) {
+    const [revealed, setRevealed] = useState(false)
+    const canReveal = message.isDeleted && hasStoredContent(message)
+
+    return (
+        <article className={`message-card ${message.isDeleted ? 'deleted' : ''} ${revealed ? 'revealed' : ''}`}>
+            <span className="sender-avatar">
+                {initials(message.senderName || message.senderJid || 'Unknown')}
+            </span>
+            <div className="message-content">
+                <header>
+                    <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
+                    <time>{hkDateTime.format(message.timestamp * 1000)}</time>
+                </header>
+                <div className="badges">
+                    {message.isEdited && <span>Edited</span>}
+                    {message.isHistory && <span>History</span>}
+                    {message.isDeleted && <span>Deleted</span>}
+                    <span>
+                        {message.messageType === 'albumMessage'
+                            ? albumSummary(message.albumItems ?? [])
+                            : message.messageType.replace(/Message$/, '')}
+                    </span>
+                </div>
+                {message.quotedMessage && (!message.isDeleted || revealed) && (
+                    <blockquote>{message.quotedMessage}</blockquote>
+                )}
+                <MessageBody message={message} revealed={revealed} />
+                {canReveal && (
+                    <button
+                        type="button"
+                        className="reveal-original"
+                        onClick={() => setRevealed((current) => !current)}
+                    >
+                        {revealed ? 'Hide original' : 'Reveal original'}
+                    </button>
+                )}
+                {(!message.isDeleted || revealed) && (
+                    <ReactionRow reactions={message.reactions ?? []} />
+                )}
+            </div>
+        </article>
     )
 }
 
@@ -722,34 +778,7 @@ export default function App() {
                                         </div>
                                     )}
                                     {messages.map((message) => (
-                                        <article className={`message-card ${message.isDeleted ? 'deleted' : ''}`} key={message.messageId}>
-                                            <span className="sender-avatar">
-                                                {initials(message.senderName || message.senderJid || 'Unknown')}
-                                            </span>
-                                            <div className="message-content">
-                                                <header>
-                                                    <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
-                                                    <time>{hkDateTime.format(message.timestamp * 1000)}</time>
-                                                </header>
-                                                <div className="badges">
-                                                    {message.isEdited && <span>Edited</span>}
-                                                    {message.isHistory && <span>History</span>}
-                                                    {message.isDeleted && <span>Deleted</span>}
-                                                    <span>
-                                                        {message.messageType === 'albumMessage'
-                                                            ? albumSummary(message.albumItems ?? [])
-                                                            : message.messageType.replace(/Message$/, '')}
-                                                    </span>
-                                                </div>
-                                                {message.quotedMessage && (
-                                                    <blockquote>{message.quotedMessage}</blockquote>
-                                                )}
-                                                <MessageBody message={message} />
-                                                {!message.isDeleted && (
-                                                    <ReactionRow reactions={message.reactions ?? []} />
-                                                )}
-                                            </div>
-                                        </article>
+                                        <MessageCard message={message} key={message.messageId} />
                                     ))}
                                     {nextCursor && (
                                         <button className="load-more" onClick={loadMore} disabled={loadingMore}>

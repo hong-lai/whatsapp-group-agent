@@ -634,17 +634,7 @@ h1 {
     font-size: 0.72rem;
 }
 
-.album-actions button {
-    padding: 8px 12px;
-    border: 1px solid #d7e3de;
-    border-radius: 9px;
-    color: var(--green-dark);
-    background: white;
-    font-size: 0.7rem;
-    font-weight: 700;
-}
-
-.album-actions button:disabled {
+.album-actions .segmented-control button:disabled {
     cursor: default;
     opacity: 0.55;
 }
@@ -1378,6 +1368,22 @@ blockquote {
 .message-content p.deleted-copy {
     color: #8a9995;
     font-style: italic;
+}
+
+.reveal-original {
+    margin-top: 8px;
+    padding: 5px 9px;
+    border: 1px solid #d7e3de;
+    border-radius: 8px;
+    color: var(--green-dark);
+    background: white;
+    font-size: 0.68rem;
+    font-weight: 700;
+}
+
+.message-card.revealed .message-content {
+    border-style: solid;
+    background: #f3f8f5;
 }
 
 .media-frame {

@@ -359,13 +359,22 @@ export default function AlbumView({
                     )}
                 </div>
                 <div className="album-actions">
-                    <button
-                        type="button"
-                        onClick={selectAllVisible}
-                        disabled={items.length === 0 || allVisibleSelected}
-                    >
-                        {allVisibleSelected ? 'All selected' : 'Select all'}
-                    </button>
+                    <div className="segmented-control" role="group" aria-label="Selection">
+                        <button
+                            type="button"
+                            onClick={selectAllVisible}
+                            disabled={items.length === 0 || allVisibleSelected}
+                        >
+                            {allVisibleSelected ? 'All selected' : 'Select all'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setSelected(new Set())}
+                            disabled={selected.size === 0}
+                        >
+                            Clear
+                        </button>
+                    </div>
                 </div>
             </header>
 
@@ -446,7 +455,6 @@ export default function AlbumView({
                             <small>across loaded pages</small>
                         )}
                     </div>
-                    <button onClick={() => setSelected(new Set())}>Clear</button>
                     <button className="download-button" onClick={downloadZip} disabled={downloading}>
                         {downloading ? 'Preparing ZIP…' : 'Download ZIP'}
                     </button>
