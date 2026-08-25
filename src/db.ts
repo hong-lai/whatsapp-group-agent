@@ -258,6 +258,7 @@ export type MessageRow = {
     quotedMessage: string | null
     albumParentId: string | null
     timestamp: number
+    isEdited: boolean
     isHistory: boolean
 }
 
@@ -267,8 +268,9 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             message_id, group_jid, sender_jid, message_secret, message_type,
             text_content, media_path, reply_to_id, quoted_message, album_parent_id,
             timestamp, is_edited, is_deleted, is_history
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11), FALSE, FALSE, $12)
-         ON CONFLICT (message_id) DO NOTHING`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11), $12, FALSE, $13)
+         ON CONFLICT (message_id) DO UPDATE SET
+            message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret)`,
         [
             row.messageId,
             row.groupJid,
@@ -281,6 +283,7 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.quotedMessage,
             row.albumParentId,
             row.timestamp,
+            row.isEdited,
             row.isHistory,
         ]
     )
@@ -423,11 +426,49 @@ export async function getMessageSecret(messageId: string): Promise<string | unde
     return result.rows[0]?.message_secret ?? undefined
 }
 
-export async function markMessageEdited(messageId: string, textContent: string): Promise<void> {
-    await pool.query(
+export type MessageEditTarget = {
+    messageId: string
+    senderJid: string | null
+    messageSecret: string | null
+}
+
+export async function getMessageEditTarget(messageId: string): Promise<MessageEditTarget | undefined> {
+    const result = await pool.query<{
+        sender_jid: string | null
+        message_secret: string | null
+    }>(
+        'SELECT sender_jid, message_secret FROM messages WHERE message_id = $1',
+        [messageId]
+    )
+    const row = result.rows[0]
+    if (!row) return undefined
+    return {
+        messageId,
+        senderJid: row.sender_jid,
+        messageSecret: row.message_secret,
+    }
+}
+
+export async function fillMessageSecretIfMissing(
+    messageId: string,
+    messageSecret: string
+): Promise<boolean> {
+    const result = await pool.query(
+        `UPDATE messages
+         SET message_secret = $1
+         WHERE message_id = $2
+           AND (message_secret IS NULL OR message_secret = '')`,
+        [messageSecret, messageId]
+    )
+    return (result.rowCount ?? 0) > 0
+}
+
+export async function markMessageEdited(messageId: string, textContent: string): Promise<boolean> {
+    const result = await pool.query(
         'UPDATE messages SET text_content = $1, is_edited = TRUE WHERE message_id = $2',
         [textContent, messageId]
     )
+    return (result.rowCount ?? 0) > 0
 }
 
 export async function markMessagesDeleted(messageIds: string[]): Promise<void> {

@@ -1,18 +1,16 @@
 import makeWASocket, {
-    aesDecryptGCM,
     DisconnectReason,
     downloadMediaMessage,
     getContentType,
     type GroupMetadata,
-    hmacSign,
     isJidGroup,
     jidDecode,
     jidNormalizedUser,
+    normalizeMessageContent,
     proto,
     useMultiFileAuthState,
     type WAMessage,
     type WASocket,
-    type WAProto
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
@@ -33,13 +31,11 @@ import {
 } from './cache.js'
 import {
     getLatestGroupMessage,
-    getMessageSecret,
     getStoredMessageContent,
     hasMessage,
     initDb,
     insertMessage,
     markGroupDeleted,
-    markMessageEdited,
     markMessagesDeleted,
     removeReaction,
     attachNearbyAlbumMedia,
@@ -48,6 +44,17 @@ import {
     upsertReaction,
     upsertSender,
 } from './db.js'
+import {
+    applyEditUpdate,
+    applyIncomingEdit,
+    applyPlaintextEdit,
+    extractMessageSecret,
+    flushPendingEdits,
+    isEditEnvelope,
+    isEditedWrapper,
+    rememberMessageSecret,
+    textFromMessage,
+} from './edits.js'
 import { waitHistoryRead, waitMediaDownload } from './rateLimit.js'
 
 const fileTypes: Record<string, string> = {
@@ -96,25 +103,6 @@ async function refreshGroup(sock: WASocket, jid: string): Promise<GroupMetadata 
     }
 }
 
-const decryptEditedMessage = (
-    { encPayload, encIv }: { encPayload?: Uint8Array | null; encIv?: Uint8Array | null },
-    { secret, id, sender }: { secret: Uint8Array; id: string; sender: string }
-) => {
-    const toBinary = (txt: string) => Buffer.from(txt)
-    const senderBuf = toBinary(sender)
-    const sign = Buffer.concat([
-        toBinary(id),
-        senderBuf,
-        senderBuf,
-        toBinary('Message Edit'),
-        new Uint8Array([1]),
-    ])
-    const key = hmacSign(secret, new Uint8Array(32))
-    const decKey = hmacSign(sign, key)
-    const decrypted = aesDecryptGCM(encPayload as Uint8Array, decKey, encIv as Uint8Array, new Uint8Array())
-    return proto.Message.decode(decrypted)
-}
-
 function secondsFromMillis(value: unknown, fallback: number): number {
     const millis = Number(value)
     return Number.isFinite(millis) && millis > 0 ? Math.floor(millis / 1000) : fallback
@@ -140,8 +128,13 @@ async function resolveGroupMetadata(jid: string, sock: WASocket): Promise<GroupM
     return refreshGroup(sock, jid)
 }
 
-async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): Promise<'ignored' | 'saved' | 'reaction' | 'error'> {
+async function processMessage(
+    m: WAMessage,
+    sock: WASocket,
+    isHistory = false
+): Promise<'ignored' | 'saved' | 'reaction' | 'error' | 'edited'> {
     if (!m.message || !m.key.remoteJid) return 'ignored'
+    if (isEditEnvelope(m.message)) return 'ignored'
 
     const jid = m.key.remoteJid
     if (!isJidGroup(jid)) return 'ignored'
@@ -153,7 +146,8 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
     if (!matchesGroupPattern(groupName)) return 'ignored'
 
     const messageId = m.key.id
-    const messageType = getContentType(m.message) || 'unknown'
+    const content = normalizeMessageContent(m.message) || m.message
+    const messageType = getContentType(content) || 'unknown'
     const rawSender = m.key.fromMe
         ? sock.user?.id
         : (m.key.participant || m.participant)
@@ -162,11 +156,26 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
     const senderName = m.pushName || jidDecode(senderId)?.user || ''
     const timestamp = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000)
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
+    const messageSecret = extractMessageSecret(m.message)
+    const alreadyEdited = isEditedWrapper(m.message)
 
     if (messageType === 'protocolMessage') return 'ignored'
-    if (messageId && (await hasMessage(messageId)) && messageType !== 'reactionMessage') return 'ignored'
+    if (messageId && (await hasMessage(messageId))) {
+        await rememberMessageSecret(messageId, messageSecret)
+        if (alreadyEdited) {
+            const editedText = textFromMessage(m.message)
+            if (editedText != null) {
+                const result = await applyPlaintextEdit(messageId, editedText, {
+                    groupJid: jid,
+                    isHistory,
+                })
+                if (result === 'applied') return 'edited'
+            }
+        }
+        if (messageType !== 'reactionMessage') return 'ignored'
+    }
 
-    const reaction = m.message.reactionMessage
+    const reaction = content.reactionMessage
     if (reaction) {
         const targetMessageId = reaction.key?.id
         if (!targetMessageId) return 'ignored'
@@ -226,26 +235,14 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
         }
     }
 
-    const textContent =
-        m.message?.conversation ||
-        m.message?.extendedTextMessage?.text ||
-        m.message?.imageMessage?.caption ||
-        m.message?.videoMessage?.caption ||
-        null
-
-    const replyToId = m.message?.extendedTextMessage?.contextInfo?.stanzaId || null
+    const textContent = textFromMessage(content)
+    const replyToId = content.extendedTextMessage?.contextInfo?.stanzaId || null
     const quotedMessage =
-        m.message.extendedTextMessage?.contextInfo?.quotedMessage?.conversation ||
-        m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption ||
+        content.extendedTextMessage?.contextInfo?.quotedMessage?.conversation ||
+        content.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption ||
         null
 
-    let messageSecret: string | null = null
-    const secretBytes = m.message.messageContextInfo?.messageSecret
-    if (secretBytes) {
-        messageSecret = JSON.stringify(Array.from(secretBytes))
-    }
-
-    let albumParentId = albumParentIdOf(m.message)
+    let albumParentId = albumParentIdOf(content)
     if (
         !albumParentId &&
         (messageType === 'imageMessage' || messageType === 'videoMessage')
@@ -309,8 +306,10 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
             quotedMessage,
             albumParentId,
             timestamp,
+            isEdited: alreadyEdited,
             isHistory,
         })
+        if (messageId) await flushPendingEdits(messageId)
         if (messageType === 'albumMessage') {
             await attachNearbyAlbumMedia({
                 parentId: messageId,
@@ -413,7 +412,7 @@ async function connectToWhatsApp() {
 
     sock.ev.on('messaging-history.set', async ({ messages, contacts, syncType }) => {
         const started = Date.now()
-        const counts = { saved: 0, reaction: 0, ignored: 0, error: 0 }
+        const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0 }
         const latestBefore = new Map<string, number | undefined>()
         log.info(
             { syncType, messages: messages?.length || 0, contacts: contacts?.length || 0 },
@@ -429,6 +428,10 @@ async function connectToWhatsApp() {
             await waitHistoryRead()
             counts[await processMessage(m, sock, true)] += 1
         }
+        for (const m of messages || []) {
+            const result = await applyIncomingEdit(m, true)
+            if (result === 'applied') counts.edited += 1
+        }
         await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
         log.info(
             { syncType, ms: Date.now() - started, ...counts },
@@ -436,53 +439,22 @@ async function connectToWhatsApp() {
         )
     })
 
-    const MessageEditEncType = proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
-
     sock.ev.on('messages.upsert', async (event) => {
         if (event.type !== 'notify' && event.type !== 'append') return
         const isHistory = event.type === 'append' || Boolean(event.requestId)
         for (const m of event.messages) {
-            const secEncMsg = m.message?.secretEncryptedMessage
-            if (secEncMsg?.secretEncType === MessageEditEncType) {
-                const targetMsgId = secEncMsg.targetMessageKey?.id
-                if (!targetMsgId) continue
-                const storedSecret = await getMessageSecret(targetMsgId)
-                if (!storedSecret) {
-                    log.warn(
-                        { targetMessageId: targetMsgId, groupJid: m.key.remoteJid },
-                        'message.edit_secret_missing'
-                    )
-                    continue
-                }
-                const msgSec = new Uint8Array(JSON.parse(storedSecret))
-                try {
-                    const decryptedMessage: WAProto.IMessage = decryptEditedMessage(secEncMsg, {
-                        secret: msgSec,
-                        id: targetMsgId,
-                        sender: m.key.participant || m.participant || m.key.remoteJid || '',
-                    })
-                    const editedMessage =
-                        decryptedMessage.protocolMessage?.editedMessage?.conversation ??
-                        decryptedMessage.protocolMessage?.editedMessage?.imageMessage?.caption ??
-                        ''
-                    await markMessageEdited(targetMsgId, editedMessage)
-                    log.info(
-                        { messageId: targetMsgId, groupJid: m.key.remoteJid },
-                        'message.edited'
-                    )
-                } catch (err) {
-                    log.warn(
-                        { err, targetMessageId: targetMsgId, groupJid: m.key.remoteJid },
-                        'message.edit_decrypt_failed'
-                    )
-                }
-            } else {
+            if (!isEditEnvelope(m.message)) {
                 await catchup.considerMessage(
                     m,
                     event.requestId ? 'phone_unavailable' : event.type
                 )
-                await processMessage(m, sock, isHistory)
             }
+        }
+        for (const m of event.messages) {
+            await processMessage(m, sock, isHistory)
+        }
+        for (const m of event.messages) {
+            await applyIncomingEdit(m, isHistory)
         }
     })
 
@@ -491,6 +463,9 @@ async function connectToWhatsApp() {
         for (const u of updates) {
             if (u.update.messageStubType === 1 && u.key.id) {
                 deletedIds.push(u.key.id)
+            }
+            if (u.update.message) {
+                await applyEditUpdate(u.key, u.update.message)
             }
         }
         if (deletedIds.length > 0) {
