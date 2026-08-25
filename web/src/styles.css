@@ -156,8 +156,8 @@ svg {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 20px;
-    padding: 11px 0 9px;
+    gap: 16px;
+    padding: 6px 0 6px;
 }
 
 .eyebrow {
@@ -184,10 +184,10 @@ h3 {
 
 h1 {
     max-width: 680px;
-    margin-bottom: 3px;
-    font-size: clamp(1.42rem, 2.2vw, 1.9rem);
-    line-height: 1.05;
-    letter-spacing: -0.045em;
+    margin-bottom: 2px;
+    font-size: clamp(1.2rem, 2vw, 1.5rem);
+    line-height: 1.1;
+    letter-spacing: -0.04em;
 }
 
 .hero-copy {
@@ -368,11 +368,11 @@ h1 {
 }
 
 .dashboard {
-    height: max(480px, min(840px, calc(100dvh - 190px)));
+    height: max(480px, min(840px, calc(100dvh - 150px)));
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(300px, 380px) 1fr;
-    margin-top: 14px;
+    margin-top: 10px;
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 22px;
@@ -394,7 +394,7 @@ h1 {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 18px 20px 12px;
+    padding: 12px 16px 8px;
 }
 
 .panel-heading h2,
@@ -416,11 +416,11 @@ h1 {
 }
 
 .search-box {
-    height: 42px;
+    height: 38px;
     display: flex;
     align-items: center;
     gap: 9px;
-    margin: 0 20px 12px;
+    margin: 0 16px 8px;
     padding: 0 12px;
     border: 1px solid #e0e7e3;
     border-radius: 11px;
@@ -444,6 +444,7 @@ h1 {
 
 .group-list,
 .message-list {
+    position: relative;
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -572,6 +573,20 @@ h1 {
     display: block;
 }
 
+.view-pane[hidden] {
+    display: none !important;
+}
+
+.dashboard:not(.album-dashboard) .messages-pane:not([hidden]) {
+    display: contents;
+}
+
+.dashboard.album-dashboard .media-pane:not([hidden]) {
+    height: 100%;
+    min-height: 0;
+    display: block;
+}
+
 .album-panel {
     height: 100%;
     min-height: 0;
@@ -583,12 +598,12 @@ h1 {
 }
 
 .album-toolbar {
-    min-height: 60px;
+    min-height: 48px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 18px;
-    padding: 9px 18px;
+    gap: 12px;
+    padding: 6px 14px;
     border-bottom: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.95);
 }
@@ -598,6 +613,9 @@ h1 {
     display: flex;
     align-items: center;
     gap: 10px;
+    flex-shrink: 0;
+    position: relative;
+    z-index: 1;
 }
 
 .album-scope > span {
@@ -626,10 +644,15 @@ h1 {
     font-weight: 700;
 }
 
+.album-actions button:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+
 .media-filters {
     display: flex;
-    gap: 7px;
-    padding: 10px 18px;
+    gap: 6px;
+    padding: 6px 14px;
     overflow-x: auto;
     border-bottom: 1px solid var(--line);
     background: white;
@@ -688,10 +711,11 @@ h1 {
 
 .album-scroll {
     min-height: 0;
+    position: relative;
     flex: 1;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 14px 16px 84px;
+    padding: 12px 14px 84px;
     scrollbar-color: #cbd9d4 transparent;
     scrollbar-width: thin;
 }
@@ -711,6 +735,7 @@ h1 {
     border-radius: 13px;
     background: white;
     box-shadow: 0 5px 15px rgba(28, 60, 50, 0.045);
+    cursor: pointer;
     transition: 150ms ease;
 }
 
@@ -740,12 +765,33 @@ h1 {
     box-shadow: 0 2px 8px rgba(13, 39, 33, 0.16);
     font-size: 0.75rem;
     font-weight: 800;
+    pointer-events: none;
     backdrop-filter: blur(8px);
 }
 
 .album-tile.selected .tile-select {
     border-color: var(--green);
     background: var(--green);
+}
+
+.tile-expand {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    position: absolute;
+    z-index: 2;
+    right: 8px;
+    bottom: 8px;
+    place-items: center;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-radius: 8px;
+    color: white;
+    background: rgba(13, 39, 33, 0.58);
+    box-shadow: 0 2px 8px rgba(13, 39, 33, 0.16);
+    font-size: 0.95rem;
+    line-height: 1;
+    backdrop-filter: blur(8px);
 }
 
 .album-preview {
@@ -837,64 +883,34 @@ h1 {
 }
 
 .album-tile-meta {
-    padding: 9px 10px 10px;
-}
-
-.album-tile-meta > div {
     display: flex;
-    align-items: center;
-    gap: 7px;
-}
-
-.album-group-avatar {
-    width: 25px;
-    height: 25px;
-    display: grid;
-    flex: 0 0 auto;
-    place-items: center;
-    border-radius: 7px;
-    color: var(--green-dark);
-    background: var(--mint);
-    font-size: 0.5rem;
-    font-weight: 800;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px 7px;
 }
 
 .album-tile-meta strong,
-.album-tile-meta small {
-    display: block;
-    max-width: 130px;
+.album-tile-meta time {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
 .album-tile-meta strong {
+    min-width: 0;
     color: #29443d;
     font-size: 0.68rem;
 }
 
-.album-tile-meta small,
 .album-tile-meta time {
+    flex: 0 0 auto;
     color: #879792;
     font-size: 0.56rem;
 }
 
-.album-tile-meta time {
-    display: block;
-    margin-top: 6px;
-}
-
-.album-tile-meta p {
-    margin: 5px 0 0;
-    overflow: hidden;
-    color: #536963;
-    font-size: 0.64rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 .album-skeleton {
-    height: 235px;
+    height: 196px;
 }
 
 .album-refresh {
@@ -1103,11 +1119,11 @@ h1 {
 }
 
 .messages-heading {
-    min-height: 70px;
+    min-height: 58px;
     display: flex;
     align-items: center;
     gap: 13px;
-    padding: 11px 22px;
+    padding: 8px 18px;
     border-bottom: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.94);
 }
@@ -1168,6 +1184,53 @@ h1 {
     box-shadow: 0 5px 16px rgba(28, 60, 50, 0.08);
     font-size: 0.64rem;
     font-weight: 700;
+}
+
+.content-overlay {
+    display: flex;
+    position: absolute;
+    z-index: 5;
+    inset: 0;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--green-dark);
+    background: rgba(248, 250, 248, 0.64);
+    backdrop-filter: blur(2px);
+    font-size: 0.76rem;
+    font-weight: 700;
+    pointer-events: none;
+    animation: overlay-in 160ms ease;
+}
+
+.overlay-spinner {
+    width: 14px;
+    height: 14px;
+    border: 2px solid rgba(22, 134, 111, 0.22);
+    border-top-color: var(--green);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+.album-grid,
+.message-list,
+.group-list {
+    transition: opacity 180ms ease;
+}
+
+.album-scroll.is-loading .album-grid,
+.message-list.is-loading,
+.group-list.is-loading {
+    pointer-events: none;
+}
+
+@keyframes overlay-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
 }
 
 .refresh-indicator span {
@@ -1586,7 +1649,7 @@ video.media-frame {
     .hero {
         align-items: start;
         flex-direction: column;
-        padding-top: 14px;
+        padding-top: 8px;
     }
 
     .summary-cards {

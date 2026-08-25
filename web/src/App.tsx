@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import AlbumView, { type AlbumScope, type MediaCategory } from './AlbumView'
+import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
 
 type Group = {
     jid: string
@@ -47,8 +47,6 @@ type MessagesResponse = {
     messages: Message[]
     nextCursor: string | null
 }
-
-const allMediaCategories: MediaCategory[] = ['image', 'video', 'document', 'audio', 'sticker']
 
 function initialMediaCategories(params: URLSearchParams): MediaCategory[] {
     const requested = params.get('types')?.split(',') || []
@@ -476,8 +474,10 @@ export default function App() {
         if (!selectedJid || invalidRange) {
             messagesRequestId.current += 1
             setMessagesLoading(false)
-            setMessages([])
-            setNextCursor(null)
+            if (!selectedJid) {
+                setMessages([])
+                setNextCursor(null)
+            }
             return
         }
         const controller = new AbortController()
@@ -553,14 +553,13 @@ export default function App() {
                         </div>
                     )}
                     <span className="status-dot" />
-                    Live archive
+                    Connected
                 </div>
             </header>
 
             <section className="hero">
                 <div>
-                    <p className="eyebrow">CONVERSATION INTELLIGENCE</p>
-                    <h1>Messages, clearly organized.</h1>
+                    <h1>Group messages and media.</h1>
                     <p className="hero-copy">
                         Only groups whose names match the configured pattern are shown.
                     </p>
@@ -601,7 +600,7 @@ export default function App() {
                         className={view === 'album' ? 'active' : ''}
                         onClick={() => setView('album')}
                     >
-                        Album
+                        Media
                     </button>
                 </div>
                 <div className="presets" aria-label="Date presets">
@@ -626,28 +625,14 @@ export default function App() {
             )}
 
             <main
-                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''} ${groupsLoading || messagesLoading ? 'is-refreshing' : ''}`}
+                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}`}
                 aria-busy={groupsLoading || messagesLoading}
             >
-                {view === 'album' ? (
-                    <AlbumView
-                        from={from}
-                        to={to}
-                        groups={groups}
-                        selectedJid={selectedJid}
-                        onSelectGroup={setSelectedJid}
-                        scope={albumScope}
-                        onScopeChange={setAlbumScope}
-                        types={albumTypes}
-                        onTypesChange={setAlbumTypes}
-                    />
-                ) : (
-                    <>
+                <div className="view-pane messages-pane" hidden={view !== 'messages'}>
                     <aside className="groups-panel">
                     <div className="panel-heading">
                         <div>
-                            <p className="eyebrow">MATCHING GROUPS</p>
-                            <h2>Conversations</h2>
+                            <h2>Groups</h2>
                         </div>
                         <span className="count-pill">{groups.length}</span>
                     </div>
@@ -661,7 +646,13 @@ export default function App() {
                         />
                     </label>
 
-                    <div className="group-list">
+                    <div className={`group-list ${groupsLoading && groups.length > 0 ? 'is-loading' : ''}`}>
+                        {groupsLoading && groups.length > 0 && (
+                            <div className="content-overlay" role="status">
+                                <span className="overlay-spinner" />
+                                Updating
+                            </div>
+                        )}
                         {groupsLoading &&
                             groups.length === 0 &&
                             [1, 2, 3].map((item) => <div className="group-item skeleton-group skeleton" key={item} />)}
@@ -723,10 +714,10 @@ export default function App() {
                             {messagesLoading && messages.length === 0 ? (
                                 <SkeletonMessages />
                             ) : messages.length ? (
-                                <div className={`message-list ${messagesLoading ? 'refreshing' : ''}`}>
+                                <div className={`message-list ${messagesLoading ? 'is-loading' : ''}`}>
                                     {messagesLoading && (
-                                        <div className="refresh-indicator" role="status">
-                                            <span />
+                                        <div className="content-overlay" role="status">
+                                            <span className="overlay-spinner" />
                                             Updating
                                         </div>
                                     )}
@@ -778,13 +769,25 @@ export default function App() {
                     ) : (
                         <div className="empty-state">
                             <span className="empty-icon"><Icon name="users" /></span>
-                            <h3>Select a conversation</h3>
+                            <h3>Select a group</h3>
                             <p>Choose a group to explore its archived messages and media.</p>
                         </div>
                     )}
                     </section>
-                    </>
-                )}
+                </div>
+                <div className="view-pane media-pane" hidden={view !== 'album'}>
+                    <AlbumView
+                        from={from}
+                        to={to}
+                        groups={groups}
+                        selectedJid={selectedJid}
+                        onSelectGroup={setSelectedJid}
+                        scope={albumScope}
+                        onScopeChange={setAlbumScope}
+                        types={albumTypes}
+                        onTypesChange={setAlbumTypes}
+                    />
+                </div>
             </main>
         </div>
     )

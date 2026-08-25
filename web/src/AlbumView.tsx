@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 
 export type MediaCategory = 'image' | 'video' | 'document' | 'audio' | 'sticker'
 export type AlbumScope = 'all' | 'group'
@@ -39,18 +39,27 @@ type Props = {
     onTypesChange: (types: MediaCategory[]) => void
 }
 
+export const allMediaCategories: MediaCategory[] = ['image', 'video', 'document', 'audio', 'sticker']
+
 const categoryOptions: Array<{
     id: MediaCategory
     label: string
-    shortLabel: string
     icon: string
 }> = [
-    { id: 'image', label: 'Images', shortLabel: 'IMG', icon: '▧' },
-    { id: 'video', label: 'Videos', shortLabel: 'VID', icon: '▶' },
-    { id: 'document', label: 'PDFs / Docs', shortLabel: 'DOC', icon: '▤' },
-    { id: 'audio', label: 'Audio', shortLabel: 'AUD', icon: '♪' },
-    { id: 'sticker', label: 'Stickers', shortLabel: 'STK', icon: '◇' },
+    { id: 'image', label: 'Images', icon: '▧' },
+    { id: 'video', label: 'Videos', icon: '▶' },
+    { id: 'document', label: 'PDFs / Docs', icon: '▤' },
+    { id: 'audio', label: 'Audio', icon: '♪' },
+    { id: 'sticker', label: 'Stickers', icon: '◇' },
 ]
+
+const emptyCounts: Record<MediaCategory, number> = {
+    image: 0,
+    video: 0,
+    document: 0,
+    audio: 0,
+    sticker: 0,
+}
 
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
     timeZone: 'Asia/Hong_Kong',
@@ -72,15 +81,8 @@ function albumUrl(
     return `/api/album?${params}`
 }
 
-function initials(name: string): string {
-    return (
-        name
-            .trim()
-            .split(/\s+/)
-            .slice(0, 2)
-            .map((part) => part[0]?.toUpperCase())
-            .join('') || '?'
-    )
+function isAllTypes(types: MediaCategory[]): boolean {
+    return types.length === allMediaCategories.length
 }
 
 async function albumJson(url: string, signal?: AbortSignal): Promise<AlbumResponse> {
@@ -88,6 +90,10 @@ async function albumJson(url: string, signal?: AbortSignal): Promise<AlbumRespon
     const body = (await response.json()) as AlbumResponse
     if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`)
     return body
+}
+
+function stopTileAction(event: MouseEvent) {
+    event.stopPropagation()
 }
 
 function MediaTile({
@@ -102,18 +108,29 @@ function MediaTile({
     onOpen: () => void
 }) {
     const visual = item.category === 'image' || item.category === 'sticker' || item.category === 'video'
+
+    function onKeyDown(event: KeyboardEvent<HTMLElement>) {
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            onToggle()
+        }
+    }
+
     return (
-        <article className={`album-tile ${selected ? 'selected' : ''}`}>
-            <button
-                className="tile-select"
-                aria-label={`${selected ? 'Deselect' : 'Select'} ${item.category}`}
-                aria-pressed={selected}
-                onClick={onToggle}
-            >
+        <article
+            className={`album-tile ${selected ? 'selected' : ''}`}
+            role="button"
+            tabIndex={0}
+            aria-pressed={selected}
+            aria-label={`${selected ? 'Deselect' : 'Select'} ${item.category} from ${item.groupName}`}
+            onClick={onToggle}
+            onKeyDown={onKeyDown}
+        >
+            <span className="tile-select" aria-hidden="true">
                 {selected ? '✓' : ''}
-            </button>
+            </span>
             {visual ? (
-                <button className="album-preview" onClick={onOpen} aria-label="Open media preview">
+                <div className="album-preview">
                     {item.category === 'video' ? (
                         <>
                             <video src={item.mediaUrl} muted preload="metadata" />
@@ -122,7 +139,18 @@ function MediaTile({
                     ) : (
                         <img src={item.mediaUrl} alt={item.textContent || item.category} loading="lazy" />
                     )}
-                </button>
+                    <button
+                        className="tile-expand"
+                        type="button"
+                        aria-label="View full screen"
+                        onClick={(event) => {
+                            stopTileAction(event)
+                            onOpen()
+                        }}
+                    >
+                        ⤢
+                    </button>
+                </div>
             ) : (
                 <div className={`album-file-card ${item.category}`}>
                     <span className="file-glyph">
@@ -130,25 +158,23 @@ function MediaTile({
                     </span>
                     <span>{item.category === 'audio' ? 'Audio message' : 'Shared document'}</span>
                     {item.category === 'audio' && (
-                        <audio src={item.mediaUrl} controls preload="none" />
+                        <audio src={item.mediaUrl} controls preload="none" onClick={stopTileAction} />
                     )}
                     {item.category === 'document' && (
-                        <a href={item.mediaUrl} target="_blank" rel="noreferrer">
+                        <a
+                            href={item.mediaUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={stopTileAction}
+                        >
                             Open document ↗
                         </a>
                     )}
                 </div>
             )}
             <div className="album-tile-meta">
-                <div>
-                    <span className="album-group-avatar">{initials(item.groupName)}</span>
-                    <span>
-                        <strong>{item.groupName}</strong>
-                        <small>{item.senderName || 'Unknown sender'}</small>
-                    </span>
-                </div>
+                <strong>{item.groupName}</strong>
                 <time>{hkDateTime.format(item.timestamp * 1000)}</time>
-                {item.textContent && <p>{item.textContent}</p>}
             </div>
         </article>
     )
@@ -166,13 +192,7 @@ export default function AlbumView({
     onTypesChange,
 }: Props) {
     const [items, setItems] = useState<AlbumItem[]>([])
-    const [counts, setCounts] = useState<Record<MediaCategory, number>>({
-        image: 0,
-        video: 0,
-        document: 0,
-        audio: 0,
-        sticker: 0,
-    })
+    const [counts, setCounts] = useState<Record<MediaCategory, number>>(emptyCounts)
     const [nextCursor, setNextCursor] = useState<string | null>(null)
     const [selected, setSelected] = useState<Set<string>>(new Set())
     const [lightbox, setLightbox] = useState<AlbumItem | null>(null)
@@ -181,6 +201,7 @@ export default function AlbumView({
     const [downloading, setDownloading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const requestId = useRef(0)
+    const showingAll = isAllTypes(types)
 
     const scopeGroup = scope === 'group' ? selectedJid : null
     const filterKey = `${from}|${to}|${scope}|${scopeGroup || ''}|${types.join(',')}`
@@ -189,6 +210,7 @@ export default function AlbumView({
         setSelected(new Set())
         setLightbox(null)
         if (scope === 'group' && !selectedJid) {
+            requestId.current += 1
             setItems([])
             setLoading(false)
             return
@@ -206,7 +228,7 @@ export default function AlbumView({
             })
             .catch((reason: unknown) => {
                 if (currentRequest === requestId.current && (reason as Error).name !== 'AbortError') {
-                    setError(reason instanceof Error ? reason.message : 'Could not load album')
+                    setError(reason instanceof Error ? reason.message : 'Could not load media')
                 }
             })
             .finally(() => {
@@ -221,12 +243,16 @@ export default function AlbumView({
     )
 
     function toggleType(category: MediaCategory) {
-        if (types.includes(category)) {
-            if (types.length === 1) return
-            onTypesChange(types.filter((item) => item !== category))
-        } else {
-            onTypesChange([...types, category])
+        if (showingAll) {
+            onTypesChange([category])
+            return
         }
+        if (types.includes(category)) {
+            const next = types.filter((item) => item !== category)
+            onTypesChange(next.length === 0 ? [...allMediaCategories] : next)
+            return
+        }
+        onTypesChange([...types, category])
     }
 
     function toggleSelected(messageId: string) {
@@ -291,30 +317,38 @@ export default function AlbumView({
         }
     }
 
+    function selectAllVisible() {
+        setSelected(new Set(items.map((item) => item.messageId)))
+    }
+
+    const allVisibleSelected =
+        items.length > 0 && items.every((item) => selected.has(item.messageId))
+    const showOverlay = loading && items.length > 0
+
     return (
         <section className="album-panel" aria-busy={loading}>
             <header className="album-toolbar">
                 <div className="album-scope">
-                    <span>Show media from</span>
+                    <span>From</span>
                     <div className="segmented-control">
                         <button
                             className={scope === 'all' ? 'active' : ''}
                             onClick={() => onScopeChange('all')}
                         >
-                            All matching
+                            All groups
                         </button>
                         <button
                             className={scope === 'group' ? 'active' : ''}
                             onClick={() => onScopeChange('group')}
                         >
-                            One group
+                            This group
                         </button>
                     </div>
                     {scope === 'group' && (
                         <select
                             value={selectedJid || ''}
                             onChange={(event) => onSelectGroup(event.target.value)}
-                            aria-label="Album group"
+                            aria-label="Media group"
                         >
                             {groups.map((group) => (
                                 <option value={group.jid} key={group.jid}>
@@ -326,27 +360,32 @@ export default function AlbumView({
                 </div>
                 <div className="album-actions">
                     <button
-                        onClick={() =>
-                            setSelected(
-                                selected.size === items.length
-                                    ? new Set()
-                                    : new Set(items.map((item) => item.messageId))
-                            )
-                        }
-                        disabled={items.length === 0}
+                        type="button"
+                        onClick={selectAllVisible}
+                        disabled={items.length === 0 || allVisibleSelected}
                     >
-                        {selected.size === items.length && items.length ? 'Clear selection' : 'Select loaded'}
+                        {allVisibleSelected ? 'All selected' : 'Select all'}
                     </button>
                 </div>
             </header>
 
             <div className="media-filters" aria-label="Media type filters">
+                <button
+                    className={showingAll ? 'active' : ''}
+                    onClick={() => {
+                        if (!showingAll) onTypesChange([...allMediaCategories])
+                    }}
+                    aria-pressed={showingAll}
+                >
+                    <span>All types</span>
+                    <strong>{Object.values(counts).reduce((sum, count) => sum + count, 0)}</strong>
+                </button>
                 {categoryOptions.map((category) => (
                     <button
                         key={category.id}
-                        className={types.includes(category.id) ? 'active' : ''}
+                        className={!showingAll && types.includes(category.id) ? 'active' : ''}
                         onClick={() => toggleType(category.id)}
-                        aria-pressed={types.includes(category.id)}
+                        aria-pressed={!showingAll && types.includes(category.id)}
                     >
                         <span className="filter-icon">{category.icon}</span>
                         <span>{category.label}</span>
@@ -357,7 +396,13 @@ export default function AlbumView({
 
             {error && <div className="album-error" role="alert">{error}</div>}
 
-            <div className="album-scroll">
+            <div className={`album-scroll ${showOverlay ? 'is-loading' : ''}`}>
+                {showOverlay && (
+                    <div className="content-overlay" role="status">
+                        <span className="overlay-spinner" />
+                        Updating
+                    </div>
+                )}
                 {loading && items.length === 0 ? (
                     <div className="album-grid">
                         {[1, 2, 3, 4, 5, 6].map((item) => (
@@ -366,7 +411,6 @@ export default function AlbumView({
                     </div>
                 ) : items.length ? (
                     <>
-                        {loading && <div className="refresh-indicator album-refresh"><span />Updating</div>}
                         <div className="album-grid">
                             {items.map((item) => (
                                 <MediaTile
@@ -380,7 +424,7 @@ export default function AlbumView({
                         </div>
                         {nextCursor && (
                             <button className="load-more" onClick={loadMore} disabled={loadingMore}>
-                                {loadingMore ? 'Loading…' : 'Load more media'}
+                                {loadingMore ? 'Loading…' : 'Load more'}
                             </button>
                         )}
                     </>
@@ -410,7 +454,7 @@ export default function AlbumView({
             )}
 
             {lightbox && (
-                <div className="lightbox" role="dialog" aria-modal="true" aria-label="Media preview">
+                <div className="lightbox" role="dialog" aria-modal="true" aria-label="Full screen media">
                     <button className="lightbox-close" onClick={() => setLightbox(null)} aria-label="Close">
                         ×
                     </button>
@@ -435,4 +479,3 @@ export default function AlbumView({
         </section>
     )
 }
-
