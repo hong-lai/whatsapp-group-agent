@@ -72,7 +72,7 @@ footer {
 }
 
 .topbar {
-    height: 76px;
+    height: 62px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -138,8 +138,8 @@ footer {
     display: flex;
     align-items: end;
     justify-content: space-between;
-    gap: 40px;
-    padding: 46px 0 32px;
+    gap: 28px;
+    padding: 24px 0 18px;
 }
 
 .eyebrow {
@@ -167,7 +167,7 @@ h3 {
 h1 {
     max-width: 680px;
     margin-bottom: 10px;
-    font-size: clamp(2rem, 4vw, 3.45rem);
+    font-size: clamp(1.85rem, 3vw, 2.65rem);
     line-height: 1.05;
     letter-spacing: -0.045em;
 }
@@ -176,8 +176,8 @@ h1 {
     margin-bottom: 0;
     max-width: 650px;
     color: var(--muted);
-    font-size: 1rem;
-    line-height: 1.65;
+    font-size: 0.86rem;
+    line-height: 1.5;
 }
 
 .summary-cards {
@@ -187,11 +187,11 @@ h1 {
 }
 
 .summary-card {
-    min-width: 184px;
+    min-width: 166px;
     display: flex;
     align-items: center;
     gap: 13px;
-    padding: 16px 18px;
+    padding: 12px 15px;
     border: 1px solid rgba(255, 255, 255, 0.8);
     border-radius: 16px;
     background: rgba(255, 255, 255, 0.74);
@@ -223,13 +223,13 @@ h1 {
 }
 
 .filter-bar {
-    min-height: 78px;
+    min-height: 60px;
     display: flex;
     align-items: center;
     gap: 20px;
-    padding: 13px 16px;
+    padding: 9px 14px;
     border: 1px solid rgba(216, 227, 221, 0.88);
-    border-radius: 18px;
+    border-radius: 15px;
     background: rgba(255, 255, 255, 0.83);
     box-shadow: 0 10px 30px rgba(24, 65, 54, 0.05);
 }
@@ -319,11 +319,11 @@ h1 {
 }
 
 .dashboard {
-    height: min(730px, calc(100vh - 310px));
-    min-height: 540px;
+    height: max(480px, min(780px, calc(100dvh - 250px)));
+    min-height: 0;
     display: grid;
     grid-template-columns: minmax(300px, 380px) 1fr;
-    margin-top: 18px;
+    margin-top: 14px;
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 22px;
@@ -334,6 +334,8 @@ h1 {
 .groups-panel {
     display: flex;
     min-width: 0;
+    min-height: 0;
+    overflow: hidden;
     flex-direction: column;
     border-right: 1px solid var(--line);
     background: #fbfcfb;
@@ -343,7 +345,7 @@ h1 {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 24px 24px 16px;
+    padding: 18px 20px 12px;
 }
 
 .panel-heading h2,
@@ -393,14 +395,16 @@ h1 {
 
 .group-list,
 .message-list {
+    min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
     scrollbar-color: #cbd9d4 transparent;
     scrollbar-width: thin;
 }
 
 .group-list {
     flex: 1;
-    padding: 0 10px 18px;
+    padding: 0 8px 14px;
 }
 
 .group-item {
@@ -409,7 +413,7 @@ h1 {
     grid-template-columns: 42px minmax(0, 1fr) auto;
     gap: 11px;
     align-items: center;
-    padding: 13px 12px;
+    padding: 10px 11px;
     border: 0;
     border-radius: 13px;
     color: inherit;
@@ -507,17 +511,20 @@ h1 {
 
 .messages-panel {
     min-width: 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
+    position: relative;
+    overflow: hidden;
     background: #fff;
 }
 
 .messages-heading {
-    min-height: 84px;
+    min-height: 70px;
     display: flex;
     align-items: center;
     gap: 13px;
-    padding: 17px 26px;
+    padding: 11px 22px;
     border-bottom: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.94);
 }
@@ -554,23 +561,57 @@ h1 {
 
 .message-list {
     flex: 1;
-    padding: 22px clamp(18px, 4vw, 48px) 40px;
+    padding: 14px clamp(14px, 2.5vw, 30px) 26px;
     background:
         linear-gradient(rgba(250, 252, 250, 0.93), rgba(250, 252, 250, 0.93)),
         radial-gradient(circle at 20% 20%, #cfe1da 1px, transparent 1px);
     background-size: auto, 18px 18px;
 }
 
-.message-card {
-    max-width: 820px;
+.refresh-indicator {
+    width: max-content;
     display: flex;
-    gap: 12px;
-    margin-bottom: 18px;
+    position: sticky;
+    z-index: 3;
+    top: 0;
+    align-items: center;
+    gap: 7px;
+    margin: 0 auto 8px;
+    padding: 5px 10px;
+    border: 1px solid #d5e5df;
+    border-radius: 999px;
+    color: var(--green-dark);
+    background: rgba(255, 255, 255, 0.94);
+    box-shadow: 0 5px 16px rgba(28, 60, 50, 0.08);
+    font-size: 0.64rem;
+    font-weight: 700;
+}
+
+.refresh-indicator span {
+    width: 8px;
+    height: 8px;
+    border: 2px solid #a7d3c5;
+    border-top-color: var(--green);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.message-card {
+    max-width: 940px;
+    display: flex;
+    gap: 9px;
+    margin-bottom: 10px;
 }
 
 .sender-avatar {
-    width: 34px;
-    height: 34px;
+    width: 30px;
+    height: 30px;
     margin-top: 2px;
     border-radius: 10px;
     font-size: 0.58rem;
@@ -579,9 +620,9 @@ h1 {
 .message-content {
     min-width: 0;
     flex: 1;
-    padding: 14px 16px;
+    padding: 10px 13px;
     border: 1px solid #e3e9e5;
-    border-radius: 4px 16px 16px 16px;
+    border-radius: 4px 13px 13px 13px;
     background: white;
     box-shadow: 0 5px 16px rgba(28, 60, 50, 0.045);
 }
@@ -604,10 +645,10 @@ h1 {
 }
 
 .message-content p {
-    margin: 9px 0 0;
+    margin: 6px 0 0;
     color: #2d413c;
     font-size: 0.86rem;
-    line-height: 1.55;
+    line-height: 1.45;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
@@ -616,7 +657,7 @@ h1 {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
-    margin-top: 6px;
+    margin-top: 4px;
 }
 
 .badges span {
@@ -653,9 +694,10 @@ blockquote {
 }
 
 .media-frame {
-    max-width: min(520px, 100%);
-    display: block;
-    margin-top: 11px;
+    width: fit-content;
+    max-width: min(420px, 100%);
+    display: inline-block;
+    margin-top: 8px;
     overflow: hidden;
     border-radius: 11px;
     background: #e8eeeb;
@@ -665,8 +707,8 @@ img.media-frame,
 .media-frame img,
 video.media-frame {
     width: auto;
-    max-width: min(520px, 100%);
-    max-height: 380px;
+    max-width: min(420px, 100%);
+    max-height: 260px;
     display: block;
     object-fit: contain;
 }

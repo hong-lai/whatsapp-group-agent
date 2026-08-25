@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 type Group = {
     jid: string
@@ -182,6 +182,8 @@ export default function App() {
     const [loadingMore, setLoadingMore] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [reloadKey, setReloadKey] = useState(0)
+    const groupsRequestId = useRef(0)
+    const messagesRequestId = useRef(0)
 
     const invalidRange = from > to
     const selectedGroup = groups.find((group) => group.jid === selectedJid) || null
@@ -208,8 +210,13 @@ export default function App() {
     }, [from, to, selectedJid])
 
     useEffect(() => {
-        if (invalidRange) return
+        if (invalidRange) {
+            groupsRequestId.current += 1
+            setGroupsLoading(false)
+            return
+        }
         const controller = new AbortController()
+        const requestId = ++groupsRequestId.current
         setGroupsLoading(true)
         setError(null)
         getJson<GroupsResponse>(
@@ -217,6 +224,7 @@ export default function App() {
             controller.signal
         )
             .then((data) => {
+                if (requestId !== groupsRequestId.current) return
                 setGroups(data.groups)
                 setSelectedJid((current) => {
                     if (current && data.groups.some((group) => group.jid === current)) return current
@@ -224,21 +232,29 @@ export default function App() {
                 })
             })
             .catch((reason: unknown) => {
-                if ((reason as Error).name !== 'AbortError') {
+                if (
+                    requestId === groupsRequestId.current &&
+                    (reason as Error).name !== 'AbortError'
+                ) {
                     setError(reason instanceof Error ? reason.message : 'Could not load groups')
                 }
             })
-            .finally(() => setGroupsLoading(false))
+            .finally(() => {
+                if (requestId === groupsRequestId.current) setGroupsLoading(false)
+            })
         return () => controller.abort()
     }, [from, to, invalidRange, reloadKey])
 
     useEffect(() => {
         if (!selectedJid || invalidRange) {
+            messagesRequestId.current += 1
+            setMessagesLoading(false)
             setMessages([])
             setNextCursor(null)
             return
         }
         const controller = new AbortController()
+        const requestId = ++messagesRequestId.current
         setMessagesLoading(true)
         setError(null)
         getJson<MessagesResponse>(
@@ -246,15 +262,21 @@ export default function App() {
             controller.signal
         )
             .then((data) => {
+                if (requestId !== messagesRequestId.current) return
                 setMessages(data.messages)
                 setNextCursor(data.nextCursor)
             })
             .catch((reason: unknown) => {
-                if ((reason as Error).name !== 'AbortError') {
+                if (
+                    requestId === messagesRequestId.current &&
+                    (reason as Error).name !== 'AbortError'
+                ) {
                     setError(reason instanceof Error ? reason.message : 'Could not load messages')
                 }
             })
-            .finally(() => setMessagesLoading(false))
+            .finally(() => {
+                if (requestId === messagesRequestId.current) setMessagesLoading(false)
+            })
         return () => controller.abort()
     }, [selectedJid, from, to, invalidRange, reloadKey])
 
@@ -351,7 +373,10 @@ export default function App() {
                 </div>
             )}
 
-            <main className="dashboard">
+            <main
+                className={`dashboard ${groupsLoading || messagesLoading ? 'is-refreshing' : ''}`}
+                aria-busy={groupsLoading || messagesLoading}
+            >
                 <aside className="groups-panel">
                     <div className="panel-heading">
                         <div>
@@ -372,9 +397,9 @@ export default function App() {
 
                     <div className="group-list">
                         {groupsLoading &&
+                            groups.length === 0 &&
                             [1, 2, 3].map((item) => <div className="group-item skeleton-group skeleton" key={item} />)}
-                        {!groupsLoading &&
-                            filteredGroups.map((group) => (
+                        {filteredGroups.map((group) => (
                                 <button
                                     className={`group-item ${group.jid === selectedJid ? 'selected' : ''}`}
                                     key={group.jid}
@@ -425,10 +450,16 @@ export default function App() {
                                 </div>
                             </header>
 
-                            {messagesLoading ? (
+                            {messagesLoading && messages.length === 0 ? (
                                 <SkeletonMessages />
                             ) : messages.length ? (
-                                <div className="message-list">
+                                <div className={`message-list ${messagesLoading ? 'refreshing' : ''}`}>
+                                    {messagesLoading && (
+                                        <div className="refresh-indicator" role="status">
+                                            <span />
+                                            Updating
+                                        </div>
+                                    )}
                                     {messages.map((message) => (
                                         <article className={`message-card ${message.isDeleted ? 'deleted' : ''}`} key={message.messageId}>
                                             <span className="sender-avatar">
