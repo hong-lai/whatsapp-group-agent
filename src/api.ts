@@ -1,11 +1,15 @@
+import { ZipArchive } from 'archiver'
 import express, { type NextFunction, type Request, type Response } from 'express'
-import { existsSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
 import {
+    countAlbumMedia,
+    getAlbumMediaForDownload,
     getDashboardMedia,
+    listAlbumMedia,
     listDashboardGroups,
     listDashboardMessages,
     type MessageCursor,
@@ -14,6 +18,15 @@ import {
 const HONG_KONG_OFFSET_MS = 8 * 60 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+const MEDIA_TYPES = {
+    image: 'imageMessage',
+    video: 'videoMessage',
+    document: 'documentMessage',
+    audio: 'audioMessage',
+    sticker: 'stickerMessage',
+} as const
+type MediaCategory = keyof typeof MEDIA_TYPES
+const ALL_MEDIA_CATEGORIES = Object.keys(MEDIA_TYPES) as MediaCategory[]
 
 type DateRange = {
     from: string
@@ -101,6 +114,33 @@ function parseLimit(value: unknown): number {
     return Math.min(parsed, config.dashboardMaxPageSize)
 }
 
+function parseAlbumLimit(value: unknown): number {
+    if (typeof value !== 'string') return config.albumPageSize
+    const parsed = Number.parseInt(value, 10)
+    if (!Number.isFinite(parsed) || parsed < 1) throw new Error('Invalid album page size')
+    return Math.min(parsed, config.albumMaxPageSize)
+}
+
+function parseMediaCategories(value: unknown): MediaCategory[] {
+    if (typeof value !== 'string' || !value.trim()) return ALL_MEDIA_CATEGORIES
+    const categories = [...new Set(value.split(',').map((item) => item.trim()))]
+    if (
+        categories.length === 0 ||
+        categories.some((category) => !ALL_MEDIA_CATEGORIES.includes(category as MediaCategory))
+    ) {
+        throw new Error('Invalid media types')
+    }
+    return categories as MediaCategory[]
+}
+
+function parseOptionalGroup(value: unknown): string | undefined {
+    if (value === undefined || value === '') return undefined
+    if (typeof value !== 'string' || !value.endsWith('@g.us')) {
+        throw new Error('Invalid group')
+    }
+    return value
+}
+
 function getRouteParam(value: string | string[] | undefined): string {
     if (typeof value !== 'string' || !value) throw new Error('Invalid route parameter')
     return value
@@ -123,6 +163,33 @@ function resolveMediaPath(storedPath: string): string | undefined {
     }
 
     return isWithin(root, candidate) ? candidate : undefined
+}
+
+function safePathSegment(value: string, fallback: string): string {
+    const sanitized = value
+        .normalize('NFKC')
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+        .replace(/\.+$/g, '')
+        .trim()
+        .slice(0, 100)
+    return sanitized || fallback
+}
+
+function hktFilename(timestamp: number, messageId: string, mediaPath: string): string {
+    const date = new Date(timestamp * 1000 + HONG_KONG_OFFSET_MS)
+    const parts = [
+        date.getUTCFullYear(),
+        String(date.getUTCMonth() + 1).padStart(2, '0'),
+        String(date.getUTCDate()).padStart(2, '0'),
+    ]
+    const time = [
+        String(date.getUTCHours()).padStart(2, '0'),
+        String(date.getUTCMinutes()).padStart(2, '0'),
+        String(date.getUTCSeconds()).padStart(2, '0'),
+    ]
+    const rawExtension = extname(mediaPath).toLowerCase()
+    const extension = /^\.[a-z0-9]{1,8}$/.test(rawExtension) ? rawExtension : '.bin'
+    return `${parts.join('-')}_${time.join('-')}_${safePathSegment(messageId, 'media')}${extension}`
 }
 
 function asyncRoute(
@@ -164,6 +231,124 @@ export function createApiApp() {
                 messages: page.messages,
                 nextCursor: encodeCursor(page.nextCursor),
             })
+        })
+    )
+
+    app.get(
+        '/api/album',
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const categories = parseMediaCategories(request.query.types)
+            const messageTypes = categories.map((category) => MEDIA_TYPES[category])
+            const groupJid = parseOptionalGroup(request.query.group)
+            const cursor = decodeCursor(request.query.cursor)
+            const limit = parseAlbumLimit(request.query.limit)
+            const [page, counts] = await Promise.all([
+                listAlbumMedia(
+                    range.fromTimestamp,
+                    range.toTimestamp,
+                    messageTypes,
+                    limit,
+                    groupJid,
+                    cursor
+                ),
+                countAlbumMedia(range.fromTimestamp, range.toTimestamp, groupJid),
+            ])
+
+            response.json({
+                range: { from: range.from, to: range.to },
+                scope: { groupJid: groupJid ?? null },
+                types: categories,
+                counts,
+                items: page.items.map((item) => ({
+                    ...item,
+                    category: ALL_MEDIA_CATEGORIES.find(
+                        (category) => MEDIA_TYPES[category] === item.messageType
+                    ),
+                    mediaUrl: `/api/media/${encodeURIComponent(item.messageId)}`,
+                })),
+                nextCursor: encodeCursor(page.nextCursor),
+            })
+        })
+    )
+
+    app.post(
+        '/api/album/download',
+        express.json({ limit: '64kb' }),
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const categories = parseMediaCategories(request.query.types)
+            const messageTypes = categories.map((category) => MEDIA_TYPES[category])
+            const groupJid = parseOptionalGroup(request.query.group)
+            const rawMessageIds = (request.body as { messageIds?: unknown } | undefined)?.messageIds
+            if (
+                !Array.isArray(rawMessageIds) ||
+                rawMessageIds.length === 0 ||
+                rawMessageIds.some((id) => typeof id !== 'string' || !id)
+            ) {
+                throw new Error('Invalid or empty media selection')
+            }
+
+            const messageIds = [...new Set(rawMessageIds as string[])]
+            if (messageIds.length > config.albumMaxBatchSize) {
+                response.status(400).json({
+                    error: `Select at most ${config.albumMaxBatchSize} media items`,
+                })
+                return
+            }
+
+            const media = await getAlbumMediaForDownload(
+                messageIds,
+                range.fromTimestamp,
+                range.toTimestamp,
+                messageTypes,
+                groupJid
+            )
+            if (media.length !== messageIds.length) {
+                response.status(400).json({
+                    error: 'One or more selected items are missing or outside the active filters',
+                })
+                return
+            }
+
+            const available: Array<(typeof media)[number] & { resolvedPath: string }> = []
+            for (const item of media) {
+                const resolvedPath = resolveMediaPath(item.mediaPath)
+                if (!resolvedPath || !existsSync(resolvedPath)) continue
+                if (!(await stat(resolvedPath)).isFile()) continue
+                available.push({ ...item, resolvedPath })
+            }
+            if (available.length === 0) {
+                response.status(404).json({ error: 'The selected media files are unavailable' })
+                return
+            }
+
+            const archiveName = `whatsapp-media_${range.from}_to_${range.to}.zip`
+            response.status(200)
+            response.setHeader('Content-Type', 'application/zip')
+            response.setHeader(
+                'Content-Disposition',
+                `attachment; filename="${archiveName}"`
+            )
+            response.setHeader('Cache-Control', 'no-store')
+
+            const archive = new ZipArchive({ zlib: { level: 6 } })
+            archive.on('warning', (warning: Error) => console.warn('Album archive warning:', warning))
+            archive.on('error', (error: Error) => {
+                console.error('Album archive error:', error)
+                response.destroy(error)
+            })
+            request.on('aborted', () => archive.abort())
+            archive.pipe(response)
+
+            for (const item of available) {
+                const filename = hktFilename(item.timestamp, item.messageId, item.resolvedPath)
+                const archivePath = groupJid
+                    ? filename
+                    : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`
+                archive.append(createReadStream(item.resolvedPath), { name: archivePath })
+            }
+            await archive.finalize()
         })
     )
 

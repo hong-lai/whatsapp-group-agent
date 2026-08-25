@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import AlbumView, { type AlbumScope, type MediaCategory } from './AlbumView'
 
 type Group = {
     jid: string
@@ -33,6 +34,16 @@ type GroupsResponse = {
 type MessagesResponse = {
     messages: Message[]
     nextCursor: string | null
+}
+
+const allMediaCategories: MediaCategory[] = ['image', 'video', 'document', 'audio', 'sticker']
+
+function initialMediaCategories(params: URLSearchParams): MediaCategory[] {
+    const requested = params.get('types')?.split(',') || []
+    const valid = requested.filter((item): item is MediaCategory =>
+        allMediaCategories.includes(item as MediaCategory)
+    )
+    return valid.length ? [...new Set(valid)] : allMediaCategories
 }
 
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
@@ -173,6 +184,15 @@ export default function App() {
     const [from, setFrom] = useState(initialParams.get('from') || addDays(today, -6))
     const [to, setTo] = useState(initialParams.get('to') || today)
     const [selectedJid, setSelectedJid] = useState<string | null>(initialParams.get('group'))
+    const [view, setView] = useState<'messages' | 'album'>(
+        initialParams.get('view') === 'album' ? 'album' : 'messages'
+    )
+    const [albumScope, setAlbumScope] = useState<AlbumScope>(
+        initialParams.get('scope') === 'group' ? 'group' : 'all'
+    )
+    const [albumTypes, setAlbumTypes] = useState<MediaCategory[]>(
+        initialMediaCategories(initialParams)
+    )
     const [search, setSearch] = useState('')
     const [groups, setGroups] = useState<Group[]>([])
     const [messages, setMessages] = useState<Message[]>([])
@@ -205,9 +225,14 @@ export default function App() {
         const params = new URLSearchParams()
         params.set('from', from)
         params.set('to', to)
+        params.set('view', view)
         if (selectedJid) params.set('group', selectedJid)
+        if (view === 'album') {
+            params.set('scope', albumScope)
+            params.set('types', albumTypes.join(','))
+        }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
-    }, [from, to, selectedJid])
+    }, [from, to, selectedJid, view, albumScope, albumTypes])
 
     useEffect(() => {
         if (invalidRange) {
@@ -352,6 +377,20 @@ export default function App() {
                         <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
                     </label>
                 </div>
+                <div className="view-switch" aria-label="Dashboard view">
+                    <button
+                        className={view === 'messages' ? 'active' : ''}
+                        onClick={() => setView('messages')}
+                    >
+                        Messages
+                    </button>
+                    <button
+                        className={view === 'album' ? 'active' : ''}
+                        onClick={() => setView('album')}
+                    >
+                        Album
+                    </button>
+                </div>
                 <div className="presets" aria-label="Date presets">
                     {[1, 7, 30].map((days) => (
                         <button
@@ -374,10 +413,24 @@ export default function App() {
             )}
 
             <main
-                className={`dashboard ${groupsLoading || messagesLoading ? 'is-refreshing' : ''}`}
+                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''} ${groupsLoading || messagesLoading ? 'is-refreshing' : ''}`}
                 aria-busy={groupsLoading || messagesLoading}
             >
-                <aside className="groups-panel">
+                {view === 'album' ? (
+                    <AlbumView
+                        from={from}
+                        to={to}
+                        groups={groups}
+                        selectedJid={selectedJid}
+                        onSelectGroup={setSelectedJid}
+                        scope={albumScope}
+                        onScopeChange={setAlbumScope}
+                        types={albumTypes}
+                        onTypesChange={setAlbumTypes}
+                    />
+                ) : (
+                    <>
+                    <aside className="groups-panel">
                     <div className="panel-heading">
                         <div>
                             <p className="eyebrow">GROUPS</p>
@@ -510,11 +563,10 @@ export default function App() {
                             <p>Choose a group to explore its archived messages and media.</p>
                         </div>
                     )}
-                </section>
+                    </section>
+                    </>
+                )}
             </main>
-            <footer>
-                Times shown in Hong Kong time · Read-only archive
-            </footer>
         </div>
     )
 }

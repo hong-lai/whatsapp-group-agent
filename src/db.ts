@@ -38,6 +38,10 @@ export async function initDb(): Promise<void> {
 
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
             ON messages (group_jid, timestamp DESC, message_id DESC);
+
+        CREATE INDEX IF NOT EXISTS messages_media_timestamp_idx
+            ON messages (timestamp DESC, message_id DESC)
+            WHERE media_path IS NOT NULL AND is_deleted = FALSE;
     `)
         console.log('Postgres schema ready')
     } catch (err) {
@@ -331,4 +335,184 @@ export async function getDashboardMedia(
     )
     const row = result.rows[0]
     return row ? { mediaPath: row.media_path, messageType: row.message_type } : undefined
+}
+
+export type AlbumMedia = {
+    messageId: string
+    groupJid: string
+    groupName: string
+    senderName: string | null
+    messageType: string
+    textContent: string | null
+    timestamp: number
+}
+
+type AlbumMediaRow = {
+    message_id: string
+    group_jid: string
+    group_name: string
+    sender_name: string | null
+    message_type: string
+    text_content: string | null
+    timestamp: string
+}
+
+export async function listAlbumMedia(
+    fromTimestamp: number,
+    toTimestamp: number,
+    messageTypes: string[],
+    limit: number,
+    groupJid?: string,
+    cursor?: MessageCursor
+): Promise<{ items: AlbumMedia[]; nextCursor: MessageCursor | null }> {
+    const result = await pool.query<AlbumMediaRow>(
+        `SELECT
+            m.message_id,
+            m.group_jid,
+            g.name AS group_name,
+            s.display_name AS sender_name,
+            m.message_type,
+            m.text_content,
+            m.timestamp::text
+         FROM messages m
+         JOIN groups g ON g.jid = m.group_jid
+         LEFT JOIN senders s ON s.jid = m.sender_jid
+         WHERE m.media_path IS NOT NULL
+           AND m.is_deleted = FALSE
+           AND m.timestamp >= $1
+           AND m.timestamp < $2
+           AND m.message_type = ANY($3::text[])
+           AND ($4::text IS NULL OR m.group_jid = $4)
+           AND (
+                $5::bigint IS NULL
+                OR m.timestamp < $5
+                OR (m.timestamp = $5 AND m.message_id < $6)
+           )
+         ORDER BY m.timestamp DESC, m.message_id DESC
+         LIMIT $7`,
+        [
+            fromTimestamp,
+            toTimestamp,
+            messageTypes,
+            groupJid ?? null,
+            cursor?.timestamp ?? null,
+            cursor?.messageId ?? null,
+            limit + 1,
+        ]
+    )
+
+    const hasMore = result.rows.length > limit
+    const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows
+    const last = pageRows.at(-1)
+    return {
+        items: pageRows.map((row) => ({
+            messageId: row.message_id,
+            groupJid: row.group_jid,
+            groupName: row.group_name,
+            senderName: row.sender_name,
+            messageType: row.message_type,
+            textContent: row.text_content,
+            timestamp: Number(row.timestamp),
+        })),
+        nextCursor:
+            hasMore && last
+                ? { timestamp: Number(last.timestamp), messageId: last.message_id }
+                : null,
+    }
+}
+
+export type AlbumCounts = {
+    image: number
+    video: number
+    document: number
+    audio: number
+    sticker: number
+}
+
+type AlbumCountRow = {
+    category: keyof AlbumCounts
+    count: number
+}
+
+export async function countAlbumMedia(
+    fromTimestamp: number,
+    toTimestamp: number,
+    groupJid?: string
+): Promise<AlbumCounts> {
+    const result = await pool.query<AlbumCountRow>(
+        `SELECT
+            CASE m.message_type
+                WHEN 'imageMessage' THEN 'image'
+                WHEN 'videoMessage' THEN 'video'
+                WHEN 'documentMessage' THEN 'document'
+                WHEN 'audioMessage' THEN 'audio'
+                WHEN 'stickerMessage' THEN 'sticker'
+            END AS category,
+            COUNT(*)::int AS count
+         FROM messages m
+         WHERE m.media_path IS NOT NULL
+           AND m.is_deleted = FALSE
+           AND m.timestamp >= $1
+           AND m.timestamp < $2
+           AND ($3::text IS NULL OR m.group_jid = $3)
+           AND m.message_type = ANY($4::text[])
+         GROUP BY category`,
+        [
+            fromTimestamp,
+            toTimestamp,
+            groupJid ?? null,
+            ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'],
+        ]
+    )
+
+    const counts: AlbumCounts = { image: 0, video: 0, document: 0, audio: 0, sticker: 0 }
+    for (const row of result.rows) counts[row.category] = row.count
+    return counts
+}
+
+export type AlbumDownloadMedia = AlbumMedia & {
+    mediaPath: string
+}
+
+export async function getAlbumMediaForDownload(
+    messageIds: string[],
+    fromTimestamp: number,
+    toTimestamp: number,
+    messageTypes: string[],
+    groupJid?: string
+): Promise<AlbumDownloadMedia[]> {
+    const result = await pool.query<AlbumMediaRow & { media_path: string }>(
+        `SELECT
+            m.message_id,
+            m.group_jid,
+            g.name AS group_name,
+            s.display_name AS sender_name,
+            m.message_type,
+            m.text_content,
+            m.timestamp::text,
+            m.media_path
+         FROM messages m
+         JOIN groups g ON g.jid = m.group_jid
+         LEFT JOIN senders s ON s.jid = m.sender_jid
+         WHERE m.message_id = ANY($1::text[])
+           AND m.media_path IS NOT NULL
+           AND m.is_deleted = FALSE
+           AND m.timestamp >= $2
+           AND m.timestamp < $3
+           AND m.message_type = ANY($4::text[])
+           AND ($5::text IS NULL OR m.group_jid = $5)
+         ORDER BY m.timestamp ASC, m.message_id ASC`,
+        [messageIds, fromTimestamp, toTimestamp, messageTypes, groupJid ?? null]
+    )
+
+    return result.rows.map((row) => ({
+        messageId: row.message_id,
+        groupJid: row.group_jid,
+        groupName: row.group_name,
+        senderName: row.sender_name,
+        messageType: row.message_type,
+        textContent: row.text_content,
+        timestamp: Number(row.timestamp),
+        mediaPath: row.media_path,
+    }))
 }
