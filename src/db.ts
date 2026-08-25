@@ -289,6 +289,10 @@ export async function insertMessage(row: MessageRow): Promise<void> {
     )
 }
 
+export async function updateMessageMediaPath(messageId: string, mediaPath: string): Promise<void> {
+    await pool.query('UPDATE messages SET media_path = $1 WHERE message_id = $2', [mediaPath, messageId])
+}
+
 export async function hasMessage(messageId: string): Promise<boolean> {
     const result = await pool.query('SELECT 1 FROM messages WHERE message_id = $1 LIMIT 1', [messageId])
     return (result.rowCount ?? 0) > 0

@@ -40,6 +40,7 @@ import {
     removeReaction,
     attachNearbyAlbumMedia,
     findRecentAlbumParent,
+    updateMessageMediaPath,
     upsertGroup,
     upsertReaction,
     upsertSender,
@@ -55,7 +56,7 @@ import {
     rememberMessageSecret,
     textFromMessage,
 } from './edits.js'
-import { waitHistoryRead, waitMediaDownload } from './rateLimit.js'
+import { createSerialQueue, waitMediaDownload } from './rateLimit.js'
 
 const fileTypes: Record<string, string> = {
     imageMessage: 'jpeg',
@@ -120,6 +121,64 @@ function albumParentIdOf(message: proto.IMessage | null | undefined): string | n
         return null
     }
     return parentId
+}
+
+async function storeMediaFile(
+    m: WAMessage,
+    sock: WASocket,
+    {
+        messageId,
+        groupJid,
+        groupName,
+        messageType,
+        timestamp,
+        isHistory,
+    }: {
+        messageId: string
+        groupJid: string
+        groupName: string
+        messageType: string
+        timestamp: number
+        isHistory: boolean
+    }
+): Promise<string | null> {
+    if (!fileTypes[messageType]) return null
+    try {
+        await waitMediaDownload()
+        const stream = await downloadMediaMessage(
+            m,
+            'stream',
+            {},
+            {
+                logger,
+                reuploadRequest: sock.updateMediaMessage,
+            }
+        )
+        const hktDate = new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'Asia/Hong_Kong',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+        }).format(timestamp * 1000)
+
+        const safeFolderName = groupName.replace(/[/\\?%*:|"<>]/g, '_')
+        const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
+
+        if (!existsSync(folderPath)) {
+            mkdirSync(folderPath, { recursive: true })
+        }
+
+        const fileName = `${folderPath}/${timestamp}_${messageId}.${fileTypes[messageType]}`
+        await pipeline(stream as Readable, createWriteStream(fileName))
+        await updateMessageMediaPath(messageId, fileName)
+        return fileName
+    } catch (err) {
+        log.warn(
+            { err, messageId, groupJid, groupName, messageType, isHistory },
+            'media.download_failed'
+        )
+        return null
+    }
 }
 
 async function resolveGroupMetadata(jid: string, sock: WASocket): Promise<GroupMetadata | undefined> {
@@ -250,45 +309,6 @@ async function processMessage(
         albumParentId = await findRecentAlbumParent(jid, senderId, timestamp)
     }
 
-    let mediaPath: string | null = null
-
-    if (messageType && fileTypes[messageType]) {
-        try {
-            await waitMediaDownload()
-            const stream = await downloadMediaMessage(
-                m,
-                'stream',
-                {},
-                {
-                    logger,
-                    reuploadRequest: sock.updateMediaMessage,
-                }
-            )
-            const hktDate = new Intl.DateTimeFormat('en-CA', {
-                timeZone: 'Asia/Hong_Kong',
-                year: 'numeric',
-                month: '2-digit',
-                day: '2-digit',
-            }).format(timestamp * 1000)
-
-            const safeFolderName = groupName.replace(/[/\\?%*:|"<>]/g, '_')
-            const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
-
-            if (!existsSync(folderPath)) {
-                mkdirSync(folderPath, { recursive: true })
-            }
-
-            const fileName = `${folderPath}/${timestamp}_${messageId}.${fileTypes[messageType]}`
-            await pipeline(stream as Readable, createWriteStream(fileName))
-            mediaPath = fileName
-        } catch (err) {
-            log.warn(
-                { err, messageId, groupJid: jid, groupName, messageType, isHistory },
-                'media.download_failed'
-            )
-        }
-    }
-
     if (!messageId) return 'ignored'
 
     try {
@@ -301,7 +321,7 @@ async function processMessage(
             messageSecret,
             messageType,
             textContent,
-            mediaPath,
+            mediaPath: null,
             replyToId,
             quotedMessage,
             albumParentId,
@@ -318,6 +338,16 @@ async function processMessage(
                 timestamp,
             })
         }
+        const mediaMeta = {
+            messageId,
+            groupJid: jid,
+            groupName,
+            messageType,
+            timestamp,
+            isHistory,
+        }
+        if (isHistory) void storeMediaFile(m, sock, mediaMeta)
+        else await storeMediaFile(m, sock, mediaMeta)
         ingestLog(
             {
                 messageId,
@@ -326,7 +356,7 @@ async function processMessage(
                 senderJid: senderId,
                 senderName,
                 messageType,
-                hasMedia: Boolean(mediaPath),
+                hasMedia: Boolean(fileTypes[messageType]),
                 albumParentId,
                 isHistory,
             },
@@ -365,6 +395,7 @@ async function connectToWhatsApp() {
         },
     })
     const catchup = createCatchup(sock)
+    const runIngest = createSerialQueue()
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
@@ -388,6 +419,7 @@ async function connectToWhatsApp() {
                     'whatsapp.disconnected'
                 )
             }
+            catchup.stop()
             connectToWhatsApp()
         } else if (connection === 'open') {
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
@@ -407,81 +439,95 @@ async function connectToWhatsApp() {
                 },
                 'groups.cached'
             )
+            catchup.noteConnected()
         }
     })
 
-    sock.ev.on('messaging-history.set', async ({ messages, contacts, syncType }) => {
-        const started = Date.now()
-        const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0 }
-        const latestBefore = new Map<string, number | undefined>()
-        log.info(
-            { syncType, messages: messages?.length || 0, contacts: contacts?.length || 0 },
-            'history.sync.start'
-        )
+    sock.ev.on('messaging-history.set', (event) => {
+        catchup.noteHistoryChunk()
+        void runIngest(async () => {
+            const { messages, contacts, syncType } = event
+            const started = Date.now()
+            const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0 }
+            const latestBefore = new Map<string, number | undefined>()
+            log.info(
+                { syncType, messages: messages?.length || 0, contacts: contacts?.length || 0 },
+                'history.sync.start'
+            )
 
-        for (const m of messages || []) {
-            const groupJid = m.key.remoteJid
-            if (groupJid && !latestBefore.has(groupJid)) {
-                const latest = await getLatestGroupMessage(groupJid)
-                latestBefore.set(groupJid, latest?.timestamp)
+            for (const m of messages || []) {
+                const groupJid = m.key.remoteJid
+                if (groupJid && !latestBefore.has(groupJid)) {
+                    const latest = await getLatestGroupMessage(groupJid)
+                    latestBefore.set(groupJid, latest?.timestamp)
+                }
+                counts[await processMessage(m, sock, true)] += 1
             }
-            await waitHistoryRead()
-            counts[await processMessage(m, sock, true)] += 1
-        }
-        for (const m of messages || []) {
-            const result = await applyIncomingEdit(m, true)
-            if (result === 'applied') counts.edited += 1
-        }
-        await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
-        log.info(
-            { syncType, ms: Date.now() - started, ...counts },
-            'history.sync.done'
-        )
+            for (const m of messages || []) {
+                const result = await applyIncomingEdit(m, true)
+                if (result === 'applied') counts.edited += 1
+            }
+            await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
+            log.info(
+                { syncType, ms: Date.now() - started, ...counts },
+                'history.sync.done'
+            )
+        })
     })
 
-    sock.ev.on('messages.upsert', async (event) => {
-        if (event.type !== 'notify' && event.type !== 'append') return
-        const isHistory = event.type === 'append' || Boolean(event.requestId)
-        for (const m of event.messages) {
-            if (!isEditEnvelope(m.message)) {
-                await catchup.considerMessage(
-                    m,
-                    event.requestId ? 'phone_unavailable' : event.type
-                )
-            }
-        }
-        for (const m of event.messages) {
-            await processMessage(m, sock, isHistory)
-        }
-        for (const m of event.messages) {
-            await applyIncomingEdit(m, isHistory)
-        }
+    sock.ev.on('messaging-history.status', (status) => {
+        catchup.noteHistoryStatus(status.syncType, status.status)
     })
 
-    sock.ev.on('messages.update', async (updates) => {
-        const deletedIds: string[] = []
-        for (const u of updates) {
-            if (u.update.messageStubType === 1 && u.key.id) {
-                deletedIds.push(u.key.id)
+    sock.ev.on('messages.upsert', (event) => {
+        void runIngest(async () => {
+            if (event.type !== 'notify' && event.type !== 'append') return
+            const isHistory = event.type === 'append' || Boolean(event.requestId)
+            for (const m of event.messages) {
+                if (!isEditEnvelope(m.message)) {
+                    await catchup.considerMessage(
+                        m,
+                        event.requestId ? 'phone_unavailable' : event.type
+                    )
+                }
             }
-            if (u.update.message) {
-                await applyEditUpdate(u.key, u.update.message)
+            for (const m of event.messages) {
+                await processMessage(m, sock, isHistory)
             }
-        }
-        if (deletedIds.length > 0) {
-            await markMessagesDeleted(deletedIds)
-            log.info({ count: deletedIds.length, messageIds: deletedIds }, 'messages.deleted')
-        }
+            for (const m of event.messages) {
+                await applyIncomingEdit(m, isHistory)
+            }
+        })
     })
 
-    sock.ev.on('messages.delete', async (e) => {
-        if ('keys' in e) {
-            const ids = e.keys.map((k) => k.id).filter((id): id is string => Boolean(id))
-            await markMessagesDeleted(ids)
-            log.info({ count: ids.length, messageIds: ids }, 'messages.deleted')
-            return
-        }
-        log.warn({ groupJid: e.jid }, 'messages.deleted_all')
+    sock.ev.on('messages.update', (updates) => {
+        void runIngest(async () => {
+            const deletedIds: string[] = []
+            for (const u of updates) {
+                if (u.update.messageStubType === 1 && u.key.id) {
+                    deletedIds.push(u.key.id)
+                }
+                if (u.update.message) {
+                    await applyEditUpdate(u.key, u.update.message)
+                }
+            }
+            if (deletedIds.length > 0) {
+                await markMessagesDeleted(deletedIds)
+                log.info({ count: deletedIds.length, messageIds: deletedIds }, 'messages.deleted')
+            }
+        })
+    })
+
+    sock.ev.on('messages.delete', (e) => {
+        void runIngest(async () => {
+            if ('keys' in e) {
+                const ids = e.keys.map((k) => k.id).filter((id): id is string => Boolean(id))
+                await markMessagesDeleted(ids)
+                log.info({ count: ids.length, messageIds: ids }, 'messages.deleted')
+                return
+            }
+            log.warn({ groupJid: e.jid }, 'messages.deleted_all')
+        })
     })
 
     sock.ev.on('chats.upsert', async (chats) => {

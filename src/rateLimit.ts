@@ -1,8 +1,6 @@
 import { redis } from './cache.js'
 import { config } from './config.js'
 
-let chain: Promise<unknown> = Promise.resolve()
-
 function jitter(minMs: number, maxMs: number): number {
     if (maxMs <= minMs) return minMs
     return minMs + Math.floor(Math.random() * (maxMs - minMs + 1))
@@ -12,7 +10,19 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-async function waitSlot(key: string, minMs: number, maxMs: number): Promise<void> {
+export function createSerialQueue() {
+    let chain: Promise<unknown> = Promise.resolve()
+    return function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+        const run = chain.then(fn, fn) as Promise<T>
+        chain = run.then(
+            () => undefined,
+            () => undefined
+        )
+        return run
+    }
+}
+
+async function waitSlot(key: string, minMs: number, maxMs: number): Promise<number> {
     const delay = jitter(minMs, maxMs)
     const now = Date.now()
     const lastRaw = await redis.get(key)
@@ -20,22 +30,24 @@ async function waitSlot(key: string, minMs: number, maxMs: number): Promise<void
     const waitMs = last > 0 ? Math.max(0, last + delay - now) : 0
     if (waitMs > 0) await sleep(waitMs)
     await redis.set(key, String(Date.now()))
+    return waitMs
 }
 
-function enqueue(fn: () => Promise<void>): Promise<void> {
-    const run = chain.then(fn, fn)
-    chain = run.then(() => undefined, () => undefined)
-    return run
-}
+const historyRequestQueue = createSerialQueue()
+const mediaQueue = createSerialQueue()
 
-export function waitHistoryRead(): Promise<void> {
-    return enqueue(() =>
-        waitSlot('ratelimit:history', config.historyDelayMinMs, config.historyDelayMaxMs)
+export function waitHistoryRequest(): Promise<number> {
+    return historyRequestQueue(() =>
+        waitSlot('ratelimit:history-request', config.historyRequestMinMs, config.historyRequestMaxMs)
     )
 }
 
-export function waitMediaDownload(): Promise<void> {
-    return enqueue(() =>
+export function waitMediaDownload(): Promise<number> {
+    return mediaQueue(() =>
         waitSlot('ratelimit:media', config.mediaDelayMinMs, config.mediaDelayMaxMs)
     )
+}
+
+export function settleDelayMs(): number {
+    return jitter(config.historySettleMinMs, config.historySettleMaxMs)
 }
