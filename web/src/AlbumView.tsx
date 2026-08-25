@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import { mergeFirstPage, useVisibleInterval } from './useVisibleInterval'
 
 export type MediaCategory = 'image' | 'video' | 'document' | 'audio' | 'sticker'
 export type AlbumScope = 'all' | 'group'
@@ -37,6 +38,8 @@ type Props = {
     onScopeChange: (scope: AlbumScope) => void
     types: MediaCategory[]
     onTypesChange: (types: MediaCategory[]) => void
+    active: boolean
+    onLiveUpdate: () => void
 }
 
 export const allMediaCategories: MediaCategory[] = ['image', 'video', 'document', 'audio', 'sticker']
@@ -190,6 +193,8 @@ export default function AlbumView({
     onScopeChange,
     types,
     onTypesChange,
+    active,
+    onLiveUpdate,
 }: Props) {
     const [items, setItems] = useState<AlbumItem[]>([])
     const [counts, setCounts] = useState<Record<MediaCategory, number>>(emptyCounts)
@@ -201,12 +206,33 @@ export default function AlbumView({
     const [downloading, setDownloading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const requestId = useRef(0)
+    const silentGen = useRef(0)
+    const silentBusy = useRef(false)
+    const scrollRef = useRef<HTMLDivElement>(null)
+    const scrollRestore = useRef<{ top: number; height: number } | null>(null)
+    const nextCursorRef = useRef<string | null>(null)
+    nextCursorRef.current = nextCursor
     const showingAll = isAllTypes(types)
 
     const scopeGroup = scope === 'group' ? selectedJid : null
     const filterKey = `${from}|${to}|${scope}|${scopeGroup || ''}|${types.join(',')}`
 
     useEffect(() => {
+        return () => {
+            silentGen.current += 1
+        }
+    }, [])
+
+    useLayoutEffect(() => {
+        const pending = scrollRestore.current
+        const list = scrollRef.current
+        if (!pending || !list) return
+        list.scrollTop = pending.top + (list.scrollHeight - pending.height)
+        scrollRestore.current = null
+    }, [items])
+
+    useEffect(() => {
+        silentGen.current += 1
         setSelected(new Set())
         setLightbox(null)
         if (scope === 'group' && !selectedJid) {
@@ -217,6 +243,7 @@ export default function AlbumView({
         }
         const controller = new AbortController()
         const currentRequest = ++requestId.current
+        scrollRestore.current = null
         setLoading(true)
         setError(null)
         albumJson(albumUrl(from, to, scope, selectedJid, types), controller.signal)
@@ -236,6 +263,53 @@ export default function AlbumView({
             })
         return () => controller.abort()
     }, [filterKey, from, to, scope, selectedJid, types])
+
+    async function silentRefresh() {
+        if (!active || loading || loadingMore || downloading || silentBusy.current) return
+        if (scope === 'group' && !selectedJid) return
+        const gen = ++silentGen.current
+        silentBusy.current = true
+        try {
+            const data = await albumJson(albumUrl(from, to, scope, selectedJid, types))
+            if (gen !== silentGen.current) return
+            const list = scrollRef.current
+            if (list && list.scrollTop > 40) {
+                scrollRestore.current = { top: list.scrollTop, height: list.scrollHeight }
+            } else {
+                scrollRestore.current = null
+            }
+            setItems((current) => {
+                const merged = mergeFirstPage(current, data.items)
+                nextCursorRef.current = merged.keptTail ? nextCursorRef.current : data.nextCursor
+                return merged.items
+            })
+            setNextCursor(nextCursorRef.current)
+            setCounts(data.counts)
+            setLightbox((open) => {
+                if (!open) return open
+                const next = data.items.find((item) => item.messageId === open.messageId)
+                if (!next) return open
+                if (
+                    next.mediaUrl === open.mediaUrl &&
+                    next.textContent === open.textContent &&
+                    next.senderName === open.senderName &&
+                    next.timestamp === open.timestamp &&
+                    next.groupName === open.groupName
+                ) {
+                    return open
+                }
+                return next
+            })
+            setError(null)
+            onLiveUpdate()
+        } catch (reason: unknown) {
+            if ((reason as Error).name === 'AbortError') return
+        } finally {
+            silentBusy.current = false
+        }
+    }
+
+    useVisibleInterval(silentRefresh, active ? 10_000 : null)
 
     const selectedItems = useMemo(
         () => items.filter((item) => selected.has(item.messageId)),
@@ -266,6 +340,7 @@ export default function AlbumView({
 
     async function loadMore() {
         if (!nextCursor || loadingMore) return
+        silentGen.current += 1
         setLoadingMore(true)
         setError(null)
         try {
@@ -283,6 +358,7 @@ export default function AlbumView({
 
     async function downloadZip() {
         if (selected.size === 0 || downloading) return
+        silentGen.current += 1
         setDownloading(true)
         setError(null)
         try {
@@ -405,7 +481,7 @@ export default function AlbumView({
 
             {error && <div className="album-error" role="alert">{error}</div>}
 
-            <div className={`album-scroll ${showOverlay ? 'is-loading' : ''}`}>
+            <div className={`album-scroll ${showOverlay ? 'is-loading' : ''}`} ref={scrollRef}>
                 {showOverlay && (
                     <div className="content-overlay" role="status">
                         <span className="overlay-spinner" />

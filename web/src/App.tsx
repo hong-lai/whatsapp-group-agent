@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
+import { mergeFirstPage, useVisibleInterval } from './useVisibleInterval'
 
 type Group = {
     jid: string
@@ -452,9 +453,18 @@ export default function App() {
     const [loadingMore, setLoadingMore] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [reloadKey, setReloadKey] = useState(0)
+    const [livePulse, setLivePulse] = useState(false)
     const [pattern, setPattern] = useState<{ source: string; flags: string } | null>(null)
     const groupsRequestId = useRef(0)
     const messagesRequestId = useRef(0)
+    const silentGen = useRef(0)
+    const silentBusy = useRef(false)
+    const pulseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+    const lastPulse = useRef(0)
+    const messageListRef = useRef<HTMLDivElement>(null)
+    const scrollRestore = useRef<{ top: number; height: number } | null>(null)
+    const nextCursorRef = useRef<string | null>(null)
+    nextCursorRef.current = nextCursor
 
     const invalidRange = from > to
     const selectedGroup = groups.find((group) => group.jid === selectedJid) || null
@@ -489,7 +499,32 @@ export default function App() {
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
     }, [from, to, selectedJid, view, albumScope, albumTypes])
 
+    function pulseLive() {
+        const now = Date.now()
+        if (now - lastPulse.current < 400) return
+        lastPulse.current = now
+        setLivePulse(true)
+        if (pulseTimer.current) clearTimeout(pulseTimer.current)
+        pulseTimer.current = setTimeout(() => setLivePulse(false), 700)
+    }
+
     useEffect(() => {
+        return () => {
+            silentGen.current += 1
+            if (pulseTimer.current) clearTimeout(pulseTimer.current)
+        }
+    }, [])
+
+    useLayoutEffect(() => {
+        const pending = scrollRestore.current
+        const list = messageListRef.current
+        if (!pending || !list) return
+        list.scrollTop = pending.top + (list.scrollHeight - pending.height)
+        scrollRestore.current = null
+    }, [messages])
+
+    useEffect(() => {
+        silentGen.current += 1
         if (invalidRange) {
             groupsRequestId.current += 1
             setGroupsLoading(false)
@@ -527,6 +562,7 @@ export default function App() {
     }, [from, to, invalidRange, reloadKey])
 
     useEffect(() => {
+        silentGen.current += 1
         if (!selectedJid || invalidRange) {
             messagesRequestId.current += 1
             setMessagesLoading(false)
@@ -538,6 +574,7 @@ export default function App() {
         }
         const controller = new AbortController()
         const requestId = ++messagesRequestId.current
+        scrollRestore.current = null
         setMessagesLoading(true)
         setError(null)
         getJson<MessagesResponse>(
@@ -563,8 +600,79 @@ export default function App() {
         return () => controller.abort()
     }, [selectedJid, from, to, invalidRange, reloadKey])
 
+    async function silentRefresh() {
+        if (
+            invalidRange ||
+            groupsLoading ||
+            messagesLoading ||
+            loadingMore ||
+            silentBusy.current
+        ) {
+            return
+        }
+        const gen = ++silentGen.current
+        const rangeFrom = from
+        const rangeTo = to
+        const jid = selectedJid
+        const currentView = view
+        silentBusy.current = true
+        try {
+            const groupsData = await getJson<GroupsResponse>(
+                `/api/groups?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}`
+            )
+            if (gen !== silentGen.current) return
+            setGroups(groupsData.groups)
+            if (groupsData.pattern?.source) setPattern(groupsData.pattern)
+            setSelectedJid((current) => {
+                if (!current) {
+                    return (
+                        groupsData.groups.find((group) => group.messageCount > 0)?.jid ||
+                        groupsData.groups[0]?.jid ||
+                        null
+                    )
+                }
+                if (groupsData.groups.some((group) => group.jid === current)) return current
+                return (
+                    groupsData.groups.find((group) => group.messageCount > 0)?.jid ||
+                    groupsData.groups[0]?.jid ||
+                    null
+                )
+            })
+            setError(null)
+
+            if (currentView === 'messages' && jid) {
+                const messagesData = await getJson<MessagesResponse>(
+                    `/api/groups/${encodeURIComponent(jid)}/messages?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}`
+                )
+                if (gen !== silentGen.current) return
+                const list = messageListRef.current
+                if (list && list.scrollTop > 40) {
+                    scrollRestore.current = { top: list.scrollTop, height: list.scrollHeight }
+                } else {
+                    scrollRestore.current = null
+                }
+                setMessages((current) => {
+                    const merged = mergeFirstPage(current, messagesData.messages)
+                    nextCursorRef.current = merged.keptTail
+                        ? nextCursorRef.current
+                        : messagesData.nextCursor
+                    return merged.items
+                })
+                setNextCursor(nextCursorRef.current)
+            }
+            pulseLive()
+        } catch (reason: unknown) {
+            if ((reason as Error).name === 'AbortError') return
+        } finally {
+            silentBusy.current = false
+        }
+    }
+
+    useVisibleInterval(silentRefresh, 10_000)
+
     async function loadMore() {
         if (!selectedJid || !nextCursor || loadingMore) return
+        silentGen.current += 1
         setLoadingMore(true)
         try {
             const data = await getJson<MessagesResponse>(
@@ -608,7 +716,7 @@ export default function App() {
                             ))}
                         </div>
                     )}
-                    <span className="status-dot" />
+                    <span className={`status-dot${livePulse ? ' is-live' : ''}`} />
                     Connected
                 </div>
             </header>
@@ -770,7 +878,10 @@ export default function App() {
                             {messagesLoading && messages.length === 0 ? (
                                 <SkeletonMessages />
                             ) : messages.length ? (
-                                <div className={`message-list ${messagesLoading ? 'is-loading' : ''}`}>
+                                <div
+                                    className={`message-list ${messagesLoading ? 'is-loading' : ''}`}
+                                    ref={messageListRef}
+                                >
                                     {messagesLoading && (
                                         <div className="content-overlay" role="status">
                                             <span className="overlay-spinner" />
@@ -815,6 +926,8 @@ export default function App() {
                         onScopeChange={setAlbumScope}
                         types={albumTypes}
                         onTypesChange={setAlbumTypes}
+                        active={view === 'album'}
+                        onLiveUpdate={pulseLive}
                     />
                 </div>
             </main>

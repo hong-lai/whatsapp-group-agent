@@ -152,6 +152,22 @@ svg {
     box-shadow: 0 0 0 4px rgba(41, 169, 131, 0.13);
 }
 
+.status-dot.is-live {
+    animation: status-live 700ms ease;
+}
+
+@keyframes status-live {
+    0%,
+    100% {
+        background: #29a983;
+        box-shadow: 0 0 0 4px rgba(41, 169, 131, 0.13);
+    }
+    45% {
+        background: #4ee0b4;
+        box-shadow: 0 0 0 8px rgba(41, 169, 131, 0.32);
+    }
+}
+
 .hero {
     display: flex;
     align-items: center;
