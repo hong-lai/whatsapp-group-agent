@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
-import { mergeFirstPage, useVisibleInterval } from './useVisibleInterval'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
 
 export type MediaCategory = 'image' | 'video' | 'document' | 'audio' | 'sticker'
 export type AlbumScope = 'all' | 'group'
@@ -47,13 +47,13 @@ export const allMediaCategories: MediaCategory[] = ['image', 'video', 'document'
 const categoryOptions: Array<{
     id: MediaCategory
     label: string
-    icon: string
+    icon: 'image' | 'video' | 'document' | 'audio' | 'sticker'
 }> = [
-    { id: 'image', label: 'Images', icon: '▧' },
-    { id: 'video', label: 'Videos', icon: '▶' },
-    { id: 'document', label: 'PDFs / Docs', icon: '▤' },
-    { id: 'audio', label: 'Audio', icon: '♪' },
-    { id: 'sticker', label: 'Stickers', icon: '◇' },
+    { id: 'image', label: 'Images', icon: 'image' },
+    { id: 'video', label: 'Videos', icon: 'video' },
+    { id: 'document', label: 'PDFs / Docs', icon: 'document' },
+    { id: 'audio', label: 'Audio', icon: 'audio' },
+    { id: 'sticker', label: 'Stickers', icon: 'sticker' },
 ]
 
 const emptyCounts: Record<MediaCategory, number> = {
@@ -99,6 +99,122 @@ function stopTileAction(event: MouseEvent) {
     event.stopPropagation()
 }
 
+function groupAlbumItems(
+    items: AlbumItem[]
+): Array<{ jid: string; name: string; items: AlbumItem[] }> {
+    const order: string[] = []
+    const byJid = new Map<string, AlbumItem[]>()
+    for (const item of items) {
+        const existing = byJid.get(item.groupJid)
+        if (!existing) {
+            order.push(item.groupJid)
+            byJid.set(item.groupJid, [item])
+        } else {
+            existing.push(item)
+        }
+    }
+    return order.map((jid) => {
+        const grouped = byJid.get(jid) ?? []
+        return { jid, name: grouped[0]?.groupName || jid, items: grouped }
+    })
+}
+
+function ToolbarIcon({
+    name,
+}: {
+    name:
+        | 'groups'
+        | 'group'
+        | 'selectAll'
+        | 'clear'
+        | 'all'
+        | 'image'
+        | 'video'
+        | 'document'
+        | 'audio'
+        | 'sticker'
+}) {
+    const paths = {
+        groups: (
+            <>
+                <circle cx="9" cy="8" r="3" />
+                <path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6M17 14a5 5 0 0 1 4 5v1" />
+            </>
+        ),
+        group: (
+            <>
+                <circle cx="12" cy="8" r="3" />
+                <path d="M5 20v-1.5a7 7 0 0 1 14 0V20" />
+            </>
+        ),
+        selectAll: (
+            <>
+                <rect x="4" y="4" width="16" height="16" rx="3" />
+                <path d="m8 12 2.5 2.5L16 9" />
+            </>
+        ),
+        clear: <path d="M7 7l10 10M17 7 7 17" />,
+        all: (
+            <>
+                <rect x="4" y="4" width="7" height="7" rx="1.5" />
+                <rect x="13" y="4" width="7" height="7" rx="1.5" />
+                <rect x="4" y="13" width="7" height="7" rx="1.5" />
+                <rect x="13" y="13" width="7" height="7" rx="1.5" />
+            </>
+        ),
+        image: (
+            <>
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <circle cx="8.5" cy="10" r="1.5" />
+                <path d="m21 16-5.5-5.5-4 4L9 12l-6 6" />
+            </>
+        ),
+        video: (
+            <>
+                <rect x="3" y="6" width="14" height="12" rx="2" />
+                <path d="m17 10 4-2v8l-4-2z" />
+            </>
+        ),
+        document: (
+            <>
+                <path d="M7 3.5h7l5 5V20a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 20V5A1.5 1.5 0 0 1 7 3.5z" />
+                <path d="M14 3.5V9h5.5M8.5 13h7M8.5 16.5h5" />
+            </>
+        ),
+        audio: (
+            <>
+                <path d="M9 18V6l11-2v12" />
+                <circle cx="6.5" cy="18" r="2.5" />
+                <circle cx="17.5" cy="16" r="2.5" />
+            </>
+        ),
+        sticker: (
+            <>
+                <path d="M5 8.5A3.5 3.5 0 0 1 8.5 5h7A3.5 3.5 0 0 1 19 8.5v7A3.5 3.5 0 0 1 15.5 19h-7A3.5 3.5 0 0 1 5 15.5z" />
+                <path d="M9 10.2h.01M15 10.2h.01M9.5 14.5s1.3 1.8 2.5 1.8 2.5-1.8 2.5-1.8" />
+            </>
+        ),
+    }
+
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            {paths[name]}
+        </svg>
+    )
+}
+
+function SelectGlyph({ selected }: { selected: boolean }) {
+    return selected ? (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 12.5 10 17l9-10" />
+        </svg>
+    ) : (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+        </svg>
+    )
+}
+
 function MediaTile({
     item,
     selected,
@@ -112,28 +228,24 @@ function MediaTile({
 }) {
     const visual = item.category === 'image' || item.category === 'sticker' || item.category === 'video'
 
-    function onKeyDown(event: KeyboardEvent<HTMLElement>) {
-        if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault()
-            onToggle()
-        }
-    }
-
     return (
-        <article
-            className={`album-tile ${selected ? 'selected' : ''}`}
-            role="button"
-            tabIndex={0}
-            aria-pressed={selected}
-            aria-label={`${selected ? 'Deselect' : 'Select'} ${item.category} from ${item.groupName}`}
-            onClick={onToggle}
-            onKeyDown={onKeyDown}
-        >
-            <span className="tile-select" aria-hidden="true">
+        <article className={`album-tile ${selected ? 'selected' : ''}`}>
+            <button
+                type="button"
+                className="tile-select"
+                aria-label={`${selected ? 'Deselect' : 'Select'} ${item.category} from ${item.groupName}`}
+                aria-pressed={selected}
+                onClick={onToggle}
+            >
                 {selected ? '✓' : ''}
-            </span>
+            </button>
             {visual ? (
-                <div className="album-preview">
+                <button
+                    type="button"
+                    className="album-preview"
+                    onClick={onOpen}
+                    aria-label={`View ${item.category} from ${item.groupName}`}
+                >
                     {item.category === 'video' ? (
                         <>
                             <video src={item.mediaUrl} muted preload="metadata" />
@@ -142,18 +254,7 @@ function MediaTile({
                     ) : (
                         <img src={item.mediaUrl} alt={item.textContent || item.category} loading="lazy" />
                     )}
-                    <button
-                        className="tile-expand"
-                        type="button"
-                        aria-label="View full screen"
-                        onClick={(event) => {
-                            stopTileAction(event)
-                            onOpen()
-                        }}
-                    >
-                        ⤢
-                    </button>
-                </div>
+                </button>
             ) : (
                 <div className={`album-file-card ${item.category}`}>
                     <span className="file-glyph">
@@ -176,7 +277,6 @@ function MediaTile({
                 </div>
             )}
             <div className="album-tile-meta">
-                <strong>{item.groupName}</strong>
                 <time>{hkDateTime.format(item.timestamp * 1000)}</time>
             </div>
         </article>
@@ -213,6 +313,7 @@ export default function AlbumView({
     const nextCursorRef = useRef<string | null>(null)
     nextCursorRef.current = nextCursor
     const showingAll = isAllTypes(types)
+    const totalCount = Object.values(counts).reduce((sum, count) => sum + count, 0)
 
     const scopeGroup = scope === 'group' ? selectedJid : null
     const filterKey = `${from}|${to}|${scope}|${scopeGroup || ''}|${types.join(',')}`
@@ -311,10 +412,28 @@ export default function AlbumView({
 
     useVisibleInterval(silentRefresh, active ? 10_000 : null)
 
+    const albumSentinelRef = useInfiniteScroll(
+        scrollRef,
+        () => {
+            void loadMore()
+        },
+        active && Boolean(nextCursor) && !loadingMore && !loading
+    )
+
+    useEffect(() => {
+        if (!lightbox) return undefined
+        const onKey = (event: globalThis.KeyboardEvent) => {
+            if (event.key === 'Escape') setLightbox(null)
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [lightbox])
+
     const selectedItems = useMemo(
         () => items.filter((item) => selected.has(item.messageId)),
         [items, selected]
     )
+    const groupedItems = useMemo(() => groupAlbumItems(items), [items])
 
     function toggleType(category: MediaCategory) {
         if (showingAll) {
@@ -405,19 +524,24 @@ export default function AlbumView({
         <section className="album-panel" aria-busy={loading}>
             <header className="album-toolbar">
                 <div className="album-scope">
-                    <span>From</span>
-                    <div className="segmented-control">
+                    <div className="segmented-control" role="group" aria-label="Album scope">
                         <button
+                            type="button"
                             className={scope === 'all' ? 'active' : ''}
                             onClick={() => onScopeChange('all')}
+                            aria-label="All groups"
+                            title="All groups"
                         >
-                            All groups
+                            <ToolbarIcon name="groups" />
                         </button>
                         <button
+                            type="button"
                             className={scope === 'group' ? 'active' : ''}
                             onClick={() => onScopeChange('group')}
+                            aria-label="This group"
+                            title="This group"
                         >
-                            This group
+                            <ToolbarIcon name="group" />
                         </button>
                     </div>
                     {scope === 'group' && (
@@ -440,15 +564,19 @@ export default function AlbumView({
                             type="button"
                             onClick={selectAllVisible}
                             disabled={items.length === 0 || allVisibleSelected}
+                            aria-label={allVisibleSelected ? 'All selected' : 'Select all'}
+                            title={allVisibleSelected ? 'All selected' : 'Select all'}
                         >
-                            {allVisibleSelected ? 'All selected' : 'Select all'}
+                            <ToolbarIcon name="selectAll" />
                         </button>
                         <button
                             type="button"
                             onClick={() => setSelected(new Set())}
                             disabled={selected.size === 0}
+                            aria-label="Clear selection"
+                            title="Clear"
                         >
-                            Clear
+                            <ToolbarIcon name="clear" />
                         </button>
                     </div>
                 </div>
@@ -461,9 +589,11 @@ export default function AlbumView({
                         if (!showingAll) onTypesChange([...allMediaCategories])
                     }}
                     aria-pressed={showingAll}
+                    aria-label={`All types, ${totalCount}`}
+                    title="All types"
                 >
-                    <span>All types</span>
-                    <strong>{Object.values(counts).reduce((sum, count) => sum + count, 0)}</strong>
+                    <span className="filter-icon"><ToolbarIcon name="all" /></span>
+                    <strong>{totalCount}</strong>
                 </button>
                 {categoryOptions.map((category) => (
                     <button
@@ -471,9 +601,10 @@ export default function AlbumView({
                         className={!showingAll && types.includes(category.id) ? 'active' : ''}
                         onClick={() => toggleType(category.id)}
                         aria-pressed={!showingAll && types.includes(category.id)}
+                        aria-label={`${category.label}, ${counts[category.id]}`}
+                        title={category.label}
                     >
-                        <span className="filter-icon">{category.icon}</span>
-                        <span>{category.label}</span>
+                        <span className="filter-icon"><ToolbarIcon name={category.icon} /></span>
                         <strong>{counts[category.id]}</strong>
                     </button>
                 ))}
@@ -496,21 +627,28 @@ export default function AlbumView({
                     </div>
                 ) : items.length ? (
                     <>
-                        <div className="album-grid">
-                            {items.map((item) => (
-                                <MediaTile
-                                    item={item}
-                                    selected={selected.has(item.messageId)}
-                                    onToggle={() => toggleSelected(item.messageId)}
-                                    onOpen={() => setLightbox(item)}
-                                    key={item.messageId}
-                                />
-                            ))}
-                        </div>
+                        {groupedItems.map((group) => (
+                            <section className="album-group" key={group.jid}>
+                                {scope !== 'group' && (
+                                    <h3 className="album-group-title">{group.name}</h3>
+                                )}
+                                <div className="album-grid">
+                                    {group.items.map((item) => (
+                                        <MediaTile
+                                            item={item}
+                                            selected={selected.has(item.messageId)}
+                                            onToggle={() => toggleSelected(item.messageId)}
+                                            onOpen={() => setLightbox(item)}
+                                            key={item.messageId}
+                                        />
+                                    ))}
+                                </div>
+                            </section>
+                        ))}
                         {nextCursor && (
-                            <button className="load-more" onClick={loadMore} disabled={loadingMore}>
-                                {loadingMore ? 'Loading…' : 'Load more'}
-                            </button>
+                            <div className="load-sentinel" ref={albumSentinelRef}>
+                                {loadingMore ? 'Loading…' : ''}
+                            </div>
                         )}
                     </>
                 ) : (
@@ -538,24 +676,43 @@ export default function AlbumView({
             )}
 
             {lightbox && (
-                <div className="lightbox" role="dialog" aria-modal="true" aria-label="Full screen media">
-                    <button className="lightbox-close" onClick={() => setLightbox(null)} aria-label="Close">
+                <div
+                    className="lightbox"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="Media preview"
+                    onClick={() => setLightbox(null)}
+                >
+                    <button
+                        className="lightbox-close"
+                        onClick={() => setLightbox(null)}
+                        aria-label="Close"
+                    >
                         ×
                     </button>
-                    <div className="lightbox-media">
+                    <div className="lightbox-media" onClick={stopTileAction}>
                         {lightbox.category === 'video' ? (
                             <video src={lightbox.mediaUrl} controls autoPlay />
                         ) : (
                             <img src={lightbox.mediaUrl} alt={lightbox.textContent || lightbox.category} />
                         )}
                     </div>
-                    <div className="lightbox-info">
+                    <div className="lightbox-info" onClick={stopTileAction}>
                         <strong>{lightbox.groupName}</strong>
                         <span>{lightbox.senderName || 'Unknown sender'}</span>
                         <time>{hkDateTime.format(lightbox.timestamp * 1000)}</time>
                         {lightbox.textContent && <p>{lightbox.textContent}</p>}
-                        <button onClick={() => toggleSelected(lightbox.messageId)}>
-                            {selected.has(lightbox.messageId) ? 'Remove from selection' : 'Select this media'}
+                        <button
+                            type="button"
+                            className={`lightbox-select ${selected.has(lightbox.messageId) ? 'is-selected' : ''}`}
+                            aria-label={
+                                selected.has(lightbox.messageId)
+                                    ? 'Remove from selection'
+                                    : 'Select this media'
+                            }
+                            onClick={() => toggleSelected(lightbox.messageId)}
+                        >
+                            <SelectGlyph selected={selected.has(lightbox.messageId)} />
                         </button>
                     </div>
                 </div>

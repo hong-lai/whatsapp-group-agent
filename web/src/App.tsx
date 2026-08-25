@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
-import { mergeFirstPage, useVisibleInterval } from './useVisibleInterval'
+import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
 
 type Group = {
     jid: string
@@ -101,7 +101,7 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
     return body
 }
 
-function Icon({ name }: { name: 'archive' | 'calendar' | 'search' | 'users' | 'message' }) {
+function Icon({ name }: { name: 'archive' | 'calendar' | 'search' | 'users' | 'message' | 'image' }) {
     const paths = {
         archive: (
             <>
@@ -131,6 +131,13 @@ function Icon({ name }: { name: 'archive' | 'calendar' | 'search' | 'users' | 'm
             <>
                 <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
                 <path d="M8 9h8M8 13h5" />
+            </>
+        ),
+        image: (
+            <>
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <circle cx="8.5" cy="10" r="1.5" />
+                <path d="m21 16-5.5-5.5-4 4L9 12l-6 6" />
             </>
         ),
     }
@@ -362,16 +369,6 @@ function MessageCard({ message }: { message: Message }) {
                     <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
                     <time>{hkDateTime.format(message.timestamp * 1000)}</time>
                 </header>
-                <div className="badges">
-                    {message.isEdited && <span>Edited</span>}
-                    {message.isHistory && <span>History</span>}
-                    {message.isDeleted && <span>Deleted</span>}
-                    <span>
-                        {message.messageType === 'albumMessage'
-                            ? albumSummary(message.albumItems ?? [])
-                            : message.messageType.replace(/Message$/, '')}
-                    </span>
-                </div>
                 {message.quotedMessage && (!message.isDeleted || revealed) && (
                     <blockquote>{message.quotedMessage}</blockquote>
                 )}
@@ -474,13 +471,6 @@ export default function App() {
             ? groups.filter((group) => group.name.toLocaleLowerCase().includes(needle))
             : groups
     }, [groups, search])
-    const totals = useMemo(
-        () => ({
-            messages: groups.reduce((sum, group) => sum + group.messageCount, 0),
-            matchingGroups: groups.length,
-        }),
-        [groups]
-    )
     const patternTerms = useMemo(
         () => (pattern?.source ? pattern.source.split('|').map((term) => term.trim()).filter(Boolean) : []),
         [pattern]
@@ -670,6 +660,18 @@ export default function App() {
 
     useVisibleInterval(silentRefresh, 10_000)
 
+    const olderSentinelRef = useInfiniteScroll(
+        messageListRef,
+        () => {
+            void loadMore()
+        },
+        view === 'messages' &&
+            Boolean(selectedJid) &&
+            Boolean(nextCursor) &&
+            !loadingMore &&
+            !messagesLoading
+    )
+
     async function loadMore() {
         if (!selectedJid || !nextCursor || loadingMore) return
         silentGen.current += 1
@@ -721,62 +723,53 @@ export default function App() {
                 </div>
             </header>
 
-            <section className="hero">
-                <div>
-                    <h1>Group messages and media.</h1>
-                    <p className="hero-copy">
-                        Only groups whose names match the configured pattern are shown.
-                    </p>
-                </div>
-                <div className="summary-cards">
-                    <div className="summary-card">
-                        <span className="summary-icon"><Icon name="message" /></span>
-                        <span><strong>{totals.messages.toLocaleString()}</strong><small>Messages in range</small></span>
-                    </div>
-                    <div className="summary-card">
-                        <span className="summary-icon"><Icon name="users" /></span>
-                        <span><strong>{totals.matchingGroups}</strong><small>Matching groups</small></span>
-                    </div>
-                </div>
-            </section>
-
             <section className="filter-bar" aria-label="Date filters">
-                <div className="date-control">
-                    <Icon name="calendar" />
-                    <label>
-                        <span>From</span>
-                        <input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} />
-                    </label>
-                    <span className="date-arrow">→</span>
-                    <label>
-                        <span>To</span>
-                        <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
-                    </label>
+                <div className="date-cluster">
+                    <div className="date-control">
+                        <Icon name="calendar" />
+                        <label>
+                            <span>From</span>
+                            <input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} />
+                        </label>
+                        <span className="date-arrow">→</span>
+                        <label>
+                            <span>To</span>
+                            <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
+                        </label>
+                    </div>
+                    <div className="presets" aria-label="Date presets">
+                        {[1, 2, 7, 30].map((days) => (
+                            <button
+                                className={from === addDays(today, -(days - 1)) && to === today ? 'active' : ''}
+                                key={days}
+                                onClick={() => applyPreset(days)}
+                            >
+                                {days === 1 ? 'Today' : `${days} days`}
+                            </button>
+                        ))}
+                    </div>
                 </div>
                 <div className="view-switch" aria-label="Dashboard view">
                     <button
+                        type="button"
                         className={view === 'messages' ? 'active' : ''}
+                        aria-label="Messages"
+                        aria-pressed={view === 'messages'}
+                        title="Messages"
                         onClick={() => setView('messages')}
                     >
-                        Messages
+                        <Icon name="message" />
                     </button>
                     <button
+                        type="button"
                         className={view === 'album' ? 'active' : ''}
+                        aria-label="Media"
+                        aria-pressed={view === 'album'}
+                        title="Media"
                         onClick={() => setView('album')}
                     >
-                        Media
+                        <Icon name="image" />
                     </button>
-                </div>
-                <div className="presets" aria-label="Date presets">
-                    {[1, 2, 7, 30].map((days) => (
-                        <button
-                            className={from === addDays(today, -(days - 1)) && to === today ? 'active' : ''}
-                            key={days}
-                            onClick={() => applyPreset(days)}
-                        >
-                            {days === 1 ? 'Today' : `${days} days`}
-                        </button>
-                    ))}
                 </div>
                 {invalidRange && <p className="inline-error">Choose a valid date range.</p>}
             </section>
@@ -892,9 +885,9 @@ export default function App() {
                                         <MessageCard message={message} key={message.messageId} />
                                     ))}
                                     {nextCursor && (
-                                        <button className="load-more" onClick={loadMore} disabled={loadingMore}>
-                                            {loadingMore ? 'Loading…' : 'Load older messages'}
-                                        </button>
+                                        <div className="load-sentinel" ref={olderSentinelRef}>
+                                            {loadingMore ? 'Loading…' : ''}
+                                        </div>
                                     )}
                                 </div>
                             ) : (

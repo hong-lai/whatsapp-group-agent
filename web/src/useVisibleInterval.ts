@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 
 export function useVisibleInterval(callback: () => void, ms: number | null) {
     const saved = useRef(callback)
@@ -41,6 +41,32 @@ export function useVisibleInterval(callback: () => void, ms: number | null) {
             document.removeEventListener('visibilitychange', onVisibility)
         }
     }, [ms])
+}
+
+export function useInfiniteScroll(
+    rootRef: RefObject<Element | null>,
+    onLoadMore: () => void,
+    enabled: boolean
+): RefObject<HTMLDivElement | null> {
+    const onLoadMoreRef = useRef(onLoadMore)
+    onLoadMoreRef.current = onLoadMore
+    const sentinelRef = useRef<HTMLDivElement>(null)
+
+    useEffect(() => {
+        const root = rootRef.current
+        const sentinel = sentinelRef.current
+        if (!enabled || !root || !sentinel) return undefined
+        const observer = new IntersectionObserver(
+            (entries) => {
+                if (entries.some((entry) => entry.isIntersecting)) onLoadMoreRef.current()
+            },
+            { root, rootMargin: '160px' }
+        )
+        observer.observe(sentinel)
+        return () => observer.disconnect()
+    }, [enabled, rootRef])
+
+    return sentinelRef
 }
 
 export function mergeFirstPage<T extends { messageId: string }>(

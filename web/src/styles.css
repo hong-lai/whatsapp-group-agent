@@ -62,7 +62,6 @@ svg {
 }
 
 .topbar,
-.hero,
 .filter-bar,
 .dashboard,
 .error-banner {
@@ -85,7 +84,6 @@ svg {
 }
 
 .brand-mark,
-.summary-icon,
 .empty-icon {
     display: grid;
     place-items: center;
@@ -168,22 +166,6 @@ svg {
     }
 }
 
-.hero {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    padding: 6px 0 6px;
-}
-
-.eyebrow {
-    margin: 0 0 3px;
-    color: var(--green);
-    font-size: 0.55rem;
-    font-weight: 800;
-    letter-spacing: 0.16em;
-}
-
 h1,
 h2,
 h3,
@@ -198,74 +180,28 @@ h3 {
     color: var(--ink);
 }
 
-h1 {
-    max-width: 680px;
-    margin-bottom: 2px;
-    font-size: clamp(1.2rem, 2vw, 1.5rem);
-    line-height: 1.1;
-    letter-spacing: -0.04em;
-}
-
-.hero-copy {
-    margin-bottom: 0;
-    max-width: 650px;
-    color: var(--muted);
-    font-size: 0.7rem;
-    line-height: 1.35;
-}
-
-.summary-cards {
-    display: flex;
-    gap: 7px;
-    flex-shrink: 0;
-}
-
-.summary-card {
-    min-width: 138px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
-    border: 1px solid rgba(255, 255, 255, 0.8);
-    border-radius: 12px;
-    background: rgba(255, 255, 255, 0.74);
-    box-shadow: 0 10px 30px rgba(24, 65, 54, 0.06);
-    backdrop-filter: blur(12px);
-}
-
-.summary-icon {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    color: var(--green);
-    background: var(--mint);
-}
-
-.summary-card strong,
-.summary-card small {
-    display: block;
-}
-
-.summary-card strong {
-    font: 800 0.96rem 'Manrope', sans-serif;
-    color: var(--ink);
-}
-
-.summary-card small {
-    color: var(--muted);
-    font-size: 0.57rem;
-}
-
 .filter-bar {
     min-height: 48px;
     display: flex;
     align-items: center;
     gap: 12px;
+    margin-top: 10px;
     padding: 6px 10px;
     border: 1px solid rgba(216, 227, 221, 0.88);
     border-radius: 15px;
     background: rgba(255, 255, 255, 0.83);
     box-shadow: 0 10px 30px rgba(24, 65, 54, 0.05);
+}
+
+.date-cluster {
+    display: flex;
+    min-width: 0;
+    flex: 0 1 auto;
+    align-items: center;
+    gap: 8px;
+    padding: 4px;
+    border-radius: 12px;
+    background: #f1f5f2;
 }
 
 .date-control {
@@ -303,9 +239,9 @@ h1 {
     display: flex;
     gap: 5px;
     margin-left: 0;
-    padding: 4px;
+    padding: 0;
     border-radius: 12px;
-    background: #f1f5f2;
+    background: transparent;
 }
 
 .view-switch,
@@ -323,13 +259,28 @@ h1 {
 
 .view-switch button,
 .segmented-control button {
-    padding: 7px 13px;
+    width: 36px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    padding: 0;
     border: 0;
     border-radius: 8px;
     color: #647b74;
     background: transparent;
     font-size: 0.72rem;
     font-weight: 700;
+}
+
+.view-switch svg,
+.segmented-control svg {
+    width: 1.05rem;
+    height: 1.05rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 .view-switch button.active,
@@ -384,7 +335,7 @@ h1 {
 }
 
 .dashboard {
-    height: max(480px, min(840px, calc(100dvh - 150px)));
+    height: max(480px, min(860px, calc(100dvh - 108px)));
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(300px, 380px) 1fr;
@@ -614,11 +565,10 @@ h1 {
 }
 
 .album-toolbar {
-    min-height: 48px;
+    min-height: 44px;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    gap: 10px;
     padding: 6px 14px;
     border-bottom: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.95);
@@ -628,20 +578,25 @@ h1 {
 .album-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
-    flex-shrink: 0;
+    gap: 8px;
     position: relative;
     z-index: 1;
 }
 
-.album-scope > span {
-    color: var(--muted);
-    font-size: 0.7rem;
-    font-weight: 600;
+.album-scope {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.album-actions {
+    flex-shrink: 0;
+    margin-left: auto;
 }
 
 .album-scope select {
-    max-width: 220px;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: none;
     padding: 7px 28px 7px 10px;
     border: 1px solid #d9e4df;
     border-radius: 9px;
@@ -669,14 +624,12 @@ h1 {
     display: flex;
     flex: 0 0 auto;
     align-items: center;
-    gap: 7px;
-    padding: 7px 10px;
+    gap: 6px;
+    padding: 6px 8px;
     border: 1px solid #dde7e3;
     border-radius: 10px;
     color: #687d77;
     background: #fafcfb;
-    font-size: 0.68rem;
-    font-weight: 700;
 }
 
 .media-filters button.active {
@@ -692,7 +645,16 @@ h1 {
     place-items: center;
     border-radius: 6px;
     background: rgba(255, 255, 255, 0.85);
-    font-size: 0.65rem;
+}
+
+.filter-icon svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
 }
 
 .media-filters strong {
@@ -733,6 +695,23 @@ h1 {
     align-items: start;
 }
 
+.album-group {
+    margin-bottom: 18px;
+}
+
+.album-group:last-of-type {
+    margin-bottom: 0;
+}
+
+.album-group-title {
+    margin: 0 0 10px;
+    color: var(--ink);
+    font-size: 0.84rem;
+    font-weight: 800;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
 .album-tile {
     min-width: 0;
     position: relative;
@@ -741,7 +720,6 @@ h1 {
     border-radius: 13px;
     background: white;
     box-shadow: 0 5px 15px rgba(28, 60, 50, 0.045);
-    cursor: pointer;
     transition: 150ms ease;
 }
 
@@ -756,47 +734,28 @@ h1 {
 }
 
 .tile-select {
-    width: 20px;
-    height: 20px;
+    width: 22px;
+    height: 22px;
     display: grid;
     position: absolute;
     z-index: 2;
     top: 8px;
     right: 8px;
     place-items: center;
+    padding: 0;
     border: 1.5px solid rgba(255, 255, 255, 0.92);
     border-radius: 50%;
     color: transparent;
     background: rgba(255, 255, 255, 0.2);
     font-size: 0.68rem;
     font-weight: 800;
-    pointer-events: none;
+    cursor: pointer;
 }
 
 .album-tile.selected .tile-select {
     border-color: var(--green);
     color: white;
     background: var(--green);
-}
-
-.tile-expand {
-    width: 28px;
-    height: 28px;
-    display: grid;
-    position: absolute;
-    z-index: 2;
-    right: 8px;
-    bottom: 8px;
-    place-items: center;
-    padding: 0;
-    border: 1px solid rgba(255, 255, 255, 0.85);
-    border-radius: 8px;
-    color: white;
-    background: rgba(13, 39, 33, 0.58);
-    box-shadow: 0 2px 8px rgba(13, 39, 33, 0.16);
-    font-size: 0.95rem;
-    line-height: 1;
-    backdrop-filter: blur(8px);
 }
 
 .album-preview {
@@ -808,6 +767,7 @@ h1 {
     overflow: hidden;
     border: 0;
     background: #e7eeeb;
+    cursor: pointer;
 }
 
 .album-preview img,
@@ -890,26 +850,12 @@ h1 {
 .album-tile-meta {
     display: flex;
     align-items: baseline;
-    justify-content: space-between;
+    justify-content: flex-end;
     gap: 8px;
     padding: 6px 8px 7px;
 }
 
-.album-tile-meta strong,
 .album-tile-meta time {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.album-tile-meta strong {
-    min-width: 0;
-    color: #29443d;
-    font-size: 0.68rem;
-}
-
-.album-tile-meta time {
-    flex: 0 0 auto;
     color: #879792;
     font-size: 0.56rem;
 }
@@ -1067,6 +1013,7 @@ h1 {
 }
 
 .lightbox-info strong {
+    overflow-wrap: anywhere;
     font: 700 1rem 'Manrope', sans-serif;
 }
 
@@ -1096,6 +1043,29 @@ h1 {
     font-size: 0.7rem;
     font-weight: 700;
     text-decoration: none;
+}
+
+.lightbox-select {
+    width: 42px;
+    height: 42px;
+    display: grid;
+    place-items: center;
+    margin-top: 24px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.24);
+    border-radius: 12px;
+    color: white;
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.lightbox-select svg {
+    width: 1.2rem;
+    height: 1.2rem;
+}
+
+.lightbox-select.is-selected {
+    border-color: rgba(110, 214, 176, 0.7);
+    background: rgba(22, 134, 111, 0.55);
 }
 
 .lightbox-nav {
@@ -1556,6 +1526,16 @@ video.media-frame {
     font-weight: 800;
 }
 
+.load-sentinel {
+    display: flex;
+    justify-content: center;
+    min-height: 28px;
+    padding: 18px 0 8px;
+    color: var(--muted);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
 .load-more,
 .empty-state button {
     display: block;
@@ -1673,26 +1653,10 @@ video.media-frame {
 
 @media (max-width: 720px) {
     .topbar,
-    .hero,
     .filter-bar,
     .dashboard,
     .error-banner {
         width: min(100% - 24px, 1480px);
-    }
-
-    .hero {
-        align-items: start;
-        flex-direction: column;
-        padding-top: 8px;
-    }
-
-    .summary-cards {
-        width: 100%;
-    }
-
-    .summary-card {
-        min-width: 0;
-        flex: 1;
     }
 
     .topbar {
@@ -1712,8 +1676,13 @@ video.media-frame {
         flex-direction: column;
     }
 
+    .date-cluster {
+        flex-wrap: wrap;
+    }
+
     .date-control {
         justify-content: space-between;
+        flex: 1 1 auto;
     }
 
     .date-control input {
@@ -1722,15 +1691,16 @@ video.media-frame {
 
     .presets {
         margin-left: 0;
+        flex: 1 1 100%;
     }
 
     .view-switch {
-        width: 100%;
-        margin-left: 0;
+        width: auto;
+        margin-left: auto;
     }
 
     .view-switch button {
-        flex: 1;
+        flex: 0 0 auto;
     }
 
     .presets button {
@@ -1780,27 +1750,26 @@ video.media-frame {
     }
 
     .album-dashboard {
-        height: max(620px, calc(100dvh - 120px));
+        height: max(620px, calc(100dvh - 96px));
         overflow: hidden;
     }
 
     .album-toolbar {
-        align-items: stretch;
-        flex-direction: column;
+        flex-wrap: wrap;
         gap: 8px;
     }
 
     .album-scope {
-        flex-wrap: wrap;
+        flex: 1 1 100%;
     }
 
     .album-scope select {
-        max-width: none;
-        flex: 1;
+        flex: 1 1 auto;
+        min-width: 0;
     }
 
     .album-actions {
-        justify-content: flex-end;
+        margin-left: auto;
     }
 
     .album-grid {
@@ -1837,7 +1806,8 @@ video.media-frame {
     }
 
     .lightbox-info button,
-    .lightbox-info a {
+    .lightbox-info a,
+    .lightbox-select {
         margin-top: 12px;
     }
 }
@@ -1845,10 +1815,6 @@ video.media-frame {
 @media (max-width: 480px) {
     .topbar-status {
         display: none;
-    }
-
-    .summary-cards {
-        flex-direction: column;
     }
 
     .date-control {
@@ -1862,10 +1828,6 @@ video.media-frame {
 
     .media-filters button {
         padding-inline: 8px;
-    }
-
-    .media-filters button > span:nth-child(2) {
-        display: none;
     }
 
     .selection-bar small {
