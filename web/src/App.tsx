@@ -839,7 +839,17 @@ export default function App() {
                                 key={days}
                                 onClick={() => applyPreset(days)}
                             >
-                                {days === 1 ? 'Today' : `${days} days`}
+                                {days === 1 ? (
+                                    <>
+                                        <span className="preset-long">Today</span>
+                                        <span className="preset-short">1d</span>
+                                    </>
+                                ) : (
+                                    <>
+                                        <span className="preset-long">{days} days</span>
+                                        <span className="preset-short">{days}d</span>
+                                    </>
+                                )}
                             </button>
                         ))}
                     </div>
@@ -854,6 +864,7 @@ export default function App() {
                         onClick={() => setView('messages')}
                     >
                         <Icon name="message" />
+                        <span className="view-switch-label">Chat</span>
                     </button>
                     <button
                         type="button"
@@ -864,6 +875,7 @@ export default function App() {
                         onClick={() => setView('album')}
                     >
                         <Icon name="image" />
+                        <span className="view-switch-label">Media</span>
                     </button>
                 </div>
                 {invalidRange && <p className="inline-error">Choose a valid date range.</p>}

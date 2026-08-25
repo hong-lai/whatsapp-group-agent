@@ -188,6 +188,7 @@ h3 {
 .filter-bar {
     min-height: 48px;
     display: flex;
+    flex-wrap: wrap;
     flex-shrink: 0;
     align-items: center;
     gap: 12px;
@@ -202,7 +203,7 @@ h3 {
 .date-cluster {
     display: flex;
     min-width: 0;
-    flex: 0 1 auto;
+    flex: 1 1 auto;
     align-items: center;
     gap: 8px;
     padding: 4px;
@@ -229,6 +230,7 @@ h3 {
 
 .date-control input {
     width: 114px;
+    min-width: 0;
     padding: 2px 0;
     border: 0;
     color: var(--ink);
@@ -260,7 +262,8 @@ h3 {
 }
 
 .view-switch {
-    margin-left: auto;
+    margin-left: 0;
+    flex-shrink: 0;
 }
 
 .view-switch button,
@@ -289,6 +292,10 @@ h3 {
     stroke-linejoin: round;
 }
 
+.view-switch-label {
+    display: none;
+}
+
 .view-switch button.active,
 .segmented-control button.active {
     color: var(--green-dark);
@@ -296,14 +303,20 @@ h3 {
     box-shadow: 0 3px 10px rgba(28, 60, 50, 0.09);
 }
 
+.preset-short {
+    display: none;
+}
+
 .presets button {
-    padding: 8px 14px;
+    min-height: 32px;
+    padding: 6px 14px;
     border: 0;
     border-radius: 9px;
     color: #657872;
     background: transparent;
     font-size: 0.75rem;
     font-weight: 700;
+    line-height: 1;
     transition: 160ms ease;
 }
 
@@ -315,6 +328,7 @@ h3 {
 }
 
 .inline-error {
+    flex: 1 0 100%;
     margin: 0;
     color: #b54040;
     font-size: 0.75rem;
@@ -777,7 +791,7 @@ h3 {
 
 .album-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
     gap: 12px;
     align-items: start;
 }
@@ -1816,62 +1830,129 @@ video.media-frame {
     .app-shell {
         height: auto;
         min-height: 100dvh;
-        overflow: visible;
+        overflow-x: hidden;
+        overflow-y: visible;
     }
 
     .topbar,
     .filter-bar,
     .dashboard,
     .error-banner {
-        width: min(100% - 24px, 1480px);
+        width: min(100% - 16px, 1480px);
     }
 
     .topbar {
         height: auto;
-        min-height: 48px;
+        min-height: 44px;
         padding: 8px 0;
-        flex-wrap: wrap;
         gap: 8px;
     }
 
+    .brand small {
+        display: none;
+    }
+
+    .pattern-meta > span {
+        display: none;
+    }
+
     .pattern-meta {
+        max-width: 42vw;
+        margin-right: 0;
+    }
+
+    .pattern-meta code {
         max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .filter-bar {
+        display: flex;
+        flex-wrap: wrap;
         align-items: stretch;
-        flex-direction: column;
+        min-height: 0;
+        gap: 6px;
+        padding: 8px;
+        max-width: 100%;
+        min-width: 0;
+        overflow: visible;
     }
 
     .date-cluster {
-        flex-wrap: wrap;
+        display: flex;
+        flex: 1 1 100%;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+        min-width: 0;
+        width: 100%;
+        padding: 2px 0;
+        overflow: visible;
+        background: transparent;
     }
 
     .date-control {
-        justify-content: space-between;
-        flex: 1 1 auto;
-    }
-
-    .date-control input {
-        width: 117px;
+        display: none;
     }
 
     .presets {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        flex: none;
+        min-width: 0;
         margin-left: 0;
-        flex: 1 1 100%;
+        width: 100%;
+        overflow: visible;
     }
 
-    .view-switch {
-        width: auto;
-        margin-left: auto;
+    .preset-long {
+        display: none;
     }
 
-    .view-switch button {
-        flex: 0 0 auto;
+    .preset-short {
+        display: inline;
     }
 
     .presets button {
-        flex: 1;
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 36px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0 4px;
+        font-size: 0.72rem;
+    }
+
+    .view-switch {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        flex: 1 0 100%;
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+        margin-left: 0;
+        gap: 4px;
+        padding: 3px;
+    }
+
+    .view-switch button {
+        flex: 1 1 0;
+        min-width: 0;
+        width: auto;
+        height: 40px;
+        gap: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    .view-switch-label {
+        display: inline;
+        font-size: 0.72rem;
+        font-weight: 700;
     }
 
     .dashboard {
@@ -1882,13 +1963,91 @@ video.media-frame {
     }
 
     .groups-panel {
-        height: 390px;
+        height: auto;
+        max-height: none;
         border-right: 0;
         border-bottom: 1px solid var(--line);
     }
 
+    .groups-panel .panel-heading,
+    .groups-panel .search-box {
+        display: none;
+    }
+
+    .group-list {
+        display: flex;
+        flex: none;
+        flex-direction: row;
+        gap: 6px;
+        max-height: none;
+        padding: 8px 10px 10px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+
+    .group-list::-webkit-scrollbar {
+        display: none;
+    }
+
+    .group-item {
+        display: flex;
+        width: auto;
+        max-width: 200px;
+        flex: 0 0 auto;
+        grid-template-columns: none;
+        gap: 0;
+        padding: 8px 12px;
+        border: 1px solid var(--line);
+        background: white;
+    }
+
+    .group-item .group-avatar,
+    .group-item .group-date,
+    .group-copy .group-preview,
+    .group-copy .group-meta {
+        display: none !important;
+    }
+
     .messages-panel {
-        min-height: 580px;
+        min-height: min(480px, calc(100dvh - 220px));
+    }
+
+    .messages-heading {
+        min-height: 0;
+        gap: 10px;
+        padding: 8px 12px;
+    }
+
+    .messages-heading .group-avatar.large {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        font-size: 0.7rem;
+    }
+
+    .date-arrow {
+        display: none;
+    }
+
+    .message-content header strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .message-content time {
+        flex-shrink: 0;
+        white-space: nowrap;
+    }
+
+    .album-tile-meta time {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 
     .message-list {
@@ -1917,38 +2076,81 @@ video.media-frame {
     }
 
     .album-dashboard {
-        height: max(620px, calc(100dvh - 96px));
+        height: max(560px, calc(100dvh - 88px));
         overflow: hidden;
     }
 
     .album-toolbar {
-        flex-wrap: wrap;
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center;
         gap: 8px;
+        padding: 8px 10px;
     }
 
-    .media-filters {
-        flex: 1 1 auto;
-        order: 3;
-        width: 100%;
+    .album-scope {
+        display: contents;
     }
 
-    .album-scope,
+    .album-scope .segmented-control {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
     .group-picker {
-        flex: 1 1 100%;
+        grid-column: 1 / -1;
+        grid-row: 2;
+        flex: none;
         min-width: 0;
+        width: auto;
     }
 
     .album-actions {
-        margin-left: auto;
+        grid-column: 3;
+        grid-row: 1;
+        margin-left: 0;
+    }
+
+    .media-filters {
+        grid-column: 1 / -1;
+        flex: none;
+        order: unset;
+        width: auto;
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+    }
+
+    .media-filters::-webkit-scrollbar {
+        display: none;
     }
 
     .album-grid {
-        grid-template-columns: repeat(2, minmax(135px, 1fr));
+        grid-template-columns: minmax(0, 1fr);
         gap: 9px;
+        width: 100%;
+    }
+
+    .album-group {
+        min-width: 0;
+    }
+
+    .album-file-card {
+        min-height: 132px;
+        padding: 28px 8px 10px;
+    }
+
+    .album-file-card audio {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        height: 36px;
     }
 
     .album-scroll {
         padding-inline: 10px;
+        overflow-x: hidden;
     }
 
     .selection-bar {
@@ -1984,12 +2186,20 @@ video.media-frame {
 
 @media (max-width: 480px) {
     .topbar-status {
+        gap: 6px;
+        font-size: 0.62rem;
+    }
+
+    .pattern-meta {
         display: none;
     }
 
-    .date-control {
-        display: grid;
-        grid-template-columns: auto 1fr;
+    .date-arrow {
+        display: none;
+    }
+
+    .album-grid {
+        grid-template-columns: minmax(0, 1fr);
     }
 
     .media-filters button {
@@ -1997,14 +2207,6 @@ video.media-frame {
     }
 
     .selection-bar small {
-        display: none;
-    }
-
-    .date-control > svg {
-        grid-row: 1 / 3;
-    }
-
-    .date-arrow {
         display: none;
     }
 
