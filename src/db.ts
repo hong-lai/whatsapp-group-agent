@@ -31,7 +31,7 @@ export async function initDb(): Promise<void> {
             media_path TEXT,
             reply_to_id TEXT,
             quoted_message TEXT,
-            timestamp BIGINT,
+            timestamp TIMESTAMPTZ,
             is_edited BOOLEAN NOT NULL DEFAULT FALSE,
             is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
             is_history BOOLEAN NOT NULL DEFAULT FALSE
@@ -47,13 +47,22 @@ export async function initDb(): Promise<void> {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (target_message_id, sender_jid)
         );
+    `)
 
+        await migrateMessagesTimestamp()
+        await migrateAlbumParents()
+
+        await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
             ON messages (group_jid, timestamp DESC, message_id DESC);
 
         CREATE INDEX IF NOT EXISTS messages_media_timestamp_idx
             ON messages (timestamp DESC, message_id DESC)
             WHERE media_path IS NOT NULL AND is_deleted = FALSE;
+
+        CREATE INDEX IF NOT EXISTS messages_album_parent_idx
+            ON messages (album_parent_id)
+            WHERE album_parent_id IS NOT NULL;
     `)
 
         // Reactions used to be stored as empty message rows that carried neither
@@ -79,6 +88,131 @@ export async function initDb(): Promise<void> {
         }
         throw err
     }
+}
+
+async function migrateMessagesTimestamp(): Promise<void> {
+    const column = await pool.query<{ data_type: string }>(
+        `SELECT data_type
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'messages'
+           AND column_name = 'timestamp'`
+    )
+    if (column.rows[0]?.data_type !== 'bigint') return
+
+    await pool.query(`
+        DROP INDEX IF EXISTS messages_group_timestamp_idx;
+        DROP INDEX IF EXISTS messages_media_timestamp_idx;
+        ALTER TABLE messages
+            ALTER COLUMN timestamp TYPE TIMESTAMPTZ
+            USING CASE
+                WHEN timestamp IS NULL THEN NULL
+                ELSE to_timestamp(timestamp)
+            END
+    `)
+    log.info('db.messages_timestamp_migrated')
+}
+
+const ALBUM_ASSOCIATION_WINDOW_SECONDS = 30
+const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage'] as const
+
+async function migrateAlbumParents(): Promise<void> {
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_parent_id TEXT`)
+
+    const albums = await pool.query<{
+        message_id: string
+        group_jid: string
+        sender_jid: string | null
+        timestamp: string
+    }>(
+        `SELECT
+            message_id,
+            group_jid,
+            sender_jid,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE message_type = 'albumMessage' AND timestamp IS NOT NULL
+         ORDER BY timestamp ASC, message_id ASC`
+    )
+
+    let attached = 0
+    for (const album of albums.rows) {
+        attached += await attachNearbyAlbumMedia({
+            parentId: album.message_id,
+            groupJid: album.group_jid,
+            senderJid: album.sender_jid,
+            timestamp: Number(album.timestamp),
+        })
+    }
+    if (attached > 0) {
+        log.info({ albums: albums.rowCount, attached }, 'db.album_parents_backfilled')
+    }
+}
+
+export async function attachNearbyAlbumMedia(row: {
+    parentId: string
+    groupJid: string
+    senderJid: string | null
+    timestamp: number
+}): Promise<number> {
+    const result = await pool.query(
+        `UPDATE messages SET album_parent_id = $1
+         WHERE group_jid = $2
+           AND sender_jid IS NOT DISTINCT FROM $3
+           AND message_id <> $1
+           AND message_type = ANY($4::text[])
+           AND album_parent_id IS NULL
+           AND timestamp >= to_timestamp($5)
+           AND timestamp < LEAST(
+                to_timestamp($5 + $6),
+                COALESCE(
+                    (
+                        SELECT MIN(next_album.timestamp)
+                        FROM messages next_album
+                        WHERE next_album.group_jid = $2
+                          AND next_album.sender_jid IS NOT DISTINCT FROM $3
+                          AND next_album.message_type = 'albumMessage'
+                          AND (
+                            next_album.timestamp > to_timestamp($5)
+                            OR (
+                                next_album.timestamp = to_timestamp($5)
+                                AND next_album.message_id > $1
+                            )
+                          )
+                    ),
+                    'infinity'::timestamptz
+                )
+           )`,
+        [
+            row.parentId,
+            row.groupJid,
+            row.senderJid,
+            [...ALBUM_MEDIA_TYPES],
+            row.timestamp,
+            ALBUM_ASSOCIATION_WINDOW_SECONDS,
+        ]
+    )
+    return result.rowCount ?? 0
+}
+
+export async function findRecentAlbumParent(
+    groupJid: string,
+    senderJid: string | null,
+    timestamp: number
+): Promise<string | null> {
+    const result = await pool.query<{ message_id: string }>(
+        `SELECT message_id
+         FROM messages
+         WHERE group_jid = $1
+           AND sender_jid IS NOT DISTINCT FROM $2
+           AND message_type = 'albumMessage'
+           AND timestamp <= to_timestamp($3)
+           AND timestamp >= to_timestamp($3) - ($4 * INTERVAL '1 second')
+         ORDER BY timestamp DESC, message_id DESC
+         LIMIT 1`,
+        [groupJid, senderJid, timestamp, ALBUM_ASSOCIATION_WINDOW_SECONDS]
+    )
+    return result.rows[0]?.message_id ?? null
 }
 
 export async function upsertGroup(jid: string, name: string, tracked: boolean): Promise<void> {
@@ -122,6 +256,7 @@ export type MessageRow = {
     mediaPath: string | null
     replyToId: string | null
     quotedMessage: string | null
+    albumParentId: string | null
     timestamp: number
     isHistory: boolean
 }
@@ -130,9 +265,9 @@ export async function insertMessage(row: MessageRow): Promise<void> {
     await pool.query(
         `INSERT INTO messages (
             message_id, group_jid, sender_jid, message_secret, message_type,
-            text_content, media_path, reply_to_id, quoted_message, timestamp,
-            is_edited, is_deleted, is_history
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, FALSE, FALSE, $11)
+            text_content, media_path, reply_to_id, quoted_message, album_parent_id,
+            timestamp, is_edited, is_deleted, is_history
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11), FALSE, FALSE, $12)
          ON CONFLICT (message_id) DO NOTHING`,
         [
             row.messageId,
@@ -144,10 +279,55 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.mediaPath,
             row.replyToId,
             row.quotedMessage,
+            row.albumParentId,
             row.timestamp,
             row.isHistory,
         ]
     )
+}
+
+export async function hasMessage(messageId: string): Promise<boolean> {
+    const result = await pool.query('SELECT 1 FROM messages WHERE message_id = $1 LIMIT 1', [messageId])
+    return (result.rowCount ?? 0) > 0
+}
+
+export async function getStoredMessageContent(messageId: string): Promise<string | null> {
+    const result = await pool.query<{ text_content: string | null }>(
+        'SELECT text_content FROM messages WHERE message_id = $1',
+        [messageId]
+    )
+    return result.rows[0]?.text_content ?? null
+}
+
+export type LatestGroupMessage = {
+    messageId: string
+    senderJid: string | null
+    timestamp: number
+}
+
+export async function getLatestGroupMessage(groupJid: string): Promise<LatestGroupMessage | undefined> {
+    const result = await pool.query<{
+        message_id: string
+        sender_jid: string | null
+        timestamp: string | null
+    }>(
+        `SELECT
+            message_id,
+            sender_jid,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE group_jid = $1 AND timestamp IS NOT NULL
+         ORDER BY timestamp DESC, message_id DESC
+         LIMIT 1`,
+        [groupJid]
+    )
+    const row = result.rows[0]
+    if (!row?.timestamp) return undefined
+    return {
+        messageId: row.message_id,
+        senderJid: row.sender_jid,
+        timestamp: Number(row.timestamp),
+    }
 }
 
 export type ReactionRow = {
@@ -305,19 +485,23 @@ export async function listDashboardGroups(
             g.deleted_at,
             COUNT(m.message_id)::int AS message_count,
             COUNT(DISTINCT m.sender_jid)::int AS sender_count,
-            latest.timestamp::text AS latest_timestamp,
+            EXTRACT(EPOCH FROM latest.timestamp)::bigint AS latest_timestamp,
             latest.text_content AS latest_text
          FROM groups g
          LEFT JOIN messages m
            ON m.group_jid = g.jid
-          AND m.timestamp >= $1
-          AND m.timestamp < $2
+          AND m.timestamp >= to_timestamp($1)
+          AND m.timestamp < to_timestamp($2)
          LEFT JOIN LATERAL (
-            SELECT timestamp, text_content
+            SELECT timestamp,
+                   CASE
+                       WHEN message_type = 'albumMessage' THEN 'Album'
+                       ELSE text_content
+                   END AS text_content
             FROM messages
             WHERE group_jid = g.jid
-              AND timestamp >= $1
-              AND timestamp < $2
+              AND timestamp >= to_timestamp($1)
+              AND timestamp < to_timestamp($2)
             ORDER BY timestamp DESC, message_id DESC
             LIMIT 1
          ) latest ON TRUE
@@ -363,6 +547,7 @@ export type DashboardMessage = {
     isHistory: boolean
     hasMedia: boolean
     reactions: MessageReaction[]
+    albumItems: DashboardMessage[]
 }
 
 type DashboardMessageRow = {
@@ -378,6 +563,29 @@ type DashboardMessageRow = {
     is_deleted: boolean
     is_history: boolean
     has_media: boolean
+}
+
+function toDashboardMessage(
+    row: DashboardMessageRow,
+    reactions: MessageReaction[] = [],
+    albumItems: DashboardMessage[] = []
+): DashboardMessage {
+    return {
+        messageId: row.message_id,
+        senderJid: row.sender_jid,
+        senderName: row.sender_name,
+        messageType: row.message_type,
+        textContent: row.text_content,
+        replyToId: row.reply_to_id,
+        quotedMessage: row.quoted_message,
+        timestamp: Number(row.timestamp),
+        isEdited: row.is_edited,
+        isDeleted: row.is_deleted,
+        isHistory: row.is_history,
+        hasMedia: row.has_media,
+        reactions,
+        albumItems,
+    }
 }
 
 export async function listDashboardMessages(
@@ -400,7 +608,7 @@ export async function listDashboardMessages(
             m.text_content,
             m.reply_to_id,
             m.quoted_message,
-            m.timestamp::text,
+            EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
             m.is_edited,
             m.is_deleted,
             m.is_history,
@@ -408,12 +616,18 @@ export async function listDashboardMessages(
          FROM messages m
          LEFT JOIN senders s ON s.jid = m.sender_jid
          WHERE m.group_jid = $1
-           AND m.timestamp >= $2
-           AND m.timestamp < $3
+           AND m.timestamp >= to_timestamp($2)
+           AND m.timestamp < to_timestamp($3)
+           AND (
+                m.album_parent_id IS NULL
+                OR NOT EXISTS (
+                    SELECT 1 FROM messages parent WHERE parent.message_id = m.album_parent_id
+                )
+           )
            AND (
                 $4::bigint IS NULL
-                OR m.timestamp < $4
-                OR (m.timestamp = $4 AND m.message_id < $5)
+                OR m.timestamp < to_timestamp($4)
+                OR (m.timestamp = to_timestamp($4) AND m.message_id < $5)
            )
          ORDER BY m.timestamp DESC, m.message_id DESC
          LIMIT $6`,
@@ -430,24 +644,57 @@ export async function listDashboardMessages(
     const hasMore = result.rows.length > limit
     const pageRows = hasMore ? result.rows.slice(0, limit) : result.rows
     const last = pageRows.at(-1)
-    const reactions = await loadReactions(pageRows.map((row) => row.message_id))
+    const albumIds = pageRows
+        .filter((row) => row.message_type === 'albumMessage')
+        .map((row) => row.message_id)
+
+    const childrenByParent = new Map<string, DashboardMessageRow[]>()
+    if (albumIds.length > 0) {
+        const children = await pool.query<DashboardMessageRow & { album_parent_id: string }>(
+            `SELECT
+                m.message_id,
+                m.sender_jid,
+                s.display_name AS sender_name,
+                m.message_type,
+                m.text_content,
+                m.reply_to_id,
+                m.quoted_message,
+                EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
+                m.is_edited,
+                m.is_deleted,
+                m.is_history,
+                (m.media_path IS NOT NULL) AS has_media,
+                m.album_parent_id
+             FROM messages m
+             LEFT JOIN senders s ON s.jid = m.sender_jid
+             WHERE m.album_parent_id = ANY($1::text[])
+             ORDER BY m.timestamp ASC, m.message_id ASC`,
+            [albumIds]
+        )
+        for (const child of children.rows) {
+            const items = childrenByParent.get(child.album_parent_id) ?? []
+            items.push(child)
+            childrenByParent.set(child.album_parent_id, items)
+        }
+    }
+
+    const reactionIds = [
+        ...pageRows.map((row) => row.message_id),
+        ...[...childrenByParent.values()].flat().map((row) => row.message_id),
+    ]
+    const reactions = await loadReactions(reactionIds)
 
     return {
-        messages: pageRows.map((row) => ({
-            messageId: row.message_id,
-            senderJid: row.sender_jid,
-            senderName: row.sender_name,
-            messageType: row.message_type,
-            textContent: row.text_content,
-            replyToId: row.reply_to_id,
-            quotedMessage: row.quoted_message,
-            timestamp: Number(row.timestamp),
-            isEdited: row.is_edited,
-            isDeleted: row.is_deleted,
-            isHistory: row.is_history,
-            hasMedia: row.has_media,
-            reactions: reactions.get(row.message_id) ?? [],
-        })),
+        messages: pageRows.map((row) => {
+            const childRows = childrenByParent.get(row.message_id) ?? []
+            return toDashboardMessage(
+                row,
+                reactions.get(row.message_id) ?? [],
+                childRows.map((child) =>
+                    toDashboardMessage(child, reactions.get(child.message_id) ?? [])
+                )
+            )
+        }),
         nextCursor:
             hasMore && last
                 ? { timestamp: Number(last.timestamp), messageId: last.message_id }
@@ -512,21 +759,21 @@ export async function listAlbumMedia(
             s.display_name AS sender_name,
             m.message_type,
             m.text_content,
-            m.timestamp::text
+            EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp
          FROM messages m
          JOIN groups g ON g.jid = m.group_jid
          LEFT JOIN senders s ON s.jid = m.sender_jid
          WHERE m.media_path IS NOT NULL
            AND m.is_deleted = FALSE
-           AND m.timestamp >= $1
-           AND m.timestamp < $2
+           AND m.timestamp >= to_timestamp($1)
+           AND m.timestamp < to_timestamp($2)
            AND m.message_type = ANY($3::text[])
            AND m.group_jid = ANY($4::text[])
            AND ($5::text IS NULL OR m.group_jid = $5)
            AND (
                 $6::bigint IS NULL
-                OR m.timestamp < $6
-                OR (m.timestamp = $6 AND m.message_id < $7)
+                OR m.timestamp < to_timestamp($6)
+                OR (m.timestamp = to_timestamp($6) AND m.message_id < $7)
            )
          ORDER BY m.timestamp DESC, m.message_id DESC
          LIMIT $8`,
@@ -598,8 +845,8 @@ export async function countAlbumMedia(
          FROM messages m
          WHERE m.media_path IS NOT NULL
            AND m.is_deleted = FALSE
-           AND m.timestamp >= $1
-           AND m.timestamp < $2
+           AND m.timestamp >= to_timestamp($1)
+           AND m.timestamp < to_timestamp($2)
            AND m.group_jid = ANY($3::text[])
            AND ($4::text IS NULL OR m.group_jid = $4)
            AND m.message_type = ANY($5::text[])
@@ -641,7 +888,7 @@ export async function getAlbumMediaForDownload(
             s.display_name AS sender_name,
             m.message_type,
             m.text_content,
-            m.timestamp::text,
+            EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
             m.media_path
          FROM messages m
          JOIN groups g ON g.jid = m.group_jid
@@ -649,8 +896,8 @@ export async function getAlbumMediaForDownload(
          WHERE m.message_id = ANY($1::text[])
            AND m.media_path IS NOT NULL
            AND m.is_deleted = FALSE
-           AND m.timestamp >= $2
-           AND m.timestamp < $3
+           AND m.timestamp >= to_timestamp($2)
+           AND m.timestamp < to_timestamp($3)
            AND m.message_type = ANY($4::text[])
            AND m.group_jid = ANY($5::text[])
            AND ($6::text IS NULL OR m.group_jid = $6)

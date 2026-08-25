@@ -23,6 +23,7 @@ import type { Readable } from 'stream'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
 import pino from 'pino'
 import { startApi } from './api.js'
+import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
 import { log } from './log.js'
 import {
@@ -31,13 +32,18 @@ import {
     setGroupMetadata,
 } from './cache.js'
 import {
+    getLatestGroupMessage,
     getMessageSecret,
+    getStoredMessageContent,
+    hasMessage,
     initDb,
     insertMessage,
     markGroupDeleted,
     markMessageEdited,
     markMessagesDeleted,
     removeReaction,
+    attachNearbyAlbumMedia,
+    findRecentAlbumParent,
     upsertGroup,
     upsertReaction,
     upsertSender,
@@ -114,6 +120,20 @@ function secondsFromMillis(value: unknown, fallback: number): number {
     return Number.isFinite(millis) && millis > 0 ? Math.floor(millis / 1000) : fallback
 }
 
+function albumParentIdOf(message: proto.IMessage | null | undefined): string | null {
+    const association = message?.messageContextInfo?.messageAssociation
+    const parentId = association?.parentMessageKey?.id
+    if (!parentId) return null
+    const type = association?.associationType
+    if (
+        type !== undefined &&
+        type !== proto.MessageAssociation.AssociationType.MEDIA_ALBUM
+    ) {
+        return null
+    }
+    return parentId
+}
+
 async function resolveGroupMetadata(jid: string, sock: WASocket): Promise<GroupMetadata | undefined> {
     const cached = await getGroupMetadata(jid)
     if (cached) return cached
@@ -144,6 +164,7 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
 
     if (messageType === 'protocolMessage') return 'ignored'
+    if (messageId && (await hasMessage(messageId)) && messageType !== 'reactionMessage') return 'ignored'
 
     const reaction = m.message.reactionMessage
     if (reaction) {
@@ -224,6 +245,14 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
         messageSecret = JSON.stringify(Array.from(secretBytes))
     }
 
+    let albumParentId = albumParentIdOf(m.message)
+    if (
+        !albumParentId &&
+        (messageType === 'imageMessage' || messageType === 'videoMessage')
+    ) {
+        albumParentId = await findRecentAlbumParent(jid, senderId, timestamp)
+    }
+
     let mediaPath: string | null = null
 
     if (messageType && fileTypes[messageType]) {
@@ -278,9 +307,18 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
             mediaPath,
             replyToId,
             quotedMessage,
+            albumParentId,
             timestamp,
             isHistory,
         })
+        if (messageType === 'albumMessage') {
+            await attachNearbyAlbumMedia({
+                parentId: messageId,
+                groupJid: jid,
+                senderJid: senderId,
+                timestamp,
+            })
+        }
         ingestLog(
             {
                 messageId,
@@ -290,6 +328,7 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false): 
                 senderName,
                 messageType,
                 hasMedia: Boolean(mediaPath),
+                albumParentId,
                 isHistory,
             },
             'message.ingested'
@@ -320,7 +359,13 @@ async function connectToWhatsApp() {
         cachedGroupMetadata: async (jid) => getGroupMetadata(jid),
         syncFullHistory: true,
         shouldSyncHistoryMessage: () => true,
+        getMessage: async (key) => {
+            if (!key.id) return undefined
+            const text = await getStoredMessageContent(key.id)
+            return text ? { conversation: text } : undefined
+        },
     })
+    const catchup = createCatchup(sock)
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update
@@ -332,13 +377,17 @@ async function connectToWhatsApp() {
         if (connection === 'close') {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
             const loggedOut = statusCode === DisconnectReason.loggedOut
-            log.warn(
-                { statusCode, loggedOut, err: lastDisconnect?.error },
-                'whatsapp.disconnected'
-            )
+            const restartRequired = statusCode === DisconnectReason.restartRequired
             if (loggedOut) {
-                log.warn('whatsapp.logged_out')
+                log.warn({ statusCode, loggedOut }, 'whatsapp.logged_out')
                 clearAuthContents(config.authDir)
+            } else if (restartRequired) {
+                log.info({ statusCode }, 'whatsapp.restart_required')
+            } else {
+                log.warn(
+                    { statusCode, loggedOut, err: lastDisconnect?.error },
+                    'whatsapp.disconnected'
+                )
             }
             connectToWhatsApp()
         } else if (connection === 'open') {
@@ -351,22 +400,36 @@ async function connectToWhatsApp() {
                 if (!metadata) continue
                 if (await persistMatchingGroup(metadata)) cached += 1
             }
-            log.info({ matchingGroups: cached, pattern: config.groupPatternSource }, 'groups.cached')
+            log.info(
+                {
+                    matchingGroups: cached,
+                    pattern: config.groupPatternSource,
+                    catchupWindowSeconds: config.catchupWindowSeconds,
+                },
+                'groups.cached'
+            )
         }
     })
 
     sock.ev.on('messaging-history.set', async ({ messages, contacts, syncType }) => {
         const started = Date.now()
         const counts = { saved: 0, reaction: 0, ignored: 0, error: 0 }
+        const latestBefore = new Map<string, number | undefined>()
         log.info(
             { syncType, messages: messages?.length || 0, contacts: contacts?.length || 0 },
             'history.sync.start'
         )
 
         for (const m of messages || []) {
+            const groupJid = m.key.remoteJid
+            if (groupJid && !latestBefore.has(groupJid)) {
+                const latest = await getLatestGroupMessage(groupJid)
+                latestBefore.set(groupJid, latest?.timestamp)
+            }
             await waitHistoryRead()
             counts[await processMessage(m, sock, true)] += 1
         }
+        await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
         log.info(
             { syncType, ms: Date.now() - started, ...counts },
             'history.sync.done'
@@ -376,45 +439,49 @@ async function connectToWhatsApp() {
     const MessageEditEncType = proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
 
     sock.ev.on('messages.upsert', async (event) => {
-        if (event.type == 'notify') {
-            for (const m of event.messages) {
-                const secEncMsg = m.message?.secretEncryptedMessage
-                if (secEncMsg?.secretEncType === MessageEditEncType) {
-                    const targetMsgId = secEncMsg.targetMessageKey?.id
-                    if (!targetMsgId) continue
-                    const storedSecret = await getMessageSecret(targetMsgId)
-                    if (!storedSecret) {
-                        log.warn(
-                            { targetMessageId: targetMsgId, groupJid: m.key.remoteJid },
-                            'message.edit_secret_missing'
-                        )
-                        continue
-                    }
-                    const msgSec = new Uint8Array(JSON.parse(storedSecret))
-                    try {
-                        const decryptedMessage: WAProto.IMessage = decryptEditedMessage(secEncMsg, {
-                            secret: msgSec,
-                            id: targetMsgId,
-                            sender: m.key.participant || m.participant || m.key.remoteJid || '',
-                        })
-                        const editedMessage =
-                            decryptedMessage.protocolMessage?.editedMessage?.conversation ??
-                            decryptedMessage.protocolMessage?.editedMessage?.imageMessage?.caption ??
-                            ''
-                        await markMessageEdited(targetMsgId, editedMessage)
-                        log.info(
-                            { messageId: targetMsgId, groupJid: m.key.remoteJid },
-                            'message.edited'
-                        )
-                    } catch (err) {
-                        log.warn(
-                            { err, targetMessageId: targetMsgId, groupJid: m.key.remoteJid },
-                            'message.edit_decrypt_failed'
-                        )
-                    }
-                } else {
-                    await processMessage(m, sock, false)
+        if (event.type !== 'notify' && event.type !== 'append') return
+        const isHistory = event.type === 'append' || Boolean(event.requestId)
+        for (const m of event.messages) {
+            const secEncMsg = m.message?.secretEncryptedMessage
+            if (secEncMsg?.secretEncType === MessageEditEncType) {
+                const targetMsgId = secEncMsg.targetMessageKey?.id
+                if (!targetMsgId) continue
+                const storedSecret = await getMessageSecret(targetMsgId)
+                if (!storedSecret) {
+                    log.warn(
+                        { targetMessageId: targetMsgId, groupJid: m.key.remoteJid },
+                        'message.edit_secret_missing'
+                    )
+                    continue
                 }
+                const msgSec = new Uint8Array(JSON.parse(storedSecret))
+                try {
+                    const decryptedMessage: WAProto.IMessage = decryptEditedMessage(secEncMsg, {
+                        secret: msgSec,
+                        id: targetMsgId,
+                        sender: m.key.participant || m.participant || m.key.remoteJid || '',
+                    })
+                    const editedMessage =
+                        decryptedMessage.protocolMessage?.editedMessage?.conversation ??
+                        decryptedMessage.protocolMessage?.editedMessage?.imageMessage?.caption ??
+                        ''
+                    await markMessageEdited(targetMsgId, editedMessage)
+                    log.info(
+                        { messageId: targetMsgId, groupJid: m.key.remoteJid },
+                        'message.edited'
+                    )
+                } catch (err) {
+                    log.warn(
+                        { err, targetMessageId: targetMsgId, groupJid: m.key.remoteJid },
+                        'message.edit_decrypt_failed'
+                    )
+                }
+            } else {
+                await catchup.considerMessage(
+                    m,
+                    event.requestId ? 'phone_unavailable' : event.type
+                )
+                await processMessage(m, sock, isHistory)
             }
         }
     })
@@ -440,6 +507,20 @@ async function connectToWhatsApp() {
             return
         }
         log.warn({ groupJid: e.jid }, 'messages.deleted_all')
+    })
+
+    sock.ev.on('chats.upsert', async (chats) => {
+        for (const chat of chats) {
+            const last = asCatchupMessage(chat.messages?.[0]?.message)
+            if (last) await catchup.considerMessage(last, 'chat.upsert')
+        }
+    })
+
+    sock.ev.on('chats.update', async (updates) => {
+        for (const chat of updates) {
+            const last = asCatchupMessage(chat.messages?.[0]?.message)
+            if (last) await catchup.considerMessage(last, 'chat.update')
+        }
     })
 
     sock.ev.on('groups.upsert', async (groups) => {

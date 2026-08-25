@@ -32,6 +32,7 @@ type Message = {
     isHistory: boolean
     hasMedia: boolean
     reactions: Reaction[]
+    albumItems?: Message[]
 }
 
 type GroupsResponse = {
@@ -169,6 +170,171 @@ function MediaPreview({ message }: { message: Message }) {
             </span>
             <span aria-hidden="true">↗</span>
         </a>
+    )
+}
+
+function albumSummary(items: Message[]): string {
+    const photos = items.filter((item) => item.messageType === 'imageMessage').length
+    const videos = items.filter((item) => item.messageType === 'videoMessage').length
+    const parts = []
+    if (photos) parts.push(`${photos} photo${photos === 1 ? '' : 's'}`)
+    if (videos) parts.push(`${videos} video${videos === 1 ? '' : 's'}`)
+    return parts.join(' · ') || 'Album'
+}
+
+function mediaUrl(messageId: string): string {
+    return `/api/media/${encodeURIComponent(messageId)}`
+}
+
+function ConversationAlbum({ items }: { items: Message[] }) {
+    const visible = items.filter((item) => !item.isDeleted && item.hasMedia)
+    const preview = visible.slice(0, 4)
+    const extra = visible.length - preview.length
+    const [openIndex, setOpenIndex] = useState<number | null>(null)
+    const openItem = openIndex === null ? null : visible[openIndex]
+
+    useEffect(() => {
+        if (openIndex === null) return undefined
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setOpenIndex(null)
+            if (event.key === 'ArrowRight') {
+                setOpenIndex((current) =>
+                    current === null ? current : (current + 1) % visible.length
+                )
+            }
+            if (event.key === 'ArrowLeft') {
+                setOpenIndex((current) =>
+                    current === null ? current : (current - 1 + visible.length) % visible.length
+                )
+            }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [openIndex, visible.length])
+
+    if (visible.length === 0) {
+        return <p className="album-pending">Grouped photos or videos</p>
+    }
+
+    return (
+        <>
+            <div
+                className={`conversation-album count-${Math.min(preview.length, 4)}`}
+                aria-label={albumSummary(visible)}
+            >
+                {preview.map((item, index) => {
+                    const url = mediaUrl(item.messageId)
+                    const isVideo = item.messageType === 'videoMessage'
+                    const showMore = extra > 0 && index === preview.length - 1
+                    return (
+                        <button
+                            className={`conversation-album-tile ${isVideo ? 'video' : ''}`}
+                            key={item.messageId}
+                            type="button"
+                            onClick={() => setOpenIndex(index)}
+                            aria-label={
+                                showMore
+                                    ? `Open album, ${extra} more`
+                                    : isVideo
+                                      ? 'Open video'
+                                      : 'Open photo'
+                            }
+                        >
+                            {isVideo ? (
+                                <video src={url} preload="metadata" muted playsInline />
+                            ) : (
+                                <img src={url} alt={item.textContent || 'Album photo'} loading="lazy" />
+                            )}
+                            {isVideo && !showMore && (
+                                <span className="conversation-album-play" aria-hidden="true">
+                                    ▶
+                                </span>
+                            )}
+                            {showMore && (
+                                <span className="conversation-album-more">+{extra}</span>
+                            )}
+                        </button>
+                    )
+                })}
+            </div>
+            {openItem && openIndex !== null && (
+                <div className="lightbox" role="dialog" aria-modal="true" aria-label="Album preview">
+                    <button className="lightbox-close" onClick={() => setOpenIndex(null)} aria-label="Close">
+                        ×
+                    </button>
+                    {visible.length > 1 && (
+                        <>
+                            <button
+                                className="lightbox-nav prev"
+                                type="button"
+                                aria-label="Previous"
+                                onClick={() =>
+                                    setOpenIndex((openIndex - 1 + visible.length) % visible.length)
+                                }
+                            >
+                                ‹
+                            </button>
+                            <button
+                                className="lightbox-nav next"
+                                type="button"
+                                aria-label="Next"
+                                onClick={() => setOpenIndex((openIndex + 1) % visible.length)}
+                            >
+                                ›
+                            </button>
+                        </>
+                    )}
+                    <div className="lightbox-media">
+                        {openItem.messageType === 'videoMessage' ? (
+                            <video src={mediaUrl(openItem.messageId)} controls autoPlay />
+                        ) : (
+                            <img
+                                src={mediaUrl(openItem.messageId)}
+                                alt={openItem.textContent || 'Album photo'}
+                            />
+                        )}
+                    </div>
+                    <div className="lightbox-info">
+                        <strong>{albumSummary(visible)}</strong>
+                        <span>
+                            {openIndex + 1} of {visible.length}
+                        </span>
+                        {openItem.textContent && <p>{openItem.textContent}</p>}
+                        <a
+                            href={mediaUrl(openItem.messageId)}
+                            target="_blank"
+                            rel="noreferrer"
+                        >
+                            Open original
+                        </a>
+                    </div>
+                </div>
+            )}
+        </>
+    )
+}
+
+function MessageBody({ message }: { message: Message }) {
+    const albumItems = message.albumItems ?? []
+    const caption =
+        message.textContent || albumItems.find((item) => item.textContent)?.textContent
+
+    if (message.isDeleted) {
+        return <p className="deleted-copy">This message was deleted.</p>
+    }
+    if (message.messageType === 'albumMessage') {
+        return (
+            <>
+                {caption && <p>{caption}</p>}
+                <ConversationAlbum items={albumItems} />
+            </>
+        )
+    }
+    return (
+        <>
+            <p>{caption || (message.hasMedia ? null : 'No text content')}</p>
+            <MediaPreview message={message} />
+        </>
     )
 }
 
@@ -578,17 +744,16 @@ export default function App() {
                                                     {message.isEdited && <span>Edited</span>}
                                                     {message.isHistory && <span>History</span>}
                                                     {message.isDeleted && <span>Deleted</span>}
-                                                    <span>{message.messageType.replace(/Message$/, '')}</span>
+                                                    <span>
+                                                        {message.messageType === 'albumMessage'
+                                                            ? albumSummary(message.albumItems ?? [])
+                                                            : message.messageType.replace(/Message$/, '')}
+                                                    </span>
                                                 </div>
                                                 {message.quotedMessage && (
                                                     <blockquote>{message.quotedMessage}</blockquote>
                                                 )}
-                                                <p className={message.isDeleted ? 'deleted-copy' : ''}>
-                                                    {message.isDeleted
-                                                        ? 'This message was deleted.'
-                                                        : message.textContent || (message.hasMedia ? null : 'No text content')}
-                                                </p>
-                                                {!message.isDeleted && <MediaPreview message={message} />}
+                                                <MessageBody message={message} />
                                                 {!message.isDeleted && (
                                                     <ReactionRow reactions={message.reactions ?? []} />
                                                 )}
