@@ -312,7 +312,11 @@ export type LatestGroupMessage = {
     timestamp: number
 }
 
-export async function getLatestGroupMessage(groupJid: string): Promise<LatestGroupMessage | undefined> {
+async function getGroupMessageAnchor(
+    groupJid: string,
+    direction: 'latest' | 'oldest'
+): Promise<LatestGroupMessage | undefined> {
+    const order = direction === 'latest' ? 'DESC' : 'ASC'
     const result = await pool.query<{
         message_id: string
         sender_jid: string | null
@@ -324,7 +328,7 @@ export async function getLatestGroupMessage(groupJid: string): Promise<LatestGro
             EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
          FROM messages
          WHERE group_jid = $1 AND timestamp IS NOT NULL
-         ORDER BY timestamp DESC, message_id DESC
+         ORDER BY timestamp ${order}, message_id ${order}
          LIMIT 1`,
         [groupJid]
     )
@@ -335,6 +339,14 @@ export async function getLatestGroupMessage(groupJid: string): Promise<LatestGro
         senderJid: row.sender_jid,
         timestamp: Number(row.timestamp),
     }
+}
+
+export async function getLatestGroupMessage(groupJid: string): Promise<LatestGroupMessage | undefined> {
+    return getGroupMessageAnchor(groupJid, 'latest')
+}
+
+export async function getOldestGroupMessage(groupJid: string): Promise<LatestGroupMessage | undefined> {
+    return getGroupMessageAnchor(groupJid, 'oldest')
 }
 
 export type ReactionRow = {

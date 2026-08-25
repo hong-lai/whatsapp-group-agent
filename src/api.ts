@@ -71,7 +71,7 @@ function parseHongKongDate(value: string): number {
 
 function getDateRange(request: Request): DateRange {
     const today = dateStringFromHongKongTime()
-    const from = typeof request.query.from === 'string' ? request.query.from : addDays(today, -6)
+    const from = typeof request.query.from === 'string' ? request.query.from : addDays(today, -1)
     const to = typeof request.query.to === 'string' ? request.query.to : today
     const fromTimestamp = parseHongKongDate(from)
     const toStartTimestamp = parseHongKongDate(to)

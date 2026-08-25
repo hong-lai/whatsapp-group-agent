@@ -432,7 +432,7 @@ function SkeletonMessages() {
 export default function App() {
     const initialParams = new URLSearchParams(window.location.search)
     const today = hongKongDate()
-    const [from, setFrom] = useState(initialParams.get('from') || addDays(today, -6))
+    const [from, setFrom] = useState(initialParams.get('from') || addDays(today, -1))
     const [to, setTo] = useState(initialParams.get('to') || today)
     const [selectedJid, setSelectedJid] = useState<string | null>(initialParams.get('group'))
     const [view, setView] = useState<'messages' | 'album'>(
@@ -768,7 +768,7 @@ export default function App() {
                     </button>
                 </div>
                 <div className="presets" aria-label="Date presets">
-                    {[1, 7, 30].map((days) => (
+                    {[1, 2, 7, 30].map((days) => (
                         <button
                             className={from === addDays(today, -(days - 1)) && to === today ? 'active' : ''}
                             key={days}

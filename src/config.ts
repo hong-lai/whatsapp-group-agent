@@ -63,8 +63,10 @@ export const config = {
     mediaDelayMinMs: envInt('MEDIA_DELAY_MIN_MS', 1500),
     mediaDelayMaxMs: envInt('MEDIA_DELAY_MAX_MS', 4000),
     catchupWindowSeconds: envInt('CATCHUP_WINDOW_SECONDS', 15 * 60),
+    catchupBackfillSeconds: envInt('CATCHUP_BACKFILL_SECONDS', 2 * 24 * 60 * 60),
     catchupPageSize: envInt('CATCHUP_PAGE_SIZE', 50),
     catchupMaxPages: envInt('CATCHUP_MAX_PAGES', 3),
+    catchupBackfillMaxPages: envInt('CATCHUP_BACKFILL_MAX_PAGES', 40),
     logLevel: envLogLevel('LOG_LEVEL', 'info'),
 }
 

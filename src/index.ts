@@ -66,30 +66,60 @@ const fileTypes: Record<string, string> = {
     audioMessage: 'ogg',
 }
 
+const skippedGroupJids = new Set<string>()
+const participatingMeta = new Map<string, GroupMetadata>()
+
+function isRateOverlimit(err: unknown): boolean {
+    return String(err).includes('rate-overlimit')
+}
+
+function mergeDefined<T extends object>(base: T, patch: Partial<T>): T {
+    const next = { ...base }
+    for (const key of Object.keys(patch) as (keyof T)[]) {
+        const value = patch[key]
+        if (value !== undefined) next[key] = value as T[keyof T]
+    }
+    return next
+}
+
 function ownJid(sock: WASocket): string | undefined {
     const id = sock.user?.id
     return id ? jidNormalizedUser(id) : undefined
 }
 
 async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
+    participatingMeta.set(metadata.id, metadata)
     const name = metadata.subject
     const tracked = matchesGroupPattern(name)
     await upsertGroup(metadata.id, name || metadata.id, tracked)
     if (tracked) {
+        skippedGroupJids.delete(metadata.id)
         await setGroupMetadata(metadata.id, metadata)
         return true
     }
+    skippedGroupJids.add(metadata.id)
     await deleteGroupMetadata(metadata.id)
     return false
 }
 
 async function forgetGroup(jid: string, reason: string): Promise<void> {
+    const rateLimited = reason.includes('rate-overlimit')
+    if (rateLimited) {
+        skippedGroupJids.add(jid)
+        log.warn({ groupJid: jid, reason }, 'group.metadata_rate_limited')
+        return
+    }
+    participatingMeta.delete(jid)
     await markGroupDeleted(jid)
     await deleteGroupMetadata(jid)
     log.info({ groupJid: jid, reason }, 'group.forgotten')
 }
 
-async function refreshGroup(sock: WASocket, jid: string): Promise<GroupMetadata | undefined> {
+async function refreshGroup(
+    sock: WASocket,
+    jid: string,
+    source: string
+): Promise<GroupMetadata | undefined> {
     try {
         const metadata = await sock.groupMetadata(jid)
         if (!metadata) {
@@ -99,9 +129,24 @@ async function refreshGroup(sock: WASocket, jid: string): Promise<GroupMetadata 
         await persistMatchingGroup(metadata)
         return metadata
     } catch (err) {
+        if (isRateOverlimit(err)) {
+            skippedGroupJids.add(jid)
+            log.warn({ err, groupJid: jid, source }, 'group.metadata_rate_limited')
+            return undefined
+        }
         await forgetGroup(jid, `metadata fetch failed: ${String(err)}`)
         return undefined
     }
+}
+
+function unixSeconds(value: unknown): number {
+    const n = Number(value)
+    if (!Number.isFinite(n) || n <= 0) return Math.floor(Date.now() / 1000)
+    return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
+}
+
+function historyCutoffSeconds(): number {
+    return Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
 }
 
 function secondsFromMillis(value: unknown, fallback: number): number {
@@ -173,6 +218,15 @@ async function storeMediaFile(
         await updateMessageMediaPath(messageId, fileName)
         return fileName
     } catch (err) {
+        const timeout =
+            String(err).includes('Connect Timeout') || String(err).includes('fetch failed')
+        if (isHistory && timeout) {
+            log.debug(
+                { messageId, groupJid, groupName, messageType },
+                'media.history_unavailable'
+            )
+            return null
+        }
         log.warn(
             { err, messageId, groupJid, groupName, messageType, isHistory },
             'media.download_failed'
@@ -181,10 +235,25 @@ async function storeMediaFile(
     }
 }
 
-async function resolveGroupMetadata(jid: string, sock: WASocket): Promise<GroupMetadata | undefined> {
+async function resolveGroupMetadata(
+    jid: string,
+    sock: WASocket,
+    allowFetch: boolean
+): Promise<GroupMetadata | undefined> {
     const cached = await getGroupMetadata(jid)
+    const participating = participatingMeta.get(jid)
+    const knownNonMatching = skippedGroupJids.has(jid)
     if (cached) return cached
-    return refreshGroup(sock, jid)
+    if (participating) {
+        if (matchesGroupPattern(participating.subject)) {
+            await persistMatchingGroup(participating)
+            return participating
+        }
+        skippedGroupJids.add(jid)
+        return undefined
+    }
+    if (knownNonMatching || !allowFetch) return undefined
+    return refreshGroup(sock, jid, 'processMessage')
 }
 
 async function processMessage(
@@ -198,7 +267,7 @@ async function processMessage(
     const jid = m.key.remoteJid
     if (!isJidGroup(jid)) return 'ignored'
 
-    const groupMetadata = await resolveGroupMetadata(jid, sock)
+    const groupMetadata = await resolveGroupMetadata(jid, sock, !isHistory)
     if (!groupMetadata) return 'ignored'
 
     const groupName = groupMetadata.subject
@@ -213,7 +282,8 @@ async function processMessage(
 
     const senderId = rawSender ? jidNormalizedUser(rawSender) : jid
     const senderName = m.pushName || jidDecode(senderId)?.user || ''
-    const timestamp = Number(m.messageTimestamp) || Math.floor(Date.now() / 1000)
+    const timestamp = unixSeconds(m.messageTimestamp)
+    if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
     const messageSecret = extractMessageSecret(m.message)
     const alreadyEdited = isEditedWrapper(m.message)
@@ -424,18 +494,30 @@ async function connectToWhatsApp() {
         } else if (connection === 'open') {
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
 
+            skippedGroupJids.clear()
+            participatingMeta.clear()
             const response = await sock.groupFetchAllParticipating()
             let cached = 0
+            let participating = 0
+            const trackedJids: string[] = []
             for (const key in response) {
                 const metadata = response[key]
                 if (!metadata) continue
-                if (await persistMatchingGroup(metadata)) cached += 1
+                participating += 1
+                participatingMeta.set(metadata.id, metadata)
             }
+            for (const metadata of participatingMeta.values()) {
+                if (await persistMatchingGroup(metadata)) {
+                    cached += 1
+                    trackedJids.push(metadata.id)
+                }
+            }
+            catchup.setTrackedGroups(trackedJids)
             log.info(
                 {
                     matchingGroups: cached,
                     pattern: config.groupPatternSource,
-                    catchupWindowSeconds: config.catchupWindowSeconds,
+                    catchupBackfillSeconds: config.catchupBackfillSeconds,
                 },
                 'groups.cached'
             )
@@ -444,18 +526,18 @@ async function connectToWhatsApp() {
     })
 
     sock.ev.on('messaging-history.set', (event) => {
-        catchup.noteHistoryChunk()
         void runIngest(async () => {
             const { messages, contacts, syncType } = event
             const started = Date.now()
-            const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0 }
+            const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
             const latestBefore = new Map<string, number | undefined>()
-            log.info(
-                { syncType, messages: messages?.length || 0, contacts: contacts?.length || 0 },
-                'history.sync.start'
-            )
+            const cutoff = historyCutoffSeconds()
 
             for (const m of messages || []) {
+                if (unixSeconds(m.messageTimestamp) < cutoff) {
+                    counts.tooOld += 1
+                    continue
+                }
                 const groupJid = m.key.remoteJid
                 if (groupJid && !latestBefore.has(groupJid)) {
                     const latest = await getLatestGroupMessage(groupJid)
@@ -468,6 +550,7 @@ async function connectToWhatsApp() {
                 if (result === 'applied') counts.edited += 1
             }
             await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
+            catchup.noteHistoryChunk(syncType)
             log.info(
                 { syncType, ms: Date.now() - started, ...counts },
                 'history.sync.done'
@@ -485,6 +568,7 @@ async function connectToWhatsApp() {
             const isHistory = event.type === 'append' || Boolean(event.requestId)
             for (const m of event.messages) {
                 if (!isEditEnvelope(m.message)) {
+                    catchup.noteChatHead(m)
                     await catchup.considerMessage(
                         m,
                         event.requestId ? 'phone_unavailable' : event.type
@@ -533,14 +617,20 @@ async function connectToWhatsApp() {
     sock.ev.on('chats.upsert', async (chats) => {
         for (const chat of chats) {
             const last = asCatchupMessage(chat.messages?.[0]?.message)
-            if (last) await catchup.considerMessage(last, 'chat.upsert')
+            if (last) {
+                catchup.noteChatHead(last)
+                await catchup.considerMessage(last, 'chat.upsert')
+            }
         }
     })
 
     sock.ev.on('chats.update', async (updates) => {
         for (const chat of updates) {
             const last = asCatchupMessage(chat.messages?.[0]?.message)
-            if (last) await catchup.considerMessage(last, 'chat.update')
+            if (last) {
+                catchup.noteChatHead(last)
+                await catchup.considerMessage(last, 'chat.update')
+            }
         }
     })
 
@@ -548,6 +638,7 @@ async function connectToWhatsApp() {
         for (const group of groups) {
             const tracked = await persistMatchingGroup(group)
             if (tracked) {
+                catchup.setTrackedGroups([group.id])
                 log.info({ groupJid: group.id, groupName: group.subject }, 'group.tracked')
             }
         }
@@ -556,18 +647,29 @@ async function connectToWhatsApp() {
     sock.ev.on('groups.update', async (events) => {
         for (const event of events) {
             if (!event?.id) continue
-            const previous = await getGroupMetadata(event.id)
-            if (event.subject && previous && event.subject !== previous.subject) {
-                log.info(
-                    {
-                        groupJid: event.id,
-                        from: previous.subject,
-                        to: event.subject,
-                    },
-                    'group.renamed'
-                )
+            const previous =
+                (await getGroupMetadata(event.id)) ?? participatingMeta.get(event.id)
+            if (previous) {
+                const merged = mergeDefined(previous, event as Partial<GroupMetadata>)
+                if (event.subject && event.subject !== previous.subject) {
+                    log.info(
+                        {
+                            groupJid: event.id,
+                            from: previous.subject,
+                            to: event.subject,
+                        },
+                        'group.renamed'
+                    )
+                }
+                const tracked = await persistMatchingGroup(merged)
+                if (tracked) catchup.setTrackedGroups([event.id])
+                continue
             }
-            await refreshGroup(sock, event.id)
+            if (event.subject && matchesGroupPattern(event.subject)) {
+                await refreshGroup(sock, event.id, 'groups.update-matched')
+                continue
+            }
+            skippedGroupJids.add(event.id)
         }
     })
 
@@ -591,7 +693,9 @@ async function connectToWhatsApp() {
             return
         }
 
-        const metadata = await refreshGroup(sock, event.id)
+        const cached = await getGroupMetadata(event.id)
+        if (!cached) return
+        const metadata = await refreshGroup(sock, event.id, 'participants.update')
         if (metadata) {
             log.debug(
                 {
