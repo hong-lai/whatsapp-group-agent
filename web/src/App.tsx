@@ -158,6 +158,34 @@ function Icon({ name }: { name: 'archive' | 'calendar' | 'search' | 'users' | 'm
     )
 }
 
+function isContactMessage(type: string): boolean {
+    return type === 'contactMessage' || type === 'contactsArrayMessage'
+}
+
+function isLocationMessage(type: string): boolean {
+    return type === 'locationMessage' || type === 'liveLocationMessage'
+}
+
+function contactCards(text: string | null): Array<{ name: string; detail?: string }> {
+    const blocks = (text || '').split(/\n{2,}/).map((block) => block.trim()).filter(Boolean)
+    if (blocks.length === 0) return [{ name: 'Shared contact' }]
+    return blocks.map((block) => {
+        const [name, ...rest] = block.split('\n')
+        return { name: name || 'Shared contact', detail: rest.join(' · ') || undefined }
+    })
+}
+
+function locationShare(text: string | null): { title: string; detail?: string; mapsUrl?: string } {
+    const lines = (text || '').split('\n').map((line) => line.trim()).filter(Boolean)
+    const mapsUrl = lines.find((line) => /^https?:\/\//i.test(line))
+    const copy = lines.filter((line) => line !== mapsUrl)
+    return {
+        title: copy[0] || 'Shared location',
+        detail: copy.slice(1).join(' · ') || undefined,
+        mapsUrl,
+    }
+}
+
 function MediaPreview({ message }: { message: Message }) {
     if (!message.hasMedia) return null
     const url = `/api/media/${encodeURIComponent(message.messageId)}`
@@ -337,6 +365,7 @@ function ConversationAlbum({
 
 function hasStoredContent(message: Message): boolean {
     if (message.textContent || message.hasMedia || message.quotedMessage) return true
+    if (isContactMessage(message.messageType) || isLocationMessage(message.messageType)) return true
     return (message.albumItems ?? []).some((item) => item.hasMedia || item.textContent)
 }
 
@@ -354,6 +383,57 @@ function MessageBody({ message, revealed }: { message: Message; revealed: boolea
                 {caption && <p>{caption}</p>}
                 <ConversationAlbum items={albumItems} includeDeleted={revealed} />
             </>
+        )
+    }
+    if (isContactMessage(message.messageType)) {
+        return (
+            <div className="share-stack">
+                {contactCards(message.textContent).map((card, index) => (
+                    <div className="share-card" key={`${card.name}-${index}`}>
+                        <span className="share-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24">
+                                <circle cx="12" cy="8" r="3" />
+                                <path d="M5 20v-1.5a7 7 0 0 1 14 0V20" />
+                            </svg>
+                        </span>
+                        <span>
+                            <strong>{card.name}</strong>
+                            {card.detail && /^[+\d][\d\s()-]{5,}$/.test(card.detail) ? (
+                                <small>
+                                    <a href={`tel:${card.detail.replace(/[^\d+]/g, '')}`}>{card.detail}</a>
+                                </small>
+                            ) : (
+                                <small>{card.detail || 'Contact card'}</small>
+                            )}
+                        </span>
+                    </div>
+                ))}
+            </div>
+        )
+    }
+    if (isLocationMessage(message.messageType)) {
+        const place = locationShare(message.textContent)
+        const live = message.messageType === 'liveLocationMessage'
+        const body = (
+            <>
+                <span className="share-icon location" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M12 21s7-6.2 7-11a7 7 0 1 0-14 0c0 4.8 7 11 7 11z" />
+                        <circle cx="12" cy="10" r="2.2" />
+                    </svg>
+                </span>
+                <span>
+                    <strong>{place.title}</strong>
+                    <small>{place.detail || (live ? 'Live location' : 'Location pin')}</small>
+                </span>
+                {place.mapsUrl ? <span aria-hidden="true">↗</span> : null}
+            </>
+        )
+        if (!place.mapsUrl) return <div className="share-card">{body}</div>
+        return (
+            <a className="share-card" href={place.mapsUrl} target="_blank" rel="noreferrer">
+                {body}
+            </a>
         )
     }
     return (

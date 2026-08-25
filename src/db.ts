@@ -602,6 +602,10 @@ export async function listDashboardGroups(
             SELECT timestamp,
                    CASE
                        WHEN message_type = 'albumMessage' THEN 'Album'
+                       WHEN message_type IN ('contactMessage', 'contactsArrayMessage')
+                           THEN COALESCE(NULLIF(text_content, ''), 'Contact')
+                       WHEN message_type IN ('locationMessage', 'liveLocationMessage')
+                           THEN COALESCE(NULLIF(text_content, ''), 'Location')
                        ELSE text_content
                    END AS text_content
             FROM messages

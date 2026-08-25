@@ -1613,6 +1613,80 @@ video.media-frame {
     font-weight: 800;
 }
 
+.share-stack {
+    display: grid;
+    gap: 8px;
+    margin-top: 11px;
+}
+
+.share-card {
+    max-width: 360px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 11px;
+    padding: 11px;
+    border: 1px solid #dfe8e4;
+    border-radius: 10px;
+    color: #315c51;
+    background: #f6faf8;
+    text-decoration: none;
+}
+
+.share-stack .share-card {
+    margin-top: 0;
+}
+
+.share-card > span:nth-child(2) {
+    flex: 1;
+    min-width: 0;
+}
+
+.share-card strong,
+.share-card small {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.share-card strong {
+    font-size: 0.75rem;
+}
+
+.share-card small {
+    margin-top: 2px;
+    color: #84948f;
+    font-size: 0.62rem;
+}
+
+.share-card small a {
+    color: inherit;
+}
+
+.share-icon {
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 9px;
+    color: white;
+    background: #2f8f78;
+    flex-shrink: 0;
+}
+
+.share-icon.location {
+    background: #c45b3b;
+}
+
+.share-icon svg {
+    width: 1.05rem;
+    height: 1.05rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 .load-sentinel {
     display: flex;
     justify-content: center;

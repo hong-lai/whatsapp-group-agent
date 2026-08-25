@@ -367,6 +367,10 @@ function contextInfoOf(content: proto.IMessage | null | undefined): proto.IConte
         content.templateMessage?.contextInfo ||
         content.listMessage?.contextInfo ||
         content.interactiveMessage?.contextInfo ||
+        content.contactMessage?.contextInfo ||
+        content.contactsArrayMessage?.contextInfo ||
+        content.locationMessage?.contextInfo ||
+        content.liveLocationMessage?.contextInfo ||
         undefined
     )
 }

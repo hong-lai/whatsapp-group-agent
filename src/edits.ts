@@ -42,6 +42,40 @@ export function extractMessageSecret(message: proto.IMessage | null | undefined)
     return bytes ? encodeMessageSecret(bytes) : null
 }
 
+function vcardField(vcard: string, key: string): string | null {
+    const match = vcard.match(new RegExp(`^${key}(?:;[^:]*)?:\\s*(.+)$`, 'im'))
+    return match?.[1]?.replace(/\\n/g, '\n').trim() || null
+}
+
+function textFromContact(contact: proto.Message.IContactMessage | null | undefined): string | null {
+    if (!contact) return null
+    const vcard = contact.vcard || ''
+    const name = contact.displayName?.trim() || vcardField(vcard, 'FN')
+    const phone = vcardField(vcard, 'TEL')
+    const lines = [name, phone].filter(Boolean)
+    return lines.length ? lines.join('\n') : null
+}
+
+function textFromLocation(
+    location: proto.Message.ILocationMessage | proto.Message.ILiveLocationMessage | null | undefined
+): string | null {
+    if (!location) return null
+    const lat = location.degreesLatitude
+    const lng = location.degreesLongitude
+    const live = 'caption' in location ? location.caption?.trim() : undefined
+    const named = 'name' in location ? location.name?.trim() : undefined
+    const address = 'address' in location ? location.address?.trim() : undefined
+    const comment = 'comment' in location ? location.comment?.trim() : undefined
+    const givenUrl = 'url' in location ? location.url?.trim() : undefined
+    const lines = [named, address, live || comment].filter(Boolean) as string[]
+    if (typeof lat === 'number' && typeof lng === 'number' && Number.isFinite(lat) && Number.isFinite(lng)) {
+        lines.push(`https://maps.google.com/?q=${lat},${lng}`)
+    } else if (givenUrl) {
+        lines.push(givenUrl)
+    }
+    return lines.length ? lines.join('\n') : null
+}
+
 export function textFromMessage(message: proto.IMessage | null | undefined): string | null {
     if (!message) return null
     const nested = message.protocolMessage?.editedMessage
@@ -50,12 +84,19 @@ export function textFromMessage(message: proto.IMessage | null | undefined): str
         if (fromNested != null) return fromNested
     }
     const content = normalizeMessageContent(message) || message
+    const contacts = (content.contactsArrayMessage?.contacts || [])
+        .map((contact) => textFromContact(contact))
+        .filter((text): text is string => Boolean(text))
     return (
         content.conversation ||
         content.extendedTextMessage?.text ||
         content.imageMessage?.caption ||
         content.videoMessage?.caption ||
         content.documentMessage?.caption ||
+        textFromContact(content.contactMessage) ||
+        (contacts.length ? contacts.join('\n\n') : content.contactsArrayMessage?.displayName?.trim()) ||
+        textFromLocation(content.locationMessage) ||
+        textFromLocation(content.liveLocationMessage) ||
         null
     )
 }
