@@ -322,6 +322,38 @@ function albumParentIdOf(message: proto.IMessage | null | undefined): string | n
     return parentId
 }
 
+function contentForIngest(message: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
+    if (!message) return message
+    if (message.imageMessage && message.associatedChildMessage) {
+        const rest = { ...message, associatedChildMessage: null }
+        return normalizeMessageContent(rest) || rest
+    }
+    return normalizeMessageContent(message) || message
+}
+
+function isLivePhotoMotionVideo(
+    raw: proto.IMessage | null | undefined,
+    content: proto.IMessage | null | undefined
+): boolean {
+    if (raw?.imageMessage) return false
+    const video = content?.videoMessage || raw?.videoMessage
+    if (!video) return false
+    const association =
+        raw?.messageContextInfo?.messageAssociation?.associationType ??
+        content?.messageContextInfo?.messageAssociation?.associationType
+    if (association === proto.MessageAssociation.AssociationType.MOTION_PHOTO) return true
+    if (video.contextInfo?.pairedMediaType === proto.ContextInfo.PairedMediaType.MOTION_PHOTO_CHILD) {
+        return true
+    }
+    return video.motionPhotoPresentationOffsetMs != null
+}
+
+function messageForMediaDownload(m: WAMessage): WAMessage {
+    const msg = m.message
+    if (!msg?.imageMessage || !msg.associatedChildMessage) return m
+    return { ...m, message: { ...msg, associatedChildMessage: null } }
+}
+
 function contextInfoOf(content: proto.IMessage | null | undefined): proto.IContextInfo | undefined {
     if (!content) return undefined
     return (
@@ -373,10 +405,11 @@ async function storeMediaFile(
     }
 ): Promise<string | null> {
     if (!fileTypes[messageType]) return null
+    if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
     try {
         await waitMediaDownload()
         const stream = await downloadMediaMessage(
-            m,
+            messageForMediaDownload(m),
             'stream',
             {},
             {
@@ -459,7 +492,7 @@ async function processMessage(
     if (!matchesGroupPattern(groupName)) return 'ignored'
 
     const messageId = m.key.id
-    const content = normalizeMessageContent(m.message) || m.message
+    const content = contentForIngest(m.message) || m.message
     const messageType = getContentType(content) || 'unknown'
     const me = ownUser(sock)
     const rawSender = m.key.fromMe
@@ -488,6 +521,13 @@ async function processMessage(
     const alreadyEdited = isEditedWrapper(m.message)
 
     if (messageType === 'protocolMessage') return 'ignored'
+    if (isLivePhotoMotionVideo(m.message, content)) {
+        ingestLog(
+            { messageId, groupJid: jid, groupName, isHistory },
+            'media.live_photo_video_skipped'
+        )
+        return 'ignored'
+    }
     if (messageId && (await hasMessage(messageId))) {
         await rememberMessageSecret(messageId, messageSecret)
         if (alreadyEdited) {
