@@ -558,6 +558,35 @@ export default function AlbumView({
                         </select>
                     )}
                 </div>
+                <div className="media-filters" aria-label="Media type filters">
+                    <button
+                        className={showingAll ? 'active' : ''}
+                        onClick={() => {
+                            if (!showingAll) onTypesChange([...allMediaCategories])
+                        }}
+                        aria-pressed={showingAll}
+                        aria-label={`All types, ${totalCount}`}
+                        title="All types"
+                    >
+                        <span className="filter-icon"><ToolbarIcon name="all" /></span>
+                        <strong>{totalCount}</strong>
+                    </button>
+                    {categoryOptions
+                        .filter((category) => counts[category.id] > 0)
+                        .map((category) => (
+                            <button
+                                key={category.id}
+                                className={!showingAll && types.includes(category.id) ? 'active' : ''}
+                                onClick={() => toggleType(category.id)}
+                                aria-pressed={!showingAll && types.includes(category.id)}
+                                aria-label={`${category.label}, ${counts[category.id]}`}
+                                title={category.label}
+                            >
+                                <span className="filter-icon"><ToolbarIcon name={category.icon} /></span>
+                                <strong>{counts[category.id]}</strong>
+                            </button>
+                        ))}
+                </div>
                 <div className="album-actions">
                     <div className="segmented-control" role="group" aria-label="Selection">
                         <button
@@ -581,34 +610,6 @@ export default function AlbumView({
                     </div>
                 </div>
             </header>
-
-            <div className="media-filters" aria-label="Media type filters">
-                <button
-                    className={showingAll ? 'active' : ''}
-                    onClick={() => {
-                        if (!showingAll) onTypesChange([...allMediaCategories])
-                    }}
-                    aria-pressed={showingAll}
-                    aria-label={`All types, ${totalCount}`}
-                    title="All types"
-                >
-                    <span className="filter-icon"><ToolbarIcon name="all" /></span>
-                    <strong>{totalCount}</strong>
-                </button>
-                {categoryOptions.map((category) => (
-                    <button
-                        key={category.id}
-                        className={!showingAll && types.includes(category.id) ? 'active' : ''}
-                        onClick={() => toggleType(category.id)}
-                        aria-pressed={!showingAll && types.includes(category.id)}
-                        aria-label={`${category.label}, ${counts[category.id]}`}
-                        title={category.label}
-                    >
-                        <span className="filter-icon"><ToolbarIcon name={category.icon} /></span>
-                        <strong>{counts[category.id]}</strong>
-                    </button>
-                ))}
-            </div>
 
             {error && <div className="album-error" role="alert">{error}</div>}
 

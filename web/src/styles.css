@@ -55,7 +55,11 @@ svg {
 }
 
 .app-shell {
-    min-height: 100vh;
+    min-height: 100dvh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     background:
         radial-gradient(circle at 85% -5%, rgba(66, 184, 150, 0.17), transparent 30rem),
         #f2f5f1;
@@ -71,6 +75,7 @@ svg {
 
 .topbar {
     height: 48px;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -183,6 +188,7 @@ h3 {
 .filter-bar {
     min-height: 48px;
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     gap: 12px;
     margin-top: 10px;
@@ -335,11 +341,12 @@ h3 {
 }
 
 .dashboard {
-    height: max(480px, min(860px, calc(100dvh - 108px)));
+    flex: 1;
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(300px, 380px) 1fr;
     margin-top: 10px;
+    margin-bottom: 12px;
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: 22px;
@@ -568,8 +575,8 @@ h3 {
     min-height: 44px;
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 14px;
+    gap: 8px;
+    padding: 6px 12px;
     border-bottom: 1px solid var(--line);
     background: rgba(255, 255, 255, 0.95);
 }
@@ -612,12 +619,12 @@ h3 {
 
 .media-filters {
     display: flex;
-    gap: 6px;
-    padding: 6px 14px;
-    overflow-x: auto;
-    border-bottom: 1px solid var(--line);
-    background: white;
-    scrollbar-width: thin;
+    flex: 0 0 auto;
+    min-width: 0;
+    gap: 4px;
+    padding: 0;
+    overflow: hidden;
+    background: transparent;
 }
 
 .media-filters button {
@@ -1652,6 +1659,12 @@ video.media-frame {
 }
 
 @media (max-width: 720px) {
+    .app-shell {
+        height: auto;
+        min-height: 100dvh;
+        overflow: visible;
+    }
+
     .topbar,
     .filter-bar,
     .dashboard,
@@ -1759,6 +1772,12 @@ video.media-frame {
         gap: 8px;
     }
 
+    .media-filters {
+        flex: 1 1 auto;
+        order: 3;
+        width: 100%;
+    }
+
     .album-scope {
         flex: 1 1 100%;
     }
@@ -1820,10 +1839,6 @@ video.media-frame {
     .date-control {
         display: grid;
         grid-template-columns: auto 1fr;
-    }
-
-    .media-filters {
-        padding-inline: 10px;
     }
 
     .media-filters button {
