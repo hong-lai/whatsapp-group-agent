@@ -9,6 +9,7 @@ import {
     countAlbumMedia,
     getAlbumMediaForDownload,
     getDashboardMedia,
+    groupMatchesPattern,
     listAlbumMedia,
     listDashboardGroups,
     listDashboardMessages,
@@ -209,18 +210,30 @@ export function createApiApp() {
         asyncRoute(async (request, response) => {
             const range = getDateRange(request)
             const groups = await listDashboardGroups(range.fromTimestamp, range.toTimestamp)
-            response.json({ range: { from: range.from, to: range.to }, groups })
+            response.json({
+                range: { from: range.from, to: range.to },
+                pattern: {
+                    source: config.groupPatternSource,
+                    flags: 'i',
+                },
+                groups,
+            })
         })
     )
 
     app.get(
         '/api/groups/:jid/messages',
         asyncRoute(async (request, response) => {
+            const jid = getRouteParam(request.params.jid)
+            if (!(await groupMatchesPattern(jid))) {
+                response.status(404).json({ error: 'Group is outside the configured name pattern' })
+                return
+            }
             const range = getDateRange(request)
             const cursor = decodeCursor(request.query.cursor)
             const limit = parseLimit(request.query.limit)
             const page = await listDashboardMessages(
-                getRouteParam(request.params.jid),
+                jid,
                 range.fromTimestamp,
                 range.toTimestamp,
                 limit,
@@ -257,6 +270,10 @@ export function createApiApp() {
 
             response.json({
                 range: { from: range.from, to: range.to },
+                pattern: {
+                    source: config.groupPatternSource,
+                    flags: 'i',
+                },
                 scope: { groupJid: groupJid ?? null },
                 types: categories,
                 counts,

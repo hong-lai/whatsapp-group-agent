@@ -12,6 +12,12 @@ type Group = {
     latestText: string | null
 }
 
+type Reaction = {
+    emoji: string
+    count: number
+    senders: string[]
+}
+
 type Message = {
     messageId: string
     senderJid: string | null
@@ -25,10 +31,15 @@ type Message = {
     isDeleted: boolean
     isHistory: boolean
     hasMedia: boolean
+    reactions: Reaction[]
 }
 
 type GroupsResponse = {
     groups: Group[]
+    pattern: {
+        source: string
+        flags: string
+    }
 }
 
 type MessagesResponse = {
@@ -161,6 +172,25 @@ function MediaPreview({ message }: { message: Message }) {
     )
 }
 
+function ReactionRow({ reactions }: { reactions: Reaction[] }) {
+    if (reactions.length === 0) return null
+
+    return (
+        <div className="reaction-row">
+            {reactions.map((reaction) => (
+                <span
+                    className="reaction-chip"
+                    key={reaction.emoji}
+                    title={`${reaction.emoji} ${reaction.senders.join(', ')}`}
+                >
+                    <span className="reaction-emoji">{reaction.emoji}</span>
+                    {reaction.count > 1 && <span className="reaction-count">{reaction.count}</span>}
+                </span>
+            ))}
+        </div>
+    )
+}
+
 function SkeletonMessages() {
     return (
         <div className="message-list" aria-label="Loading messages">
@@ -202,6 +232,7 @@ export default function App() {
     const [loadingMore, setLoadingMore] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [reloadKey, setReloadKey] = useState(0)
+    const [pattern, setPattern] = useState<{ source: string; flags: string } | null>(null)
     const groupsRequestId = useRef(0)
     const messagesRequestId = useRef(0)
 
@@ -216,9 +247,13 @@ export default function App() {
     const totals = useMemo(
         () => ({
             messages: groups.reduce((sum, group) => sum + group.messageCount, 0),
-            activeGroups: groups.filter((group) => group.tracked).length,
+            matchingGroups: groups.length,
         }),
         [groups]
+    )
+    const patternTerms = useMemo(
+        () => (pattern?.source ? pattern.source.split('|').map((term) => term.trim()).filter(Boolean) : []),
+        [pattern]
     )
 
     useEffect(() => {
@@ -251,6 +286,7 @@ export default function App() {
             .then((data) => {
                 if (requestId !== groupsRequestId.current) return
                 setGroups(data.groups)
+                if (data.pattern?.source) setPattern(data.pattern)
                 setSelectedJid((current) => {
                     if (current && data.groups.some((group) => group.jid === current)) return current
                     return data.groups.find((group) => group.messageCount > 0)?.jid || data.groups[0]?.jid || null
@@ -339,6 +375,17 @@ export default function App() {
                     </span>
                 </div>
                 <div className="topbar-status">
+                    {pattern && (
+                        <div
+                            className="pattern-meta"
+                            title={`GROUP_PATTERN /${pattern.source}/${pattern.flags}`}
+                        >
+                            <span>Matching</span>
+                            {patternTerms.map((term) => (
+                                <code key={term}>{term}</code>
+                            ))}
+                        </div>
+                    )}
                     <span className="status-dot" />
                     Live archive
                 </div>
@@ -349,7 +396,7 @@ export default function App() {
                     <p className="eyebrow">CONVERSATION INTELLIGENCE</p>
                     <h1>Messages, clearly organized.</h1>
                     <p className="hero-copy">
-                        Browse your tracked communities, review shared media, and find the moments that matter.
+                        Only groups whose names match the configured pattern are shown.
                     </p>
                 </div>
                 <div className="summary-cards">
@@ -359,7 +406,7 @@ export default function App() {
                     </div>
                     <div className="summary-card">
                         <span className="summary-icon"><Icon name="users" /></span>
-                        <span><strong>{totals.activeGroups}</strong><small>Active groups</small></span>
+                        <span><strong>{totals.matchingGroups}</strong><small>Matching groups</small></span>
                     </div>
                 </div>
             </section>
@@ -433,7 +480,7 @@ export default function App() {
                     <aside className="groups-panel">
                     <div className="panel-heading">
                         <div>
-                            <p className="eyebrow">GROUPS</p>
+                            <p className="eyebrow">MATCHING GROUPS</p>
                             <h2>Conversations</h2>
                         </div>
                         <span className="count-pill">{groups.length}</span>
@@ -480,7 +527,11 @@ export default function App() {
                                 </button>
                             ))}
                         {!groupsLoading && filteredGroups.length === 0 && (
-                            <div className="empty-small">No groups match your search.</div>
+                            <div className="empty-small">
+                                {search.trim()
+                                    ? 'No matching groups for this search.'
+                                    : 'No groups match the configured name pattern.'}
+                            </div>
                         )}
                     </div>
                 </aside>
@@ -538,6 +589,9 @@ export default function App() {
                                                         : message.textContent || (message.hasMedia ? null : 'No text content')}
                                                 </p>
                                                 {!message.isDeleted && <MediaPreview message={message} />}
+                                                {!message.isDeleted && (
+                                                    <ReactionRow reactions={message.reactions ?? []} />
+                                                )}
                                             </div>
                                         </article>
                                     ))}

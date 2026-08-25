@@ -125,6 +125,25 @@ svg {
     font-weight: 600;
 }
 
+.pattern-meta {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-right: 6px;
+    color: #5d736c;
+    font-weight: 600;
+}
+
+.pattern-meta code {
+    padding: 2px 7px;
+    border: 1px solid rgba(33, 163, 133, 0.18);
+    border-radius: 999px;
+    color: #0b6d58;
+    background: rgba(33, 163, 133, 0.1);
+    font: 700 0.62rem 'Manrope', sans-serif;
+}
+
 .status-dot {
     width: 6px;
     height: 6px;
@@ -1219,6 +1238,35 @@ blockquote {
     white-space: nowrap;
 }
 
+.reaction-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 7px;
+}
+
+.reaction-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 7px;
+    border: 1px solid #dfe8e4;
+    border-radius: 999px;
+    background: #f4f8f6;
+    cursor: default;
+}
+
+.reaction-emoji {
+    font-size: 0.82rem;
+    line-height: 1.2;
+}
+
+.reaction-count {
+    color: #5c716b;
+    font-size: 0.63rem;
+    font-weight: 700;
+}
+
 .message-card.deleted .message-content {
     border-style: dashed;
     background: #fafbfa;
@@ -1434,6 +1482,18 @@ video.media-frame {
     .summary-card {
         min-width: 0;
         flex: 1;
+    }
+
+    .topbar {
+        height: auto;
+        min-height: 48px;
+        padding: 8px 0;
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .pattern-meta {
+        max-width: 100%;
     }
 
     .filter-bar {

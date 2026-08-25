@@ -33,6 +33,8 @@ function envInt(name: string, fallback: number): number {
     return Number.isFinite(n) ? n : fallback
 }
 
+const GROUP_PATTERN_SOURCE = env('GROUP_PATTERN', '富山邨|錦田')
+
 export const config = {
     databaseUrl: env('DATABASE_URL', 'postgres://whatsapp:whatsapp@localhost:5433/whatsapp'),
     redisUrl: env('REDIS_URL', 'redis://localhost:6380'),
@@ -42,7 +44,8 @@ export const config = {
     albumPageSize: envInt('ALBUM_PAGE_SIZE', 60),
     albumMaxPageSize: envInt('ALBUM_MAX_PAGE_SIZE', 120),
     albumMaxBatchSize: envInt('ALBUM_MAX_BATCH_SIZE', 500),
-    groupPattern: new RegExp(env('GROUP_PATTERN', '富山邨|錦田'), 'i'),
+    groupPatternSource: GROUP_PATTERN_SOURCE,
+    groupPattern: new RegExp(GROUP_PATTERN_SOURCE, 'i'),
     authDir: env('AUTH_DIR', 'auth_info_baileys'),
     downloadDir: env('DOWNLOAD_DIR', './downloads'),
     historyDelayMinMs: envInt('HISTORY_DELAY_MIN_MS', 800),

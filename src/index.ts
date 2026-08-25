@@ -36,7 +36,9 @@ import {
     markGroupDeleted,
     markMessageEdited,
     markMessagesDeleted,
+    removeReaction,
     upsertGroup,
+    upsertReaction,
     upsertSender,
 } from './db.js'
 import { waitHistoryRead, waitMediaDownload } from './rateLimit.js'
@@ -106,6 +108,11 @@ const decryptEditedMessage = (
     return proto.Message.decode(decrypted)
 }
 
+function secondsFromMillis(value: unknown, fallback: number): number {
+    const millis = Number(value)
+    return Number.isFinite(millis) && millis > 0 ? Math.floor(millis / 1000) : fallback
+}
+
 async function resolveGroupMetadata(jid: string, sock: WASocket): Promise<GroupMetadata | undefined> {
     const cached = await getGroupMetadata(jid)
     if (cached) return cached
@@ -143,6 +150,36 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false) {
     console.log('Type:      ', messageType)
     console.log('Date:      ', new Date(timestamp * 1000).toLocaleString())
 
+    const reaction = m.message.reactionMessage
+    if (reaction) {
+        const targetMessageId = reaction.key?.id
+        if (!targetMessageId) return
+
+        const emoji = reaction.text?.trim() || ''
+        const reactedAt = secondsFromMillis(reaction.senderTimestampMs, timestamp)
+        try {
+            await upsertGroup(jid, groupName, true)
+            await upsertSender(senderId, senderName)
+            if (emoji) {
+                await upsertReaction({
+                    targetMessageId,
+                    groupJid: jid,
+                    senderJid: senderId,
+                    emoji,
+                    timestamp: reactedAt,
+                    isHistory,
+                })
+                console.log(`${emoji} Reaction saved for message ${targetMessageId}.`)
+            } else {
+                await removeReaction(targetMessageId, senderId, reactedAt)
+                console.log(`🚫 Reaction removed from message ${targetMessageId}.`)
+            }
+        } catch (err) {
+            console.error(`❌ DB Reaction Error for ${targetMessageId}:`, err)
+        }
+        return
+    }
+
     const textContent =
         m.message?.conversation ||
         m.message?.extendedTextMessage?.text ||
@@ -155,9 +192,6 @@ async function processMessage(m: WAMessage, sock: WASocket, isHistory = false) {
         m.message.extendedTextMessage?.contextInfo?.quotedMessage?.conversation ||
         m.message.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption ||
         null
-
-    const reactionMessage = m.message.reactionMessage?.text
-    if (reactionMessage) console.log(reactionMessage)
 
     let messageSecret: string | null = null
     const secretBytes = m.message.messageContextInfo?.messageSecret

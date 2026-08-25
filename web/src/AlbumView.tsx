@@ -301,7 +301,7 @@ export default function AlbumView({
                             className={scope === 'all' ? 'active' : ''}
                             onClick={() => onScopeChange('all')}
                         >
-                            All groups
+                            All matching
                         </button>
                         <button
                             className={scope === 'group' ? 'active' : ''}
