@@ -2,9 +2,10 @@ import makeWASocket, {
     DisconnectReason,
     downloadMediaMessage,
     getContentType,
+    type Contact,
     type GroupMetadata,
+    type LIDMapping,
     isJidGroup,
-    jidDecode,
     jidNormalizedUser,
     normalizeMessageContent,
     proto,
@@ -43,7 +44,7 @@ import {
     updateMessageMediaPath,
     upsertGroup,
     upsertReaction,
-    upsertSender,
+    upsertSenders,
 } from './db.js'
 import {
     applyEditUpdate,
@@ -68,6 +69,138 @@ const fileTypes: Record<string, string> = {
 
 const skippedGroupJids = new Set<string>()
 const participatingMeta = new Map<string, GroupMetadata>()
+const senderDisplayNames = new Map<string, string>()
+const lidToPn = new Map<string, string>()
+const pnToLid = new Map<string, string>()
+
+type NamedContact = Pick<Contact, 'id' | 'lid' | 'phoneNumber' | 'name' | 'notify' | 'verifiedName'>
+
+function usableDisplayName(value: string | undefined | null): string {
+    const name = value?.trim() ?? ''
+    if (!name) return ''
+    if (name.includes('@')) return ''
+    if (/^\d{8,}$/.test(name)) return ''
+    return name
+}
+
+function contactDisplayName(contact: Partial<NamedContact>): string {
+    return (
+        usableDisplayName(contact.name) ||
+        usableDisplayName(contact.notify) ||
+        usableDisplayName(contact.verifiedName)
+    )
+}
+
+function cacheSenderName(jid: string | undefined | null, name: string): void {
+    if (!jid || !name) return
+    senderDisplayNames.set(jidNormalizedUser(jid), name)
+}
+
+function linkedJids(...jids: Array<string | undefined | null>): string[] {
+    const out: string[] = []
+    const seen = new Set<string>()
+    for (const jid of jids) {
+        if (!jid) continue
+        const key = jidNormalizedUser(jid)
+        const extras = [key, lidToPn.get(key), pnToLid.get(key)]
+        for (const extra of extras) {
+            if (!extra || seen.has(extra)) continue
+            seen.add(extra)
+            out.push(extra)
+        }
+    }
+    return out
+}
+
+function noteLidMapping(pn: string, lid: string): [string, string] {
+    const pnJid = jidNormalizedUser(pn)
+    const lidJid = jidNormalizedUser(lid)
+    lidToPn.set(lidJid, pnJid)
+    pnToLid.set(pnJid, lidJid)
+    return [pnJid, lidJid]
+}
+
+function cachedSenderName(...jids: Array<string | undefined | null>): string {
+    for (const jid of linkedJids(...jids)) {
+        const name = senderDisplayNames.get(jid)
+        if (name) return name
+    }
+    return ''
+}
+
+function nameFromGroup(
+    metadata: GroupMetadata,
+    ...jids: Array<string | undefined | null>
+): string {
+    const wanted = new Set(
+        jids.filter((jid): jid is string => Boolean(jid)).map((jid) => jidNormalizedUser(jid))
+    )
+    if (wanted.size === 0) return ''
+    for (const participant of metadata.participants || []) {
+        const ids = [participant.id, participant.lid, participant.phoneNumber]
+            .filter((jid): jid is string => Boolean(jid))
+            .map((jid) => jidNormalizedUser(jid))
+        if (!ids.some((id) => wanted.has(id))) continue
+        const name = contactDisplayName(participant)
+        if (name) return name
+    }
+    return ''
+}
+
+async function rememberContacts(contacts: Array<Partial<NamedContact>> | undefined): Promise<void> {
+    if (!contacts?.length) return
+    const rows: Array<{ jid: string; displayName: string }> = []
+    const seen = new Set<string>()
+    for (const contact of contacts) {
+        const name = contactDisplayName(contact)
+        if (!name) continue
+        const pn =
+            contact.phoneNumber ||
+            (contact.id?.includes('@s.whatsapp.net') ? contact.id : undefined)
+        const lid = contact.lid || (contact.id?.includes('@lid') ? contact.id : undefined)
+        if (pn && lid) noteLidMapping(pn, lid)
+        for (const jid of linkedJids(contact.id, contact.lid, contact.phoneNumber)) {
+            if (seen.has(jid)) continue
+            seen.add(jid)
+            cacheSenderName(jid, name)
+            rows.push({ jid, displayName: name })
+        }
+    }
+    await upsertSenders(rows)
+}
+
+async function rememberLidMappings(mappings: LIDMapping[] | undefined): Promise<void> {
+    if (!mappings?.length) return
+    const rows: Array<{ jid: string; displayName: string }> = []
+    const seen = new Set<string>()
+    for (const mapping of mappings) {
+        if (!mapping.pn || !mapping.lid) continue
+        const [pnJid, lidJid] = noteLidMapping(mapping.pn, mapping.lid)
+        const name = cachedSenderName(pnJid, lidJid)
+        if (!name) continue
+        for (const jid of [pnJid, lidJid]) {
+            if (seen.has(jid)) continue
+            seen.add(jid)
+            cacheSenderName(jid, name)
+            rows.push({ jid, displayName: name })
+        }
+    }
+    await upsertSenders(rows)
+}
+
+function ownUser(sock: WASocket): { id?: string; lid?: string; name?: string } | undefined {
+    return sock.user as { id?: string; lid?: string; name?: string } | undefined
+}
+
+async function rememberMessageSender(
+    senderId: string,
+    altSender: string | undefined,
+    senderName: string
+): Promise<void> {
+    await upsertSenders(
+        linkedJids(senderId, altSender).map((jid) => ({ jid, displayName: senderName }))
+    )
+}
 
 function isRateOverlimit(err: unknown): boolean {
     return String(err).includes('rate-overlimit')
@@ -92,6 +225,7 @@ async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
     const name = metadata.subject
     const tracked = matchesGroupPattern(name)
     await upsertGroup(metadata.id, name || metadata.id, tracked)
+    await rememberContacts(metadata.participants)
     if (tracked) {
         skippedGroupJids.delete(metadata.id)
         await setGroupMetadata(metadata.id, metadata)
@@ -281,7 +415,19 @@ async function processMessage(
         : (m.key.participant || m.participant)
 
     const senderId = rawSender ? jidNormalizedUser(rawSender) : jid
-    const senderName = m.pushName || jidDecode(senderId)?.user || ''
+    const altSender = m.key.participantAlt ? jidNormalizedUser(m.key.participantAlt) : undefined
+    const me = ownUser(sock)
+    const senderName =
+        cachedSenderName(senderId, altSender, m.key.fromMe ? me?.lid : undefined) ||
+        usableDisplayName(m.pushName) ||
+        (m.key.fromMe ? usableDisplayName(me?.name) : '') ||
+        nameFromGroup(groupMetadata, senderId, altSender) ||
+        ''
+    if (senderName) {
+        for (const jid of linkedJids(senderId, altSender)) {
+            cacheSenderName(jid, senderName)
+        }
+    }
     const timestamp = unixSeconds(m.messageTimestamp)
     if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
@@ -313,7 +459,7 @@ async function processMessage(
         const reactedAt = secondsFromMillis(reaction.senderTimestampMs, timestamp)
         try {
             await upsertGroup(jid, groupName, true)
-            await upsertSender(senderId, senderName)
+            await rememberMessageSender(senderId, altSender, senderName)
             if (emoji) {
                 await upsertReaction({
                     targetMessageId,
@@ -383,7 +529,7 @@ async function processMessage(
 
     try {
         await upsertGroup(jid, groupName, true)
-        await upsertSender(senderId, senderName)
+        await rememberMessageSender(senderId, altSender, senderName)
         await insertMessage({
             messageId,
             groupJid: jid,
@@ -527,11 +673,14 @@ async function connectToWhatsApp() {
 
     sock.ev.on('messaging-history.set', (event) => {
         void runIngest(async () => {
-            const { messages, contacts, syncType } = event
+            const { messages, contacts, syncType, lidPnMappings } = event
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
             const latestBefore = new Map<string, number | undefined>()
             const cutoff = historyCutoffSeconds()
+
+            await rememberLidMappings(lidPnMappings)
+            await rememberContacts(contacts)
 
             for (const m of messages || []) {
                 if (unixSeconds(m.messageTimestamp) < cutoff) {
@@ -560,6 +709,24 @@ async function connectToWhatsApp() {
 
     sock.ev.on('messaging-history.status', (status) => {
         catchup.noteHistoryStatus(status.syncType, status.status)
+    })
+
+    sock.ev.on('lid-mapping.update', (mapping) => {
+        void runIngest(async () => {
+            await rememberLidMappings([mapping])
+        })
+    })
+
+    sock.ev.on('contacts.upsert', (contacts) => {
+        void runIngest(async () => {
+            await rememberContacts(contacts)
+        })
+    })
+
+    sock.ev.on('contacts.update', (contacts) => {
+        void runIngest(async () => {
+            await rememberContacts(contacts)
+        })
     })
 
     sock.ev.on('messages.upsert', (event) => {

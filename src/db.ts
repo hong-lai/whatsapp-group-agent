@@ -65,6 +65,15 @@ export async function initDb(): Promise<void> {
             WHERE album_parent_id IS NOT NULL;
     `)
 
+        const placeholders = await pool.query(
+            `UPDATE senders
+             SET display_name = NULL, updated_at = NOW()
+             WHERE display_name ~ '^[0-9]{8,}$'`
+        )
+        if (placeholders.rowCount) {
+            log.info({ count: placeholders.rowCount }, 'db.placeholder_sender_names_cleared')
+        }
+
         // Reactions used to be stored as empty message rows that carried neither
         // the emoji nor the message they belonged to, so there is nothing to migrate.
         const legacy = await pool.query(
@@ -235,15 +244,23 @@ export async function markGroupDeleted(jid: string): Promise<void> {
     )
 }
 
-export async function upsertSender(jid: string, displayName: string): Promise<void> {
+export async function upsertSenders(
+    entries: Array<{ jid: string; displayName: string }>
+): Promise<void> {
+    if (entries.length === 0) return
     await pool.query(
         `INSERT INTO senders (jid, display_name, updated_at)
-         VALUES ($1, $2, NOW())
+         SELECT jid, NULLIF(name, ''), NOW()
+         FROM unnest($1::text[], $2::text[]) AS t(jid, name)
          ON CONFLICT (jid) DO UPDATE SET
             display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), senders.display_name),
             updated_at = NOW()`,
-        [jid, displayName]
+        [entries.map((entry) => entry.jid), entries.map((entry) => entry.displayName)]
     )
+}
+
+export async function upsertSender(jid: string, displayName: string): Promise<void> {
+    await upsertSenders([{ jid, displayName }])
 }
 
 export type MessageRow = {
