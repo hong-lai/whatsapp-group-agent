@@ -33,7 +33,8 @@ type Props = {
     to: string
     groups: GroupOption[]
     selectedJid: string | null
-    onSelectGroup: (jid: string) => void
+    selectedJids: string[]
+    onSelectedJidsChange: (jids: string[]) => void
     scope: AlbumScope
     onScopeChange: (scope: AlbumScope) => void
     types: MediaCategory[]
@@ -74,12 +75,15 @@ function albumUrl(
     from: string,
     to: string,
     scope: AlbumScope,
-    selectedJid: string | null,
+    selectedJids: string[],
     types: MediaCategory[],
     cursor?: string
 ): string {
     const params = new URLSearchParams({ from, to, types: types.join(',') })
-    if (scope === 'group' && selectedJid) params.set('group', selectedJid)
+    if (scope === 'group') {
+        params.set('groups', selectedJids.join(','))
+        if (selectedJids.length === 1) params.set('group', selectedJids[0])
+    }
     if (cursor) params.set('cursor', cursor)
     return `/api/album?${params}`
 }
@@ -119,6 +123,82 @@ function groupAlbumItems(
     })
 }
 
+function GroupPicker({
+    groups,
+    selectedJids,
+    onChange,
+}: {
+    groups: GroupOption[]
+    selectedJids: string[]
+    onChange: (jids: string[]) => void
+}) {
+    const [open, setOpen] = useState(false)
+    const rootRef = useRef<HTMLDivElement>(null)
+    const selected = groups.filter((group) => selectedJids.includes(group.jid))
+    const label =
+        selected.length === 0
+            ? 'Select groups'
+            : selected.length === 1
+              ? selected[0].name
+              : `${selected[0].name} +${selected.length - 1}`
+
+    useEffect(() => {
+        if (!open) return undefined
+        function onPointerDown(event: PointerEvent) {
+            if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+        }
+        document.addEventListener('pointerdown', onPointerDown)
+        return () => document.removeEventListener('pointerdown', onPointerDown)
+    }, [open])
+
+    function toggle(jid: string) {
+        onChange(
+            selectedJids.includes(jid)
+                ? selectedJids.filter((item) => item !== jid)
+                : [...selectedJids, jid]
+        )
+    }
+
+    return (
+        <div className="group-picker" ref={rootRef}>
+            <button
+                type="button"
+                className="group-picker-toggle"
+                aria-expanded={open}
+                aria-haspopup="listbox"
+                aria-label="Selected groups"
+                title={selected.map((group) => group.name).join(', ') || 'Select groups'}
+                onClick={() => setOpen((current) => !current)}
+            >
+                <span>{label}</span>
+                <svg className="picker-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d={open ? 'm6 15 6-6 6 6' : 'm6 9 6 6 6-6'} />
+                </svg>
+            </button>
+            {open && (
+                <div className="group-picker-menu" role="listbox" aria-multiselectable="true">
+                    {groups.map((group) => {
+                        const checked = selectedJids.includes(group.jid)
+                        return (
+                            <label
+                                className={checked ? 'is-selected' : ''}
+                                key={group.jid}
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggle(group.jid)}
+                                />
+                                <span>{group.name}</span>
+                            </label>
+                        )
+                    })}
+                </div>
+            )}
+        </div>
+    )
+}
+
 function ToolbarIcon({
     name,
 }: {
@@ -143,8 +223,7 @@ function ToolbarIcon({
         ),
         group: (
             <>
-                <circle cx="12" cy="8" r="3" />
-                <path d="M5 20v-1.5a7 7 0 0 1 14 0V20" />
+                <path d="M4 5h16l-5.8 7.4V19l-4.4 2v-8.6L4 5z" />
             </>
         ),
         selectAll: (
@@ -288,7 +367,8 @@ export default function AlbumView({
     to,
     groups,
     selectedJid,
-    onSelectGroup,
+    selectedJids,
+    onSelectedJidsChange,
     scope,
     onScopeChange,
     types,
@@ -315,8 +395,8 @@ export default function AlbumView({
     const showingAll = isAllTypes(types)
     const totalCount = Object.values(counts).reduce((sum, count) => sum + count, 0)
 
-    const scopeGroup = scope === 'group' ? selectedJid : null
-    const filterKey = `${from}|${to}|${scope}|${scopeGroup || ''}|${types.join(',')}`
+    const scopedJids = scope === 'group' ? selectedJids : []
+    const filterKey = `${from}|${to}|${scope}|${scopedJids.join(',')}|${types.join(',')}`
 
     useEffect(() => {
         return () => {
@@ -336,18 +416,12 @@ export default function AlbumView({
         silentGen.current += 1
         setSelected(new Set())
         setLightbox(null)
-        if (scope === 'group' && !selectedJid) {
-            requestId.current += 1
-            setItems([])
-            setLoading(false)
-            return
-        }
         const controller = new AbortController()
         const currentRequest = ++requestId.current
         scrollRestore.current = null
         setLoading(true)
         setError(null)
-        albumJson(albumUrl(from, to, scope, selectedJid, types), controller.signal)
+        albumJson(albumUrl(from, to, scope, selectedJids, types), controller.signal)
             .then((data) => {
                 if (currentRequest !== requestId.current) return
                 setItems(data.items)
@@ -363,15 +437,14 @@ export default function AlbumView({
                 if (currentRequest === requestId.current) setLoading(false)
             })
         return () => controller.abort()
-    }, [filterKey, from, to, scope, selectedJid, types])
+    }, [filterKey, from, to, scope, selectedJids, types])
 
     async function silentRefresh() {
         if (!active || loading || loadingMore || downloading || silentBusy.current) return
-        if (scope === 'group' && !selectedJid) return
         const gen = ++silentGen.current
         silentBusy.current = true
         try {
-            const data = await albumJson(albumUrl(from, to, scope, selectedJid, types))
+            const data = await albumJson(albumUrl(from, to, scope, selectedJids, types))
             if (gen !== silentGen.current) return
             const list = scrollRef.current
             if (list && list.scrollTop > 40) {
@@ -464,7 +537,7 @@ export default function AlbumView({
         setError(null)
         try {
             const data = await albumJson(
-                albumUrl(from, to, scope, selectedJid, types, nextCursor)
+                albumUrl(from, to, scope, selectedJids, types, nextCursor)
             )
             setItems((current) => [...current, ...data.items])
             setNextCursor(data.nextCursor)
@@ -482,7 +555,10 @@ export default function AlbumView({
         setError(null)
         try {
             const params = new URLSearchParams({ from, to, types: types.join(',') })
-            if (scopeGroup) params.set('group', scopeGroup)
+            if (scope === 'group') {
+                params.set('groups', selectedJids.join(','))
+                if (selectedJids.length === 1) params.set('group', selectedJids[0])
+            }
             const response = await fetch(`/api/album/download?${params}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -537,25 +613,24 @@ export default function AlbumView({
                         <button
                             type="button"
                             className={scope === 'group' ? 'active' : ''}
-                            onClick={() => onScopeChange('group')}
-                            aria-label="This group"
-                            title="This group"
+                            onClick={() => {
+                                onScopeChange('group')
+                                if (selectedJids.length === 0 && selectedJid) {
+                                    onSelectedJidsChange([selectedJid])
+                                }
+                            }}
+                            aria-label="Selected groups"
+                            title="Selected groups"
                         >
                             <ToolbarIcon name="group" />
                         </button>
                     </div>
                     {scope === 'group' && (
-                        <select
-                            value={selectedJid || ''}
-                            onChange={(event) => onSelectGroup(event.target.value)}
-                            aria-label="Media group"
-                        >
-                            {groups.map((group) => (
-                                <option value={group.jid} key={group.jid}>
-                                    {group.name}
-                                </option>
-                            ))}
-                        </select>
+                        <GroupPicker
+                            groups={groups}
+                            selectedJids={selectedJids}
+                            onChange={onSelectedJidsChange}
+                        />
                     )}
                 </div>
                 <div className="media-filters" aria-label="Media type filters">
@@ -630,7 +705,7 @@ export default function AlbumView({
                     <>
                         {groupedItems.map((group) => (
                             <section className="album-group" key={group.jid}>
-                                {scope !== 'group' && (
+                                {!(scope === 'group' && selectedJids.length === 1) && (
                                     <h3 className="album-group-title">{group.name}</h3>
                                 )}
                                 <div className="album-grid">

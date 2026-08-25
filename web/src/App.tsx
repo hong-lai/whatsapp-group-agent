@@ -57,6 +57,15 @@ function initialMediaCategories(params: URLSearchParams): MediaCategory[] {
     return valid.length ? [...new Set(valid)] : allMediaCategories
 }
 
+function initialAlbumGroups(params: URLSearchParams): string[] {
+    const fromList = params.get('groups')
+    if (fromList) {
+        return [...new Set(fromList.split(',').map((jid) => jid.trim()).filter(Boolean))]
+    }
+    const one = params.get('group')
+    return one && params.get('scope') === 'group' ? [one] : []
+}
+
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
     timeZone: 'Asia/Hong_Kong',
     dateStyle: 'medium',
@@ -438,6 +447,9 @@ export default function App() {
     const [albumScope, setAlbumScope] = useState<AlbumScope>(
         initialParams.get('scope') === 'group' ? 'group' : 'all'
     )
+    const [albumGroupJids, setAlbumGroupJids] = useState<string[]>(
+        initialAlbumGroups(initialParams)
+    )
     const [albumTypes, setAlbumTypes] = useState<MediaCategory[]>(
         initialMediaCategories(initialParams)
     )
@@ -485,9 +497,12 @@ export default function App() {
         if (view === 'album') {
             params.set('scope', albumScope)
             params.set('types', albumTypes.join(','))
+            if (albumScope === 'group' && albumGroupJids.length) {
+                params.set('groups', albumGroupJids.join(','))
+            }
         }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
-    }, [from, to, selectedJid, view, albumScope, albumTypes])
+    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes])
 
     function pulseLive() {
         const now = Date.now()
@@ -914,7 +929,8 @@ export default function App() {
                         to={to}
                         groups={groups}
                         selectedJid={selectedJid}
-                        onSelectGroup={setSelectedJid}
+                        selectedJids={albumGroupJids}
+                        onSelectedJidsChange={setAlbumGroupJids}
                         scope={albumScope}
                         onScopeChange={setAlbumScope}
                         types={albumTypes}

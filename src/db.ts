@@ -904,17 +904,27 @@ type AlbumMediaRow = {
     timestamp: string
 }
 
+function resolveAlbumGroupFilter(
+    allowedJids: string[],
+    requested?: string[]
+): { scopedJids: string[] | null; empty: boolean } {
+    if (allowedJids.length === 0) return { scopedJids: null, empty: true }
+    if (requested === undefined) return { scopedJids: null, empty: false }
+    const scopedJids = requested.filter((jid) => allowedJids.includes(jid))
+    return { scopedJids, empty: scopedJids.length === 0 }
+}
+
 export async function listAlbumMedia(
     fromTimestamp: number,
     toTimestamp: number,
     messageTypes: string[],
     limit: number,
-    groupJid?: string,
+    groupJids?: string[],
     cursor?: MessageCursor
 ): Promise<{ items: AlbumMedia[]; nextCursor: MessageCursor | null }> {
     const allowedJids = await matchingGroupJids()
-    const scopedJid = groupJid && allowedJids.includes(groupJid) ? groupJid : groupJid ? '' : null
-    if (allowedJids.length === 0 || scopedJid === '') {
+    const { scopedJids, empty } = resolveAlbumGroupFilter(allowedJids, groupJids)
+    if (empty) {
         return { items: [], nextCursor: null }
     }
 
@@ -936,7 +946,7 @@ export async function listAlbumMedia(
            AND m.timestamp < to_timestamp($2)
            AND m.message_type = ANY($3::text[])
            AND m.group_jid = ANY($4::text[])
-           AND ($5::text IS NULL OR m.group_jid = $5)
+           AND ($5::text[] IS NULL OR m.group_jid = ANY($5::text[]))
            AND (
                 $6::bigint IS NULL
                 OR m.timestamp < to_timestamp($6)
@@ -949,7 +959,7 @@ export async function listAlbumMedia(
             toTimestamp,
             messageTypes,
             allowedJids,
-            scopedJid,
+            scopedJids,
             cursor?.timestamp ?? null,
             cursor?.messageId ?? null,
             limit + 1,
@@ -993,12 +1003,12 @@ type AlbumCountRow = {
 export async function countAlbumMedia(
     fromTimestamp: number,
     toTimestamp: number,
-    groupJid?: string
+    groupJids?: string[]
 ): Promise<AlbumCounts> {
     const allowedJids = await matchingGroupJids()
-    const scopedJid = groupJid && allowedJids.includes(groupJid) ? groupJid : groupJid ? '' : null
-    const empty: AlbumCounts = { image: 0, video: 0, document: 0, audio: 0, sticker: 0 }
-    if (allowedJids.length === 0 || scopedJid === '') return empty
+    const { scopedJids, empty } = resolveAlbumGroupFilter(allowedJids, groupJids)
+    const emptyCounts: AlbumCounts = { image: 0, video: 0, document: 0, audio: 0, sticker: 0 }
+    if (empty) return emptyCounts
 
     const result = await pool.query<AlbumCountRow>(
         `SELECT
@@ -1016,14 +1026,14 @@ export async function countAlbumMedia(
            AND m.timestamp >= to_timestamp($1)
            AND m.timestamp < to_timestamp($2)
            AND m.group_jid = ANY($3::text[])
-           AND ($4::text IS NULL OR m.group_jid = $4)
+           AND ($4::text[] IS NULL OR m.group_jid = ANY($4::text[]))
            AND m.message_type = ANY($5::text[])
          GROUP BY category`,
         [
             fromTimestamp,
             toTimestamp,
             allowedJids,
-            scopedJid,
+            scopedJids,
             ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'],
         ]
     )
@@ -1042,11 +1052,11 @@ export async function getAlbumMediaForDownload(
     fromTimestamp: number,
     toTimestamp: number,
     messageTypes: string[],
-    groupJid?: string
+    groupJids?: string[]
 ): Promise<AlbumDownloadMedia[]> {
     const allowedJids = await matchingGroupJids()
-    const scopedJid = groupJid && allowedJids.includes(groupJid) ? groupJid : groupJid ? '' : null
-    if (allowedJids.length === 0 || scopedJid === '') return []
+    const { scopedJids, empty } = resolveAlbumGroupFilter(allowedJids, groupJids)
+    if (empty) return []
 
     const result = await pool.query<AlbumMediaRow & { media_path: string }>(
         `SELECT
@@ -1068,9 +1078,9 @@ export async function getAlbumMediaForDownload(
            AND m.timestamp < to_timestamp($3)
            AND m.message_type = ANY($4::text[])
            AND m.group_jid = ANY($5::text[])
-           AND ($6::text IS NULL OR m.group_jid = $6)
+           AND ($6::text[] IS NULL OR m.group_jid = ANY($6::text[]))
          ORDER BY m.timestamp ASC, m.message_id ASC`,
-        [messageIds, fromTimestamp, toTimestamp, messageTypes, allowedJids, scopedJid]
+        [messageIds, fromTimestamp, toTimestamp, messageTypes, allowedJids, scopedJids]
     )
 
     const withMentions = await resolveMentionedText(result.rows.map((row) => row.text_content))

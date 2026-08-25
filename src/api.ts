@@ -135,12 +135,19 @@ function parseMediaCategories(value: unknown): MediaCategory[] {
     return categories as MediaCategory[]
 }
 
-function parseOptionalGroup(value: unknown): string | undefined {
-    if (value === undefined || value === '') return undefined
-    if (typeof value !== 'string' || !value.endsWith('@g.us')) {
+function parseOptionalGroups(query: Request['query']): string[] | undefined {
+    const raw = query.groups ?? query.group
+    if (raw === undefined) return undefined
+    const parts = (Array.isArray(raw) ? raw : [raw]).flatMap((value) =>
+        String(value)
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean)
+    )
+    if (parts.some((jid) => !jid.endsWith('@g.us'))) {
         throw new Error('Invalid group')
     }
-    return value
+    return [...new Set(parts)]
 }
 
 function getRouteParam(value: string | string[] | undefined): string {
@@ -254,7 +261,7 @@ export function createApiApp() {
             const range = getDateRange(request)
             const categories = parseMediaCategories(request.query.types)
             const messageTypes = categories.map((category) => MEDIA_TYPES[category])
-            const groupJid = parseOptionalGroup(request.query.group)
+            const groupJids = parseOptionalGroups(request.query)
             const cursor = decodeCursor(request.query.cursor)
             const limit = parseAlbumLimit(request.query.limit)
             const [page, counts] = await Promise.all([
@@ -263,10 +270,10 @@ export function createApiApp() {
                     range.toTimestamp,
                     messageTypes,
                     limit,
-                    groupJid,
+                    groupJids,
                     cursor
                 ),
-                countAlbumMedia(range.fromTimestamp, range.toTimestamp, groupJid),
+                countAlbumMedia(range.fromTimestamp, range.toTimestamp, groupJids),
             ])
 
             response.json({
@@ -275,7 +282,7 @@ export function createApiApp() {
                     source: config.groupPatternSource,
                     flags: 'i',
                 },
-                scope: { groupJid: groupJid ?? null },
+                scope: { groupJids: groupJids ?? null },
                 types: categories,
                 counts,
                 items: page.items.map((item) => ({
@@ -297,7 +304,7 @@ export function createApiApp() {
             const range = getDateRange(request)
             const categories = parseMediaCategories(request.query.types)
             const messageTypes = categories.map((category) => MEDIA_TYPES[category])
-            const groupJid = parseOptionalGroup(request.query.group)
+            const groupJids = parseOptionalGroups(request.query)
             const rawMessageIds = (request.body as { messageIds?: unknown } | undefined)?.messageIds
             if (
                 !Array.isArray(rawMessageIds) ||
@@ -320,7 +327,7 @@ export function createApiApp() {
                 range.fromTimestamp,
                 range.toTimestamp,
                 messageTypes,
-                groupJid
+                groupJids
             )
             if (media.length !== messageIds.length) {
                 response.status(400).json({
@@ -363,9 +370,10 @@ export function createApiApp() {
 
             for (const item of available) {
                 const filename = hktFilename(item.timestamp, item.messageId, item.resolvedPath)
-                const archivePath = groupJid
-                    ? filename
-                    : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`
+                const archivePath =
+                    groupJids?.length === 1
+                        ? filename
+                        : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`
                 archive.append(createReadStream(item.resolvedPath), { name: archivePath })
             }
             await archive.finalize()
