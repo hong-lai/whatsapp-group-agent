@@ -46,6 +46,8 @@ import {
     removeReaction,
     attachNearbyAlbumMedia,
     findRecentAlbumParent,
+    nextAlbumIndex,
+    updateAlbumLink,
     updateMessageMediaPath,
     upsertGroup,
     upsertReaction,
@@ -309,18 +311,69 @@ function secondsFromMillis(value: unknown, fallback: number): number {
     return Number.isFinite(millis) && millis > 0 ? Math.floor(millis / 1000) : fallback
 }
 
-function albumParentIdOf(message: proto.IMessage | null | undefined): string | null {
-    const association = message?.messageContextInfo?.messageAssociation
-    const parentId = association?.parentMessageKey?.id
-    if (!parentId) return null
-    const type = association?.associationType
-    if (
-        type !== undefined &&
-        type !== proto.MessageAssociation.AssociationType.MEDIA_ALBUM
-    ) {
-        return null
+function asAlbumIndex(value: unknown): number | null {
+    if (typeof value === 'number' && Number.isFinite(value)) return Math.trunc(value)
+    if (typeof value === 'string' && value !== '' && Number.isFinite(Number(value))) {
+        return Math.trunc(Number(value))
     }
-    return parentId
+    if (typeof value === 'bigint') return Number(value)
+    if (
+        value &&
+        typeof value === 'object' &&
+        'toNumber' in value &&
+        typeof (value as { toNumber: unknown }).toNumber === 'function'
+    ) {
+        const n = (value as { toNumber: () => number }).toNumber()
+        return Number.isFinite(n) ? Math.trunc(n) : null
+    }
+    return null
+}
+
+function messageLayers(
+    message: proto.IMessage | null | undefined
+): Array<proto.IMessage | null | undefined> {
+    const layers: Array<proto.IMessage | null | undefined> = []
+    let current = message
+    for (let i = 0; i < 6 && current; i += 1) {
+        layers.push(current)
+        current =
+            current.associatedChildMessage?.message ||
+            current.ephemeralMessage?.message ||
+            current.viewOnceMessage?.message ||
+            current.viewOnceMessageV2?.message ||
+            current.viewOnceMessageV2Extension?.message ||
+            current.editedMessage?.message ||
+            current.documentWithCaptionMessage?.message ||
+            undefined
+    }
+    return layers
+}
+
+function albumAssociationOf(
+    ...messages: Array<proto.IMessage | null | undefined>
+): { parentId: string | null; index: number | null } {
+    for (const message of messages) {
+        for (const layer of messageLayers(message)) {
+            const association = layer?.messageContextInfo?.messageAssociation as
+                | (proto.IMessageAssociation & { message_index?: unknown })
+                | null
+                | undefined
+            const parentId = association?.parentMessageKey?.id
+            if (!parentId) continue
+            const type = association?.associationType
+            if (
+                type !== undefined &&
+                type !== proto.MessageAssociation.AssociationType.MEDIA_ALBUM
+            ) {
+                continue
+            }
+            return {
+                parentId,
+                index: asAlbumIndex(association.messageIndex ?? association.message_index),
+            }
+        }
+    }
+    return { parentId: null, index: null }
 }
 
 function contentForIngest(message: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
@@ -529,6 +582,10 @@ async function processMessage(
     }
     if (messageId && (await hasMessage(messageId))) {
         await rememberMessageSecret(messageId, messageSecret)
+        const association = albumAssociationOf(m.message, content)
+        if (association.parentId || association.index != null) {
+            await updateAlbumLink(messageId, association.parentId, association.index)
+        }
         if (alreadyEdited) {
             const editedText = textFromMessage(m.message)
             if (editedText != null) {
@@ -611,12 +668,21 @@ async function processMessage(
         content.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption ||
         null
 
-    let albumParentId = albumParentIdOf(content)
+    const association = albumAssociationOf(m.message, content)
+    let albumParentId = association.parentId
+    let albumIndex = association.index
     if (
         !albumParentId &&
         (messageType === 'imageMessage' || messageType === 'videoMessage')
     ) {
         albumParentId = await findRecentAlbumParent(jid, senderId || null, timestamp)
+    }
+    if (
+        albumParentId &&
+        albumIndex == null &&
+        (messageType === 'imageMessage' || messageType === 'videoMessage')
+    ) {
+        albumIndex = await nextAlbumIndex(albumParentId)
     }
 
     if (!messageId) return 'ignored'
@@ -647,18 +713,26 @@ async function processMessage(
             replyToId,
             quotedMessage,
             albumParentId,
+            albumIndex,
             timestamp,
             isEdited: alreadyEdited,
             isHistory,
         })
         if (messageId) await flushPendingEdits(messageId)
         if (messageType === 'albumMessage') {
-            await attachNearbyAlbumMedia({
-                parentId: messageId,
-                groupJid: jid,
-                senderJid: senderId || null,
-                timestamp,
-            })
+            try {
+                await attachNearbyAlbumMedia({
+                    parentId: messageId,
+                    groupJid: jid,
+                    senderJid: senderId || null,
+                    timestamp,
+                })
+            } catch (err) {
+                log.warn(
+                    { err, messageId, groupJid: jid, senderJid: senderId },
+                    'album.nearby_attach_failed'
+                )
+            }
         }
         const mediaMeta = {
             messageId,
@@ -680,6 +754,7 @@ async function processMessage(
                 messageType,
                 hasMedia: Boolean(fileTypes[messageType]),
                 albumParentId,
+                albumIndex,
                 isHistory,
             },
             'message.ingested'

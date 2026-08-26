@@ -142,11 +142,14 @@ async function migrateMessagesTimestamp(): Promise<void> {
     log.info('db.messages_timestamp_migrated')
 }
 
-const ALBUM_ASSOCIATION_WINDOW_SECONDS = 30
+// History sync often strips messageAssociation. Group only within this window, and
+// never across another album from the same sender. Live children carry parentMessageKey.
+const ALBUM_ASSOCIATION_WINDOW_SECONDS = 300
 const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage'] as const
 
 async function migrateAlbumParents(): Promise<void> {
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_parent_id TEXT`)
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_index INTEGER`)
 
     const albums = await pool.query<{
         message_id: string
@@ -176,6 +179,7 @@ async function migrateAlbumParents(): Promise<void> {
     if (attached > 0) {
         log.info({ albums: albums.rowCount, attached }, 'db.album_parents_backfilled')
     }
+    await fillMissingAlbumIndexes()
 }
 
 export async function attachNearbyAlbumMedia(row: {
@@ -184,6 +188,8 @@ export async function attachNearbyAlbumMedia(row: {
     senderJid: string | null
     timestamp: number
 }): Promise<number> {
+    const windowStart = row.timestamp - ALBUM_ASSOCIATION_WINDOW_SECONDS
+    const windowEnd = row.timestamp + ALBUM_ASSOCIATION_WINDOW_SECONDS
     const result = await pool.query(
         `UPDATE messages SET album_parent_id = $1
          WHERE group_jid = $2
@@ -191,9 +197,28 @@ export async function attachNearbyAlbumMedia(row: {
            AND message_id <> $1
            AND message_type = ANY($4::text[])
            AND album_parent_id IS NULL
-           AND timestamp >= to_timestamp($5)
+           AND timestamp >= GREATEST(
+                to_timestamp($6),
+                COALESCE(
+                    (
+                        SELECT MAX(prev_album.timestamp)
+                        FROM messages prev_album
+                        WHERE prev_album.group_jid = $2
+                          AND prev_album.sender_jid IS NOT DISTINCT FROM $3
+                          AND prev_album.message_type = 'albumMessage'
+                          AND (
+                            prev_album.timestamp < to_timestamp($5)
+                            OR (
+                                prev_album.timestamp = to_timestamp($5)
+                                AND prev_album.message_id < $1
+                            )
+                          )
+                    ),
+                    '-infinity'::timestamptz
+                )
+           )
            AND timestamp < LEAST(
-                to_timestamp($5 + $6),
+                to_timestamp($7),
                 COALESCE(
                     (
                         SELECT MIN(next_album.timestamp)
@@ -218,10 +243,57 @@ export async function attachNearbyAlbumMedia(row: {
             row.senderJid,
             [...ALBUM_MEDIA_TYPES],
             row.timestamp,
-            ALBUM_ASSOCIATION_WINDOW_SECONDS,
+            windowStart,
+            windowEnd,
         ]
     )
-    return result.rowCount ?? 0
+    const attached = result.rowCount ?? 0
+    if (attached > 0) await fillMissingAlbumIndexes(row.parentId)
+    return attached
+}
+
+export async function nextAlbumIndex(parentId: string): Promise<number> {
+    const result = await pool.query<{ next: string | number }>(
+        `SELECT COALESCE(MAX(album_index), -1) + 1 AS next
+         FROM messages
+         WHERE album_parent_id = $1`,
+        [parentId]
+    )
+    return Number(result.rows[0]?.next ?? 0)
+}
+
+async function fillMissingAlbumIndexes(parentId?: string): Promise<void> {
+    await pool.query(
+        `WITH ranked AS (
+            SELECT
+                message_id,
+                COALESCE(max_index, -1)
+                    + ROW_NUMBER() OVER (
+                        PARTITION BY album_parent_id
+                        ORDER BY timestamp ASC, message_id ASC
+                    ) AS album_index
+            FROM (
+                SELECT
+                    m.message_id,
+                    m.album_parent_id,
+                    m.timestamp,
+                    (
+                        SELECT MAX(sibling.album_index)
+                        FROM messages sibling
+                        WHERE sibling.album_parent_id = m.album_parent_id
+                    ) AS max_index
+                FROM messages m
+                WHERE m.album_parent_id IS NOT NULL
+                  AND m.album_index IS NULL
+                  AND ($1::text IS NULL OR m.album_parent_id = $1)
+            ) missing
+         )
+         UPDATE messages
+         SET album_index = ranked.album_index
+         FROM ranked
+         WHERE messages.message_id = ranked.message_id`,
+        [parentId ?? null]
+    )
 }
 
 export async function findRecentAlbumParent(
@@ -229,17 +301,18 @@ export async function findRecentAlbumParent(
     senderJid: string | null,
     timestamp: number
 ): Promise<string | null> {
+    const windowStart = timestamp - ALBUM_ASSOCIATION_WINDOW_SECONDS
+    const windowEnd = timestamp + ALBUM_ASSOCIATION_WINDOW_SECONDS
     const result = await pool.query<{ message_id: string }>(
         `SELECT message_id
          FROM messages
          WHERE group_jid = $1
            AND sender_jid IS NOT DISTINCT FROM $2
            AND message_type = 'albumMessage'
-           AND timestamp <= to_timestamp($3)
-           AND timestamp >= to_timestamp($3) - ($4 * INTERVAL '1 second')
-         ORDER BY timestamp DESC, message_id DESC
+           AND timestamp BETWEEN to_timestamp($3) AND to_timestamp($4)
+         ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - $5::double precision) ASC, message_id DESC
          LIMIT 1`,
-        [groupJid, senderJid, timestamp, ALBUM_ASSOCIATION_WINDOW_SECONDS]
+        [groupJid, senderJid, windowStart, windowEnd, timestamp]
     )
     return result.rows[0]?.message_id ?? null
 }
@@ -306,6 +379,7 @@ export type MessageRow = {
     replyToId: string | null
     quotedMessage: string | null
     albumParentId: string | null
+    albumIndex: number | null
     timestamp: number
     isEdited: boolean
     isHistory: boolean
@@ -316,10 +390,12 @@ export async function insertMessage(row: MessageRow): Promise<void> {
         `INSERT INTO messages (
             message_id, group_jid, sender_jid, message_secret, message_type,
             text_content, media_path, reply_to_id, quoted_message, album_parent_id,
-            timestamp, is_edited, is_deleted, is_history
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, to_timestamp($11), $12, FALSE, $13)
+            album_index, timestamp, is_edited, is_deleted, is_history
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, to_timestamp($12), $13, FALSE, $14)
          ON CONFLICT (message_id) DO UPDATE SET
-            message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret)`,
+            message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret),
+            album_parent_id = COALESCE(EXCLUDED.album_parent_id, messages.album_parent_id),
+            album_index = COALESCE(EXCLUDED.album_index, messages.album_index)`,
         [
             row.messageId,
             row.groupJid,
@@ -331,10 +407,26 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.replyToId,
             row.quotedMessage,
             row.albumParentId,
+            row.albumIndex,
             row.timestamp,
             row.isEdited,
             row.isHistory,
         ]
+    )
+}
+
+export async function updateAlbumLink(
+    messageId: string,
+    albumParentId: string | null,
+    albumIndex: number | null
+): Promise<void> {
+    if (!albumParentId && albumIndex == null) return
+    await pool.query(
+        `UPDATE messages
+         SET album_parent_id = COALESCE($2, album_parent_id),
+             album_index = COALESCE($3, album_index)
+         WHERE message_id = $1`,
+        [messageId, albumParentId, albumIndex]
     )
 }
 
@@ -824,7 +916,7 @@ export async function listDashboardMessages(
              FROM messages m
              LEFT JOIN senders s ON s.jid = m.sender_jid
              WHERE m.album_parent_id = ANY($1::text[])
-             ORDER BY m.timestamp ASC, m.message_id ASC`,
+             ORDER BY m.album_index ASC NULLS LAST, m.timestamp ASC, m.message_id ASC`,
             [albumIds]
         )
         for (const child of children.rows) {
