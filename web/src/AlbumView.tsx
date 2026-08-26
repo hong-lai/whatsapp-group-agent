@@ -243,9 +243,9 @@ function ToolbarIcon({
         ),
         image: (
             <>
-                <path d="M11 5 6 9H2v6h4l5 4z" />
-                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                <rect x="3" y="5" width="18" height="14" rx="2" />
+                <circle cx="8.5" cy="10" r="1.5" />
+                <path d="m21 16-5.5-5.5-4 4L9 12l-6 6" />
             </>
         ),
         video: (
@@ -262,9 +262,9 @@ function ToolbarIcon({
         ),
         audio: (
             <>
-                <path d="M9 18V6l11-2v12" />
-                <circle cx="6.5" cy="18" r="2.5" />
-                <circle cx="17.5" cy="16" r="2.5" />
+                <path d="M11 5 6 9H2v6h4l5 4z" />
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
             </>
         ),
         sticker: (
