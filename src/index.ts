@@ -28,6 +28,7 @@ import pino from 'pino'
 import { startApi } from './api.js'
 import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
+import { hktFilename, hktStamp, safePathSegment } from './hkt.js'
 import { log } from './log.js'
 import {
     deleteGroupMetadata,
@@ -421,21 +422,15 @@ async function storeMediaFile(
                 reuploadRequest: sock.updateMediaMessage,
             }
         )
-        const hktDate = new Intl.DateTimeFormat('en-CA', {
-            timeZone: 'Asia/Hong_Kong',
-            year: 'numeric',
-            month: '2-digit',
-            day: '2-digit',
-        }).format(timestamp * 1000)
-
-        const safeFolderName = groupName.replace(/[/\\?%*:|"<>]/g, '_')
+        const { date: hktDate } = hktStamp(timestamp)
+        const safeFolderName = safePathSegment(groupName, groupJid)
         const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
 
         if (!existsSync(folderPath)) {
             mkdirSync(folderPath, { recursive: true })
         }
 
-        const fileName = `${folderPath}/${timestamp}_${messageId}.${fileTypes[messageType]}`
+        const fileName = `${folderPath}/${hktFilename(timestamp, messageId, `media.${fileTypes[messageType]}`)}`
         await pipeline(stream as Readable, createWriteStream(fileName))
         await updateMessageMediaPath(messageId, fileName)
         return fileName

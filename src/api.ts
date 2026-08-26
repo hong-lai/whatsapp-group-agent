@@ -2,9 +2,10 @@ import { ZipArchive } from 'archiver'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
+import { hktFilename, safePathSegment } from './hkt.js'
 import { log } from './log.js'
 import {
     countAlbumMedia,
@@ -172,33 +173,6 @@ function resolveMediaPath(storedPath: string): string | undefined {
     }
 
     return isWithin(root, candidate) ? candidate : undefined
-}
-
-function safePathSegment(value: string, fallback: string): string {
-    const sanitized = value
-        .normalize('NFKC')
-        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-        .replace(/\.+$/g, '')
-        .trim()
-        .slice(0, 100)
-    return sanitized || fallback
-}
-
-function hktFilename(timestamp: number, messageId: string, mediaPath: string): string {
-    const date = new Date(timestamp * 1000 + HONG_KONG_OFFSET_MS)
-    const parts = [
-        date.getUTCFullYear(),
-        String(date.getUTCMonth() + 1).padStart(2, '0'),
-        String(date.getUTCDate()).padStart(2, '0'),
-    ]
-    const time = [
-        String(date.getUTCHours()).padStart(2, '0'),
-        String(date.getUTCMinutes()).padStart(2, '0'),
-        String(date.getUTCSeconds()).padStart(2, '0'),
-    ]
-    const rawExtension = extname(mediaPath).toLowerCase()
-    const extension = /^\.[a-z0-9]{1,8}$/.test(rawExtension) ? rawExtension : '.bin'
-    return `${parts.join('-')}_${time.join('-')}_${safePathSegment(messageId, 'media')}${extension}`
 }
 
 function asyncRoute(
