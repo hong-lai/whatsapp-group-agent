@@ -1,0 +1,74 @@
+# Scan the first-login QR from: docker compose logs -f app
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: whatsapp
+      POSTGRES_PASSWORD: whatsapp
+      POSTGRES_DB: whatsapp
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whatsapp -d whatsapp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
+      REDIS_URL: redis://redis:6379
+      WEB_PORT: 3000
+      DASHBOARD_PAGE_SIZE: ${DASHBOARD_PAGE_SIZE:-50}
+      DASHBOARD_MAX_PAGE_SIZE: ${DASHBOARD_MAX_PAGE_SIZE:-100}
+      ALBUM_PAGE_SIZE: ${ALBUM_PAGE_SIZE:-60}
+      ALBUM_MAX_PAGE_SIZE: ${ALBUM_MAX_PAGE_SIZE:-120}
+      ALBUM_MAX_BATCH_SIZE: ${ALBUM_MAX_BATCH_SIZE:-500}
+      AUTH_DIR: /app/auth_info_baileys
+      DOWNLOAD_DIR: /app/downloads
+      GROUP_PATTERN: "${GROUP_PATTERN:-Hello|World}"
+      HISTORY_REQUEST_MIN_MS: ${HISTORY_REQUEST_MIN_MS:-4000}
+      HISTORY_REQUEST_MAX_MS: ${HISTORY_REQUEST_MAX_MS:-12000}
+      HISTORY_SETTLE_MIN_MS: ${HISTORY_SETTLE_MIN_MS:-6000}
+      HISTORY_SETTLE_MAX_MS: ${HISTORY_SETTLE_MAX_MS:-15000}
+      MEDIA_DELAY_MIN_MS: ${MEDIA_DELAY_MIN_MS:-1500}
+      MEDIA_DELAY_MAX_MS: ${MEDIA_DELAY_MAX_MS:-4000}
+      CATCHUP_WINDOW_SECONDS: ${CATCHUP_WINDOW_SECONDS:-900}
+      CATCHUP_BACKFILL_SECONDS: ${CATCHUP_BACKFILL_SECONDS:-172800}
+      CATCHUP_PAGE_SIZE: ${CATCHUP_PAGE_SIZE:-50}
+      CATCHUP_MAX_PAGES: ${CATCHUP_MAX_PAGES:-3}
+      CATCHUP_BACKFILL_MAX_PAGES: ${CATCHUP_BACKFILL_MAX_PAGES:-40}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./auth_info_baileys:/app/auth_info_baileys
+      - ./downloads:/app/downloads
+    ports:
+      - "${WEB_HOST_PORT:-3000}:3000"
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:

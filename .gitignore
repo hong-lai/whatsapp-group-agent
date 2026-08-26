@@ -6,3 +6,4 @@ auth_info_baileys/
 .DS_Store
 whatsapp_messages.db
 downloads/
+.cursor/

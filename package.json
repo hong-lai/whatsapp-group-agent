@@ -5,25 +5,39 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "tsx src/index.ts",
+    "web:dev": "vite --config web/vite.config.ts",
+    "build:web": "vite build --config web/vite.config.ts",
+    "build": "npm run typecheck && npm run build:web",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "test": "npm run typecheck"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/archiver": "^8.0.0",
+    "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
+    "@types/pg": "^8.15.5",
     "@types/qrcode-terminal": "^0.12.2",
-    "@types/sqlite3": "^5.1.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.0",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
   },
   "dependencies": {
-    "@cacheable/node-cache": "^3.1.1",
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
+    "archiver": "^8.0.0",
+    "express": "^5.2.1",
+    "ioredis": "^5.8.2",
+    "pg": "^8.16.3",
     "pino": "^10.3.1",
     "qrcode-terminal": "^0.12.0",
-    "sqlite": "^5.1.1",
-    "sqlite3": "^6.0.1"
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   }
 }
