@@ -776,17 +776,21 @@ export default function AlbumView({
                     </button>
                     <div className="lightbox-media" onClick={stopTileAction}>
                         {lightbox.category === 'video' ? (
-                            <video src={lightbox.mediaUrl} controls autoPlay />
+                            <video key={lightbox.messageId} src={lightbox.mediaUrl} controls autoPlay />
                         ) : (
-                            <img src={lightbox.mediaUrl} alt={lightbox.textContent || lightbox.category} />
+                            <img
+                                key={lightbox.messageId}
+                                src={lightbox.mediaUrl}
+                                alt={lightbox.textContent || lightbox.category}
+                            />
                         )}
                     </div>
                     <div className="lightbox-info" onClick={stopTileAction}>
                         <strong>{lightbox.groupName}</strong>
-                        <span>{lightbox.senderName || 'Unknown sender'}</span>
-                        <time>{hkDateTime.format(lightbox.timestamp * 1000)}</time>
-                        {lightbox.textContent && <p>{lightbox.textContent}</p>}
-                        {lightbox.fileName && <span>{lightbox.fileName}</span>}
+                        <span className="lightbox-meta">{lightbox.senderName || 'Unknown sender'}</span>
+                        <time className="lightbox-meta">{hkDateTime.format(lightbox.timestamp * 1000)}</time>
+                        {lightbox.textContent && <p className="lightbox-copy">{lightbox.textContent}</p>}
+                        {lightbox.fileName && <span className="lightbox-meta">{lightbox.fileName}</span>}
                         <a
                             href={lightbox.mediaUrl}
                             target="_blank"

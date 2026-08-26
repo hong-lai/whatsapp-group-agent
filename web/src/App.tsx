@@ -345,9 +345,15 @@ function ConversationAlbum({
                     )}
                     <div className="lightbox-media">
                         {openItem.messageType === 'videoMessage' ? (
-                            <video src={mediaUrl(openItem.messageId)} controls autoPlay />
+                            <video
+                                key={openItem.messageId}
+                                src={mediaUrl(openItem.messageId)}
+                                controls
+                                autoPlay
+                            />
                         ) : (
                             <img
+                                key={openItem.messageId}
                                 src={mediaUrl(openItem.messageId)}
                                 alt={openItem.textContent || 'Album photo'}
                             />
@@ -355,17 +361,19 @@ function ConversationAlbum({
                     </div>
                     <div className="lightbox-info">
                         <strong>{albumSummary(visible)}</strong>
-                        <span>
+                        <span className="lightbox-meta">
                             {openIndex + 1} of {visible.length}
                         </span>
-                        {openItem.textContent && <p>{openItem.textContent}</p>}
+                        {openItem.textContent && (
+                            <p className="lightbox-copy">{openItem.textContent}</p>
+                        )}
                         <a
                             href={mediaUrl(openItem.messageId)}
                             target="_blank"
                             rel="noreferrer"
                             download={openItem.fileName || undefined}
                         >
-                            Open original
+                            Download
                         </a>
                     </div>
                 </div>
@@ -545,6 +553,7 @@ export default function App() {
         initialMediaCategories(initialParams)
     )
     const [search, setSearch] = useState('')
+    const [showEmptyGroups, setShowEmptyGroups] = useState(initialParams.get('empty') === '1')
     const [groups, setGroups] = useState<Group[]>([])
     const [messages, setMessages] = useState<Message[]>([])
     const [nextCursor, setNextCursor] = useState<string | null>(null)
@@ -568,12 +577,16 @@ export default function App() {
 
     const invalidRange = from > to
     const selectedGroup = groups.find((group) => group.jid === selectedJid) || null
+    const rangedGroups = useMemo(
+        () => (showEmptyGroups ? groups : groups.filter((group) => group.messageCount > 0)),
+        [groups, showEmptyGroups]
+    )
     const filteredGroups = useMemo(() => {
         const needle = search.trim().toLocaleLowerCase()
         return needle
-            ? groups.filter((group) => group.name.toLocaleLowerCase().includes(needle))
-            : groups
-    }, [groups, search])
+            ? rangedGroups.filter((group) => group.name.toLocaleLowerCase().includes(needle))
+            : rangedGroups
+    }, [rangedGroups, search])
     const patternTerms = useMemo(
         () => (pattern?.source ? pattern.source.split('|').map((term) => term.trim()).filter(Boolean) : []),
         [pattern]
@@ -584,6 +597,7 @@ export default function App() {
         params.set('from', from)
         params.set('to', to)
         params.set('view', view)
+        if (showEmptyGroups) params.set('empty', '1')
         if (selectedJid) params.set('group', selectedJid)
         if (view === 'album') {
             params.set('scope', albumScope)
@@ -593,7 +607,13 @@ export default function App() {
             }
         }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
-    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes])
+    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, showEmptyGroups])
+
+    useEffect(() => {
+        if (groupsLoading) return
+        if (selectedJid && rangedGroups.some((group) => group.jid === selectedJid)) return
+        setSelectedJid(rangedGroups[0]?.jid ?? null)
+    }, [groupsLoading, rangedGroups, selectedJid])
 
     function pulseLive() {
         const now = Date.now()
@@ -903,13 +923,31 @@ export default function App() {
                 className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}`}
                 aria-busy={groupsLoading || messagesLoading}
             >
-                <div className="view-pane messages-pane" hidden={view !== 'messages'}>
+                <div
+                    className={`view-pane messages-pane ${view === 'messages' ? 'is-active' : ''}`}
+                    aria-hidden={view !== 'messages'}
+                >
                     <aside className="groups-panel">
                     <div className="panel-heading">
                         <div>
                             <h2>Groups</h2>
                         </div>
-                        <span className="count-pill">{groups.length}</span>
+                        <div className="panel-heading-actions">
+                            <button
+                                type="button"
+                                className={`empty-groups-toggle ${showEmptyGroups ? 'active' : ''}`}
+                                aria-pressed={showEmptyGroups}
+                                title={
+                                    showEmptyGroups
+                                        ? 'Hide groups with no messages in this range'
+                                        : 'Show groups with no messages in this range'
+                                }
+                                onClick={() => setShowEmptyGroups((current) => !current)}
+                            >
+                                {showEmptyGroups ? 'Hide empty' : 'Show empty'}
+                            </button>
+                            <span className="count-pill">{filteredGroups.length}</span>
+                        </div>
                     </div>
                     <label className="search-box">
                         <Icon name="search" />
@@ -962,7 +1000,9 @@ export default function App() {
                             <div className="empty-small">
                                 {search.trim()
                                     ? 'No matching groups for this search.'
-                                    : 'No groups match the configured name pattern.'}
+                                    : groups.length === 0
+                                      ? 'No groups match the configured name pattern.'
+                                      : 'No groups have messages in this date range.'}
                             </div>
                         )}
                     </div>
@@ -1026,11 +1066,14 @@ export default function App() {
                     )}
                     </section>
                 </div>
-                <div className="view-pane media-pane" hidden={view !== 'album'}>
+                <div
+                    className={`view-pane media-pane ${view === 'album' ? 'is-active' : ''}`}
+                    aria-hidden={view !== 'album'}
+                >
                     <AlbumView
                         from={from}
                         to={to}
-                        groups={groups}
+                        groups={rangedGroups}
                         selectedJid={selectedJid}
                         selectedJids={albumGroupJids}
                         onSelectedJidsChange={setAlbumGroupJids}
