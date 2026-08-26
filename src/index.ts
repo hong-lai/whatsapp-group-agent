@@ -2,6 +2,7 @@ import makeWASocket, {
     DisconnectReason,
     downloadMediaMessage,
     getContentType,
+    type BaileysEventMap,
     type Contact,
     type GroupMetadata,
     type LIDMapping,
@@ -826,6 +827,25 @@ function clearAuthContents(dir: string): void {
     }
 }
 
+function hasIngestWork(events: Partial<BaileysEventMap>): boolean {
+    return Boolean(
+        events['messaging-history.set'] ||
+            events['messaging-history.status'] ||
+            events['lid-mapping.update'] ||
+            events['contacts.upsert'] ||
+            events['contacts.update'] ||
+            events['messages.upsert'] ||
+            events['messages.update'] ||
+            events['messages.delete'] ||
+            events['chats.upsert'] ||
+            events['chats.update'] ||
+            events['chats.delete'] ||
+            events['groups.upsert'] ||
+            events['groups.update'] ||
+            events['group-participants.update']
+    )
+}
+
 async function connectToWhatsApp() {
     noteConnecting()
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir)
@@ -845,7 +865,7 @@ async function connectToWhatsApp() {
     const catchup = createCatchup(sock)
     const runIngest = createSerialQueue()
 
-    sock.ev.on('connection.update', async (update) => {
+    function handleConnectionUpdate(update: BaileysEventMap['connection.update']): void {
         const { connection, lastDisconnect, qr } = update
         if (qr) {
             log.info('whatsapp.qr_ready')
@@ -879,45 +899,47 @@ async function connectToWhatsApp() {
                         : 'Connection closed'
             )
             catchup.stop()
-            connectToWhatsApp()
+            void connectToWhatsApp()
         } else if (connection === 'open') {
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
             noteConnected()
-
-            skippedGroupJids.clear()
-            participatingMeta.clear()
-            const response = await sock.groupFetchAllParticipating()
-            let cached = 0
-            let participating = 0
-            const trackedJids: string[] = []
-            for (const key in response) {
-                const metadata = response[key]
-                if (!metadata) continue
-                participating += 1
-                participatingMeta.set(metadata.id, metadata)
-            }
-            for (const metadata of participatingMeta.values()) {
-                if (await persistMatchingGroup(metadata)) {
-                    cached += 1
-                    trackedJids.push(metadata.id)
-                }
-            }
-            catchup.setTrackedGroups(trackedJids)
-            log.info(
-                {
-                    matchingGroups: cached,
-                    pattern: config.groupPatternSource,
-                    catchupBackfillSeconds: config.catchupBackfillSeconds,
-                },
-                'groups.cached'
-            )
-            catchup.noteConnected()
+            void cacheParticipatingGroups()
         }
-    })
+    }
 
-    sock.ev.on('messaging-history.set', (event) => {
-        void runIngest(async () => {
-            const { messages, contacts, syncType, lidPnMappings } = event
+    async function cacheParticipatingGroups(): Promise<void> {
+        skippedGroupJids.clear()
+        participatingMeta.clear()
+        const response = await sock.groupFetchAllParticipating()
+        let cached = 0
+        const trackedJids: string[] = []
+        for (const key in response) {
+            const metadata = response[key]
+            if (!metadata) continue
+            participatingMeta.set(metadata.id, metadata)
+        }
+        for (const metadata of participatingMeta.values()) {
+            if (await persistMatchingGroup(metadata)) {
+                cached += 1
+                trackedJids.push(metadata.id)
+            }
+        }
+        catchup.setTrackedGroups(trackedJids)
+        log.info(
+            {
+                matchingGroups: cached,
+                pattern: config.groupPatternSource,
+                catchupBackfillSeconds: config.catchupBackfillSeconds,
+            },
+            'groups.cached'
+        )
+        catchup.noteConnected()
+    }
+
+    async function ingestEvents(events: Partial<BaileysEventMap>): Promise<void> {
+        const history = events['messaging-history.set']
+        if (history) {
+            const { messages, contacts, syncType, lidPnMappings } = history
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
             const latestBefore = new Map<string, number | undefined>()
@@ -944,61 +966,57 @@ async function connectToWhatsApp() {
             }
             await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
             catchup.noteHistoryChunk(syncType)
-            log.info(
-                { syncType, ms: Date.now() - started, ...counts },
-                'history.sync.done'
-            )
-        })
-    })
+            log.info({ syncType, ms: Date.now() - started, ...counts }, 'history.sync.done')
+        }
 
-    sock.ev.on('messaging-history.status', (status) => {
-        catchup.noteHistoryStatus(status.syncType, status.status)
-    })
+        if (events['lid-mapping.update']) {
+            await rememberLidMappings([events['lid-mapping.update']])
+        }
+        if (events['contacts.upsert']) {
+            await rememberContacts(events['contacts.upsert'])
+        }
+        if (events['contacts.update']) {
+            await rememberContacts(events['contacts.update'])
+        }
 
-    sock.ev.on('lid-mapping.update', (mapping) => {
-        void runIngest(async () => {
-            await rememberLidMappings([mapping])
-        })
-    })
+        for (const chat of events['chats.upsert'] || []) {
+            const last = asCatchupMessage(chat.messages?.[0]?.message)
+            if (last) {
+                catchup.noteChatHead(last)
+                await catchup.considerMessage(last, 'chat.upsert')
+            }
+        }
+        for (const chat of events['chats.update'] || []) {
+            const last = asCatchupMessage(chat.messages?.[0]?.message)
+            if (last) {
+                catchup.noteChatHead(last)
+                await catchup.considerMessage(last, 'chat.update')
+            }
+        }
 
-    sock.ev.on('contacts.upsert', (contacts) => {
-        void runIngest(async () => {
-            await rememberContacts(contacts)
-        })
-    })
-
-    sock.ev.on('contacts.update', (contacts) => {
-        void runIngest(async () => {
-            await rememberContacts(contacts)
-        })
-    })
-
-    sock.ev.on('messages.upsert', (event) => {
-        void runIngest(async () => {
-            if (event.type !== 'notify' && event.type !== 'append') return
-            const isHistory = event.type === 'append' || Boolean(event.requestId)
-            for (const m of event.messages) {
+        const upsert = events['messages.upsert']
+        if (upsert && (upsert.type === 'notify' || upsert.type === 'append')) {
+            const isHistory = upsert.type === 'append' || Boolean(upsert.requestId)
+            for (const m of upsert.messages) {
                 if (!isEditEnvelope(m.message)) {
                     catchup.noteChatHead(m)
                     await catchup.considerMessage(
                         m,
-                        event.requestId ? 'phone_unavailable' : event.type
+                        upsert.requestId ? 'phone_unavailable' : upsert.type
                     )
                 }
             }
-            for (const m of event.messages) {
+            for (const m of upsert.messages) {
                 await processMessage(m, sock, isHistory)
             }
-            for (const m of event.messages) {
+            for (const m of upsert.messages) {
                 await applyIncomingEdit(m, isHistory)
             }
-        })
-    })
+        }
 
-    sock.ev.on('messages.update', (updates) => {
-        void runIngest(async () => {
+        if (events['messages.update']) {
             const deletedIds: string[] = []
-            for (const u of updates) {
+            for (const u of events['messages.update']) {
                 if (u.update.messageStubType === 1 && u.key.id) {
                     deletedIds.push(u.key.id)
                 }
@@ -1010,53 +1028,28 @@ async function connectToWhatsApp() {
                 await markMessagesDeleted(deletedIds)
                 log.info({ count: deletedIds.length, messageIds: deletedIds }, 'messages.deleted')
             }
-        })
-    })
+        }
 
-    sock.ev.on('messages.delete', (e) => {
-        void runIngest(async () => {
-            if ('keys' in e) {
-                const ids = e.keys.map((k) => k.id).filter((id): id is string => Boolean(id))
+        const deleted = events['messages.delete']
+        if (deleted) {
+            if ('keys' in deleted) {
+                const ids = deleted.keys.map((k) => k.id).filter((id): id is string => Boolean(id))
                 await markMessagesDeleted(ids)
                 log.info({ count: ids.length, messageIds: ids }, 'messages.deleted')
-                return
-            }
-            log.warn({ groupJid: e.jid }, 'messages.deleted_all')
-        })
-    })
-
-    sock.ev.on('chats.upsert', async (chats) => {
-        for (const chat of chats) {
-            const last = asCatchupMessage(chat.messages?.[0]?.message)
-            if (last) {
-                catchup.noteChatHead(last)
-                await catchup.considerMessage(last, 'chat.upsert')
+            } else {
+                log.warn({ groupJid: deleted.jid }, 'messages.deleted_all')
             }
         }
-    })
 
-    sock.ev.on('chats.update', async (updates) => {
-        for (const chat of updates) {
-            const last = asCatchupMessage(chat.messages?.[0]?.message)
-            if (last) {
-                catchup.noteChatHead(last)
-                await catchup.considerMessage(last, 'chat.update')
-            }
-        }
-    })
-
-    sock.ev.on('groups.upsert', async (groups) => {
-        for (const group of groups) {
+        for (const group of events['groups.upsert'] || []) {
             const tracked = await persistMatchingGroup(group)
             if (tracked) {
                 catchup.setTrackedGroups([group.id])
                 log.info({ groupJid: group.id, groupName: group.subject }, 'group.tracked')
             }
         }
-    })
 
-    sock.ev.on('groups.update', async (events) => {
-        for (const event of events) {
+        for (const event of events['groups.update'] || []) {
             if (!event?.id) continue
             const previous =
                 (await getGroupMetadata(event.id)) ?? participatingMeta.get(event.id)
@@ -1082,45 +1075,61 @@ async function connectToWhatsApp() {
             }
             skippedGroupJids.add(event.id)
         }
-    })
 
-    sock.ev.on('chats.delete', async (jids) => {
-        for (const jid of jids) {
+        const participants = events['group-participants.update']
+        if (participants) {
+            const me = ownJid(sock)
+            const removedSelf =
+                participants.action === 'remove' &&
+                Boolean(me) &&
+                participants.participants.some((p) => jidNormalizedUser(p.id) === me)
+
+            if (removedSelf) {
+                await forgetGroup(participants.id, 'removed from group')
+            } else {
+                const cached = await getGroupMetadata(participants.id)
+                if (cached) {
+                    const metadata = await refreshGroup(sock, participants.id, 'participants.update')
+                    if (metadata) {
+                        log.debug(
+                            {
+                                groupJid: participants.id,
+                                groupName: metadata.subject,
+                                action: participants.action,
+                                participants: participants.participants.length,
+                            },
+                            'group.participants_updated'
+                        )
+                    }
+                }
+            }
+        }
+
+        for (const jid of events['chats.delete'] || []) {
             if (isJidGroup(jid)) {
                 await forgetGroup(jid, 'chats.delete')
             }
         }
-    })
 
-    sock.ev.on('group-participants.update', async (event) => {
-        const me = ownJid(sock)
-        const removedSelf =
-            event.action === 'remove' &&
-            Boolean(me) &&
-            event.participants.some((p) => jidNormalizedUser(p.id) === me)
-
-        if (removedSelf) {
-            await forgetGroup(event.id, 'removed from group')
-            return
-        }
-
-        const cached = await getGroupMetadata(event.id)
-        if (!cached) return
-        const metadata = await refreshGroup(sock, event.id, 'participants.update')
-        if (metadata) {
-            log.debug(
-                {
-                    groupJid: event.id,
-                    groupName: metadata.subject,
-                    action: event.action,
-                    participants: event.participants.length,
-                },
-                'group.participants_updated'
+        if (events['messaging-history.status']) {
+            catchup.noteHistoryStatus(
+                events['messaging-history.status'].syncType,
+                events['messaging-history.status'].status
             )
         }
-    })
+    }
 
-    sock.ev.on('creds.update', saveCreds)
+    sock.ev.process(async (events) => {
+        if (events['creds.update']) {
+            await saveCreds()
+        }
+        if (events['connection.update']) {
+            handleConnectionUpdate(events['connection.update'])
+        }
+        if (hasIngestWork(events)) {
+            void runIngest(() => ingestEvents(events))
+        }
+    })
 }
 
 ;(async () => {
