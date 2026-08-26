@@ -50,6 +50,20 @@ type MessagesResponse = {
     nextCursor: string | null
 }
 
+type AgentConnectionState = 'connecting' | 'connected' | 'disconnected'
+
+type AgentConnectionEvent = {
+    type: 'disconnected' | 'reconnected'
+    at: number
+    detail?: string
+}
+
+type StatusResponse = {
+    state: AgentConnectionState
+    since: number
+    events: AgentConnectionEvent[]
+}
+
 function initialMediaCategories(params: URLSearchParams): MediaCategory[] {
     const requested = params.get('types')?.split(',') || []
     const valid = requested.filter((item): item is MediaCategory =>
@@ -185,6 +199,78 @@ function locationShare(text: string | null): { title: string; detail?: string; m
         detail: copy.slice(1).join(' · ') || undefined,
         mapsUrl,
     }
+}
+
+function ConnectionStatus({
+    state,
+    events,
+    live,
+    unreachable,
+}: {
+    state: AgentConnectionState
+    events: AgentConnectionEvent[]
+    live?: boolean
+    unreachable?: boolean
+}) {
+    const [open, setOpen] = useState(false)
+    const rootRef = useRef<HTMLDivElement>(null)
+
+    useEffect(() => {
+        if (!open) return undefined
+        const onPointer = (event: MouseEvent) => {
+            if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
+        }
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setOpen(false)
+        }
+        window.addEventListener('mousedown', onPointer)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            window.removeEventListener('mousedown', onPointer)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [open])
+
+    const label =
+        state === 'connected' ? 'Connected' : state === 'connecting' ? 'Connecting' : 'Disconnected'
+
+    return (
+        <div className="connection-status" ref={rootRef}>
+            <button
+                type="button"
+                className={`connection-toggle is-${state}`}
+                aria-expanded={open}
+                aria-haspopup="dialog"
+                title="Connection log"
+                onClick={() => setOpen((current) => !current)}
+            >
+                <span className={`status-dot is-${state}${live ? ' is-live' : ''}`} />
+                {label}
+            </button>
+            {open && (
+                <div className="connection-log" role="dialog" aria-label="Connection log">
+                    <strong>Connection log</strong>
+                    <p>Disconnect and reconnect times since this process started. Not stored.</p>
+                    {unreachable && (
+                        <div className="connection-empty">Dashboard cannot reach the agent right now.</div>
+                    )}
+                    {events.length === 0 && !unreachable ? (
+                        <div className="connection-empty">No disconnects yet.</div>
+                    ) : events.length > 0 ? (
+                        <ol>
+                            {events.map((event) => (
+                                <li key={`${event.type}-${event.at}`} className={`is-${event.type}`}>
+                                    <span>{event.type === 'reconnected' ? 'Reconnected' : 'Disconnected'}</span>
+                                    <time>{hkDateTime.format(event.at)}</time>
+                                    {event.detail && <small>{event.detail}</small>}
+                                </li>
+                            ))}
+                        </ol>
+                    ) : null}
+                </div>
+            )}
+        </div>
+    )
 }
 
 function fileExtensionLabel(fileName: string | null | undefined, fallback: string): string {
@@ -564,6 +650,9 @@ export default function App() {
     const [reloadKey, setReloadKey] = useState(0)
     const [livePulse, setLivePulse] = useState(false)
     const [pattern, setPattern] = useState<{ source: string; flags: string } | null>(null)
+    const [agentState, setAgentState] = useState<AgentConnectionState>('connecting')
+    const [connectionEvents, setConnectionEvents] = useState<AgentConnectionEvent[]>([])
+    const [linkDown, setLinkDown] = useState(typeof navigator !== 'undefined' && !navigator.onLine)
     const groupsRequestId = useRef(0)
     const messagesRequestId = useRef(0)
     const silentGen = useRef(0)
@@ -577,6 +666,7 @@ export default function App() {
 
     const invalidRange = from > to
     const selectedGroup = groups.find((group) => group.jid === selectedJid) || null
+    const connectionState: AgentConnectionState = linkDown ? 'disconnected' : agentState
     const rangedGroups = useMemo(
         () => (showEmptyGroups ? groups : groups.filter((group) => group.messageCount > 0)),
         [groups, showEmptyGroups]
@@ -623,6 +713,43 @@ export default function App() {
         if (pulseTimer.current) clearTimeout(pulseTimer.current)
         pulseTimer.current = setTimeout(() => setLivePulse(false), 700)
     }
+
+    async function refreshConnection() {
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setLinkDown(true)
+            setAgentState('disconnected')
+            return
+        }
+        try {
+            const data = await getJson<StatusResponse>('/api/status')
+            setLinkDown(false)
+            setAgentState(data.state)
+            setConnectionEvents(data.events)
+        } catch {
+            setLinkDown(true)
+            setAgentState('disconnected')
+        }
+    }
+
+    useVisibleInterval(refreshConnection, 4000)
+
+    useEffect(() => {
+        void refreshConnection()
+        const onOffline = () => {
+            setLinkDown(true)
+            setAgentState('disconnected')
+        }
+        const onOnline = () => {
+            setLinkDown(false)
+            void refreshConnection()
+        }
+        window.addEventListener('offline', onOffline)
+        window.addEventListener('online', onOnline)
+        return () => {
+            window.removeEventListener('offline', onOffline)
+            window.removeEventListener('online', onOnline)
+        }
+    }, [])
 
     useEffect(() => {
         return () => {
@@ -844,8 +971,12 @@ export default function App() {
                             ))}
                         </div>
                     )}
-                    <span className={`status-dot${livePulse ? ' is-live' : ''}`} />
-                    Connected
+                    <ConnectionStatus
+                        state={connectionState}
+                        events={connectionEvents}
+                        live={connectionState === 'connected' && livePulse}
+                        unreachable={linkDown}
+                    />
                 </div>
             </header>
 

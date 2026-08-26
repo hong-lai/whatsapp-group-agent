@@ -130,6 +130,136 @@ svg {
     font-weight: 600;
 }
 
+.connection-status {
+    position: relative;
+}
+
+.connection-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 999px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+}
+
+.connection-toggle.is-disconnected {
+    color: #b54040;
+}
+
+.connection-toggle.is-connecting {
+    color: #9a6b12;
+}
+
+.connection-log {
+    width: min(320px, calc(100vw - 32px));
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 8px);
+    right: 0;
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: white;
+    box-shadow: var(--shadow);
+    animation: menu-in 180ms var(--ease-out);
+}
+
+.connection-log strong {
+    display: block;
+    color: var(--ink);
+    font: 700 0.78rem 'Manrope', sans-serif;
+}
+
+.connection-log p {
+    margin: 4px 0 10px;
+    color: var(--muted);
+    font-size: 0.62rem;
+    font-weight: 500;
+    line-height: 1.4;
+}
+
+.connection-empty {
+    color: var(--muted);
+    font-size: 0.7rem;
+}
+
+.connection-log ol {
+    max-height: 240px;
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    list-style: none;
+}
+
+.connection-log li {
+    display: grid;
+    gap: 2px;
+    padding: 8px 0;
+    border-top: 1px solid #eef3f0;
+}
+
+.connection-log li:first-child {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.connection-log li span {
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.connection-log li.is-disconnected span {
+    color: #b54040;
+}
+
+.connection-log li.is-reconnected span {
+    color: var(--green-dark);
+}
+
+.connection-log li time,
+.connection-log li small {
+    color: #7b8d88;
+    font-size: 0.62rem;
+    font-weight: 500;
+}
+
+.status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #29a983;
+    box-shadow: 0 0 0 4px rgba(41, 169, 131, 0.13);
+}
+
+.status-dot.is-disconnected {
+    background: #e25b5b;
+    box-shadow: 0 0 0 4px rgba(226, 91, 91, 0.16);
+}
+
+.status-dot.is-connecting {
+    background: #e0a53a;
+    box-shadow: 0 0 0 4px rgba(224, 165, 58, 0.18);
+    animation: status-connecting 1.2s ease infinite;
+}
+
+.status-dot.is-live {
+    animation: status-live 700ms ease;
+}
+
+@keyframes status-connecting {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.35;
+    }
+}
+
 .pattern-meta {
     display: flex;
     align-items: center;
@@ -147,18 +277,6 @@ svg {
     color: #0b6d58;
     background: rgba(33, 163, 133, 0.1);
     font: 700 0.62rem 'Manrope', sans-serif;
-}
-
-.status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: #29a983;
-    box-shadow: 0 0 0 4px rgba(41, 169, 131, 0.13);
-}
-
-.status-dot.is-live {
-    animation: status-live 700ms ease;
 }
 
 @keyframes status-live {

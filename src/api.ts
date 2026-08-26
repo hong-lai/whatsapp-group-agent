@@ -5,6 +5,7 @@ import { stat } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
+import { getConnectionStatus } from './connection.js'
 import {
     contentDisposition,
     safePathSegment,
@@ -191,6 +192,10 @@ function asyncRoute(
 export function createApiApp() {
     const app = express()
     app.disable('x-powered-by')
+
+    app.get('/api/status', (_request, response) => {
+        response.json(getConnectionStatus())
+    })
 
     app.get(
         '/api/groups',

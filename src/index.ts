@@ -28,6 +28,7 @@ import pino from 'pino'
 import { startApi } from './api.js'
 import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
+import { noteConnected, noteConnecting, noteDisconnected } from './connection.js'
 import { hktStamp, safePathSegment, uniqueHktFilename } from './hkt.js'
 import { log } from './log.js'
 import {
@@ -826,6 +827,7 @@ function clearAuthContents(dir: string): void {
 }
 
 async function connectToWhatsApp() {
+    noteConnecting()
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir)
 
     const sock = makeWASocket({
@@ -850,7 +852,9 @@ async function connectToWhatsApp() {
             qrcode.generate(qr, { small: true })
         }
 
-        if (connection === 'close') {
+        if (connection === 'connecting') {
+            noteConnecting()
+        } else if (connection === 'close') {
             const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
             const loggedOut = statusCode === DisconnectReason.loggedOut
             const restartRequired = statusCode === DisconnectReason.restartRequired
@@ -865,10 +869,20 @@ async function connectToWhatsApp() {
                     'whatsapp.disconnected'
                 )
             }
+            noteDisconnected(
+                loggedOut
+                    ? 'Logged out'
+                    : restartRequired
+                      ? 'Restart required'
+                      : statusCode
+                        ? `Connection closed (${statusCode})`
+                        : 'Connection closed'
+            )
             catchup.stop()
             connectToWhatsApp()
         } else if (connection === 'open') {
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
+            noteConnected()
 
             skippedGroupJids.clear()
             participatingMeta.clear()
