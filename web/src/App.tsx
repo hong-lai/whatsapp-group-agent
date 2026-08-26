@@ -32,6 +32,7 @@ type Message = {
     isDeleted: boolean
     isHistory: boolean
     hasMedia: boolean
+    fileName: string | null
     reactions: Reaction[]
     albumItems?: Message[]
 }
@@ -186,10 +187,19 @@ function locationShare(text: string | null): { title: string; detail?: string; m
     }
 }
 
+function fileExtensionLabel(fileName: string | null | undefined, fallback: string): string {
+    const name = fileName?.trim()
+    if (!name) return fallback
+    const dot = name.lastIndexOf('.')
+    const ext = dot >= 0 ? name.slice(dot + 1) : ''
+    return (ext || fallback).slice(0, 5).toUpperCase()
+}
+
 function MediaPreview({ message }: { message: Message }) {
     if (!message.hasMedia) return null
     const url = `/api/media/${encodeURIComponent(message.messageId)}`
     const type = message.messageType
+    const fileName = message.fileName || undefined
 
     if (type === 'imageMessage' || type === 'stickerMessage') {
         return (
@@ -205,10 +215,10 @@ function MediaPreview({ message }: { message: Message }) {
         return <audio className="audio-player" src={url} controls preload="metadata" />
     }
     return (
-        <a className="document-link" href={url} target="_blank" rel="noreferrer">
-            <span className="document-icon">PDF</span>
+        <a className="document-link" href={url} target="_blank" rel="noreferrer" download={fileName}>
+            <span className="document-icon">{fileExtensionLabel(message.fileName, 'PDF')}</span>
             <span>
-                <strong>Open document</strong>
+                <strong>{message.fileName || 'Open document'}</strong>
                 <small>Shared attachment</small>
             </span>
             <span aria-hidden="true">↗</span>
@@ -353,6 +363,7 @@ function ConversationAlbum({
                             href={mediaUrl(openItem.messageId)}
                             target="_blank"
                             rel="noreferrer"
+                            download={openItem.fileName || undefined}
                         >
                             Open original
                         </a>

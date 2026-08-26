@@ -19,6 +19,7 @@ type AlbumItem = {
     timestamp: number
     category: MediaCategory
     mediaUrl: string
+    fileName: string | null
 }
 
 type AlbumResponse = {
@@ -337,9 +338,14 @@ function MediaTile({
             ) : (
                 <div className={`album-file-card ${item.category}`}>
                     <span className="file-glyph">
-                        {item.category === 'audio' ? '♪' : 'PDF'}
+                        {item.category === 'audio'
+                            ? '♪'
+                            : (item.fileName?.split('.').pop() || 'PDF').slice(0, 5).toUpperCase()}
                     </span>
-                    <span>{item.category === 'audio' ? 'Audio message' : 'Shared document'}</span>
+                    <span className="file-name">
+                        {item.fileName ||
+                            (item.category === 'audio' ? 'Audio message' : 'Shared document')}
+                    </span>
                     {item.category === 'audio' && (
                         <audio src={item.mediaUrl} controls preload="none" onClick={stopTileAction} />
                     )}
@@ -348,9 +354,10 @@ function MediaTile({
                             href={item.mediaUrl}
                             target="_blank"
                             rel="noreferrer"
+                            download={item.fileName || undefined}
                             onClick={stopTileAction}
                         >
-                            Open document ↗
+                            Download ↗
                         </a>
                     )}
                 </div>
@@ -468,7 +475,8 @@ export default function AlbumView({
                     next.textContent === open.textContent &&
                     next.senderName === open.senderName &&
                     next.timestamp === open.timestamp &&
-                    next.groupName === open.groupName
+                    next.groupName === open.groupName &&
+                    next.fileName === open.fileName
                 ) {
                     return open
                 }
@@ -778,6 +786,15 @@ export default function AlbumView({
                         <span>{lightbox.senderName || 'Unknown sender'}</span>
                         <time>{hkDateTime.format(lightbox.timestamp * 1000)}</time>
                         {lightbox.textContent && <p>{lightbox.textContent}</p>}
+                        {lightbox.fileName && <span>{lightbox.fileName}</span>}
+                        <a
+                            href={lightbox.mediaUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            download={lightbox.fileName || undefined}
+                        >
+                            Download
+                        </a>
                         <button
                             type="button"
                             className={`lightbox-select ${selected.has(lightbox.messageId) ? 'is-selected' : ''}`}

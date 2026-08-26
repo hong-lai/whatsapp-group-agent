@@ -749,6 +749,7 @@ export type DashboardMessage = {
     isDeleted: boolean
     isHistory: boolean
     hasMedia: boolean
+    fileName: string | null
     reactions: MessageReaction[]
     albumItems: DashboardMessage[]
 }
@@ -766,6 +767,7 @@ type DashboardMessageRow = {
     is_deleted: boolean
     is_history: boolean
     has_media: boolean
+    file_name: string | null
 }
 
 const MENTION_RE = /@(\d{8,})/g
@@ -831,6 +833,7 @@ function toDashboardMessage(
         isDeleted: row.is_deleted,
         isHistory: row.is_history,
         hasMedia: row.has_media,
+        fileName: row.file_name,
         reactions,
         albumItems,
     }
@@ -860,7 +863,11 @@ export async function listDashboardMessages(
             m.is_edited,
             m.is_deleted,
             m.is_history,
-            (m.media_path IS NOT NULL) AS has_media
+            (m.media_path IS NOT NULL) AS has_media,
+            CASE
+                WHEN m.media_path IS NULL THEN NULL
+                ELSE regexp_replace(m.media_path, '^.*[\\\\/]', '')
+            END AS file_name
          FROM messages m
          LEFT JOIN senders s ON s.jid = m.sender_jid
          WHERE m.group_jid = $1
@@ -912,6 +919,10 @@ export async function listDashboardMessages(
                 m.is_deleted,
                 m.is_history,
                 (m.media_path IS NOT NULL) AS has_media,
+                CASE
+                    WHEN m.media_path IS NULL THEN NULL
+                    ELSE regexp_replace(m.media_path, '^.*[\\\\/]', '')
+                END AS file_name,
                 m.album_parent_id
              FROM messages m
              LEFT JOIN senders s ON s.jid = m.sender_jid
@@ -988,6 +999,7 @@ export type AlbumMedia = {
     messageType: string
     textContent: string | null
     timestamp: number
+    fileName: string | null
 }
 
 type AlbumMediaRow = {
@@ -998,6 +1010,7 @@ type AlbumMediaRow = {
     message_type: string
     text_content: string | null
     timestamp: string
+    file_name: string | null
 }
 
 function resolveAlbumGroupFilter(
@@ -1032,7 +1045,8 @@ export async function listAlbumMedia(
             s.display_name AS sender_name,
             m.message_type,
             m.text_content,
-            EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp
+            EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
+            regexp_replace(m.media_path, '^.*[\\\\/]', '') AS file_name
          FROM messages m
          JOIN groups g ON g.jid = m.group_jid
          LEFT JOIN senders s ON s.jid = m.sender_jid
@@ -1075,6 +1089,7 @@ export async function listAlbumMedia(
             messageType: row.message_type,
             textContent: withMentions(row.text_content),
             timestamp: Number(row.timestamp),
+            fileName: row.file_name,
         })),
         nextCursor:
             hasMore && last
@@ -1163,6 +1178,7 @@ export async function getAlbumMediaForDownload(
             m.message_type,
             m.text_content,
             EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
+            regexp_replace(m.media_path, '^.*[\\\\/]', '') AS file_name,
             m.media_path
          FROM messages m
          JOIN groups g ON g.jid = m.group_jid
@@ -1188,6 +1204,7 @@ export async function getAlbumMediaForDownload(
         messageType: row.message_type,
         textContent: withMentions(row.text_content),
         timestamp: Number(row.timestamp),
+        fileName: row.file_name,
         mediaPath: row.media_path,
     }))
 }

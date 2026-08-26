@@ -20,7 +20,7 @@ import makeWASocket, {
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
 import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync } from 'fs'
-import { join } from 'path'
+import { basename, extname, join } from 'path'
 import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
@@ -28,7 +28,7 @@ import pino from 'pino'
 import { startApi } from './api.js'
 import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
-import { hktFilename, hktStamp, safePathSegment } from './hkt.js'
+import { hktStamp, safePathSegment, uniqueHktFilename } from './hkt.js'
 import { log } from './log.js'
 import {
     deleteGroupMetadata,
@@ -72,6 +72,44 @@ const fileTypes: Record<string, string> = {
     stickerMessage: 'webp',
     documentMessage: 'pdf',
     audioMessage: 'ogg',
+}
+
+const mimeExtensions: Record<string, string> = {
+    'application/pdf': 'pdf',
+    'application/msword': 'doc',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+    'application/vnd.ms-excel': 'xls',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+    'application/vnd.ms-powerpoint': 'ppt',
+    'application/vnd.openxmlformats-officedocument.presentationml.presentation': 'pptx',
+    'text/plain': 'txt',
+    'application/rtf': 'rtf',
+    'application/zip': 'zip',
+    'application/vnd.rar': 'rar',
+    'application/x-7z-compressed': '7z',
+    'image/jpeg': 'jpeg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+    'audio/mpeg': 'mp3',
+    'audio/ogg': 'ogg',
+    'video/mp4': 'mp4',
+}
+
+function originalMediaName(
+    content: proto.IMessage | null | undefined,
+    fallbackExt: string
+): string | null {
+    const doc = content?.documentMessage
+    if (!doc) return null
+    const raw = (doc.fileName || doc.title || '').trim()
+    if (!raw) return null
+    const name = basename(raw.replace(/\\/g, '/'))
+    if (!name || name === '.' || name === '..') return null
+    if (extname(name).length > 1) return name
+    const mime = doc.mimetype?.split(';')[0]?.trim().toLowerCase()
+    const fromMime = mime ? mimeExtensions[mime] : undefined
+    return `${name}.${fromMime || fallbackExt}`
 }
 
 const skippedGroupJids = new Set<string>()
@@ -483,7 +521,18 @@ async function storeMediaFile(
             mkdirSync(folderPath, { recursive: true })
         }
 
-        const fileName = `${folderPath}/${hktFilename(timestamp, messageId, `media.${fileTypes[messageType]}`)}`
+        const originalName = originalMediaName(
+            contentForIngest(m.message) || m.message,
+            fileTypes[messageType]
+        )
+        const fileName = uniqueHktFilename(
+            folderPath,
+            timestamp,
+            messageId,
+            `media.${fileTypes[messageType]}`,
+            originalName,
+            existsSync
+        )
         await pipeline(stream as Readable, createWriteStream(fileName))
         await updateMessageMediaPath(messageId, fileName)
         return fileName

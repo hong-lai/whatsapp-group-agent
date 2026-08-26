@@ -924,6 +924,12 @@ h3 {
     margin-top: 4px;
 }
 
+.album-file-card .file-name {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    text-align: center;
+}
+
 .album-file-card a {
     margin-top: 7px;
     color: var(--green-dark);
@@ -1609,6 +1615,7 @@ video.media-frame {
 }
 
 .document-link strong {
+    overflow-wrap: anywhere;
     font-size: 0.75rem;
 }
 

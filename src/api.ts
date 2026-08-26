@@ -2,10 +2,15 @@ import { ZipArchive } from 'archiver'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
-import { hktFilename, safePathSegment } from './hkt.js'
+import {
+    contentDisposition,
+    safePathSegment,
+    storedDownloadName,
+    uniqueArchivePath,
+} from './hkt.js'
 import { log } from './log.js'
 import {
     countAlbumMedia,
@@ -342,12 +347,20 @@ export function createApiApp() {
             request.on('aborted', () => archive.abort())
             archive.pipe(response)
 
+            const usedPaths = new Set<string>()
             for (const item of available) {
-                const filename = hktFilename(item.timestamp, item.messageId, item.resolvedPath)
-                const archivePath =
+                const filename = storedDownloadName(
+                    item.resolvedPath,
+                    item.timestamp,
+                    item.messageId
+                )
+                const archivePath = uniqueArchivePath(
                     groupJids?.length === 1
                         ? filename
-                        : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`
+                        : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`,
+                    item.messageId,
+                    usedPaths
+                )
                 archive.append(createReadStream(item.resolvedPath), { name: archivePath })
             }
             await archive.finalize()
@@ -369,8 +382,12 @@ export function createApiApp() {
                 return
             }
 
-            response.setHeader('Cache-Control', 'private, max-age=3600')
-            response.sendFile(mediaPath)
+            response.sendFile(mediaPath, {
+                headers: {
+                    'Cache-Control': 'private, max-age=3600',
+                    'Content-Disposition': contentDisposition(basename(mediaPath)),
+                },
+            })
         })
     )
 
