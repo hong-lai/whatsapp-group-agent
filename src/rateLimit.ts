@@ -51,3 +51,9 @@ export function waitMediaDownload(): Promise<number> {
 export function settleDelayMs(): number {
     return jitter(config.historySettleMinMs, config.historySettleMaxMs)
 }
+
+export function retryBackoffMs(attempts: number, minMs: number, maxMs: number): number {
+    const shift = Math.max(0, attempts - 1)
+    const exp = Math.min(maxMs, minMs * 2 ** Math.min(shift, 10))
+    return jitter(minMs, Math.max(minMs, Math.floor(exp)))
+}

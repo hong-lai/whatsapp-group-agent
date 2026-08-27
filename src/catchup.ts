@@ -8,19 +8,35 @@ import {
 } from '@whiskeysockets/baileys'
 import { getGroupMetadata } from './cache.js'
 import { config, matchesGroupPattern } from './config.js'
-import { getLatestGroupMessage, getOldestGroupMessage, type LatestGroupMessage } from './db.js'
+import {
+    getGroupCatchup,
+    getLatestGroupMessage,
+    getOldestGroupMessage,
+    groupMatchesPattern,
+    hasMessage,
+    saveGroupCatchupHead,
+    updateGroupCatchup,
+    type LatestGroupMessage,
+} from './db.js'
 import { log } from './log.js'
-import { settleDelayMs, waitHistoryRequest } from './rateLimit.js'
+import { retryBackoffMs, settleDelayMs, waitHistoryRequest } from './rateLimit.js'
 
-function isBackfillReason(reason: string): boolean {
-    return reason === 'tracked-backfill' || reason === 'on_demand_continue'
-}
+type CatchupMode = 'gap' | 'backfill'
 
 type CatchupJob = {
     groupJid: string
     key: WAMessageKey
     timestamp: number
-    reason: string
+    mode: CatchupMode
+    overlapUntil?: number | undefined
+    attempts: number
+    retryAt?: number | undefined
+}
+
+type PendingOnDemand = {
+    groupJid: string
+    mode: CatchupMode
+    overlapUntil?: number | undefined
 }
 
 function unixSeconds(value: unknown): number {
@@ -73,43 +89,70 @@ export function asCatchupMessage(value: { key?: WAMessageKey | null } | null | u
 }
 
 export function createCatchup(sock: WASocket) {
-    const windowStart = Math.floor(Date.now() / 1000) - config.catchupWindowSeconds
     const backfillUntil = Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
     const pages = new Map<string, number>()
     const jobs = new Map<string, CatchupJob>()
-    const awaitingOnDemand = new Set<string>()
+    const pendingByGroup = new Map<string, PendingOnDemand>()
     const pendingPdoOrder: string[] = []
+    const gapFinished = new Set<string>()
     const backfillFinished = new Set<string>()
-    const pdoAttempts = new Map<string, number>()
     const chatHeads = new Map<string, { key: WAMessageKey; timestamp: number }>()
-    let trackedJids: string[] = []
+    const tracked = new Set<string>()
     let seenBulkHistory = false
     const startedAt = Date.now()
     let allowingRequests = false
     let draining = false
     let settleTimer: ReturnType<typeof setTimeout> | undefined
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
 
-    function pageLimit(reason: string): number {
-        return isBackfillReason(reason) ? config.catchupBackfillMaxPages : config.catchupMaxPages
+    function pageLimit(mode: CatchupMode): number {
+        return mode === 'gap' ? config.catchupGapMaxPages : config.catchupBackfillMaxPages
     }
 
     async function isTrackedGroup(groupJid: string): Promise<boolean> {
+        if (tracked.has(groupJid)) return true
         const cached = await getGroupMetadata(groupJid)
-        return cached ? matchesGroupPattern(cached.subject) : false
+        if (cached) return matchesGroupPattern(cached.subject)
+        return groupMatchesPattern(groupJid)
     }
 
-    function finishBackfill(groupJid: string, why: string): void {
-        awaitingOnDemand.delete(groupJid)
+    function rememberPending(pending: PendingOnDemand): void {
+        if (!pendingByGroup.has(pending.groupJid)) pendingPdoOrder.push(pending.groupJid)
+        pendingByGroup.set(pending.groupJid, pending)
+    }
+
+    function clearPending(groupJid: string): void {
+        pendingByGroup.delete(groupJid)
         const index = pendingPdoOrder.indexOf(groupJid)
         if (index >= 0) pendingPdoOrder.splice(index, 1)
-        backfillFinished.add(groupJid)
-        log.info({ groupJid, why }, 'catchup.backfill_complete')
     }
 
-    function rememberPendingPdo(groupJid: string): void {
-        if (!awaitingOnDemand.has(groupJid)) pendingPdoOrder.push(groupJid)
-        awaitingOnDemand.add(groupJid)
+    async function finishMode(
+        groupJid: string,
+        mode: CatchupMode,
+        why: string,
+        reenter = true
+    ): Promise<void> {
+        clearPending(groupJid)
+        if (mode === 'gap') gapFinished.add(groupJid)
+        else backfillFinished.add(groupJid)
+        const bothDone = gapFinished.has(groupJid) && backfillFinished.has(groupJid)
+        await updateGroupCatchup(groupJid, {
+            status: bothDone ? 'complete' : mode === 'gap' ? 'backfilling' : 'complete',
+            lastError: null,
+            retryCount: 0,
+            nextRetryAt: null,
+        })
+        log.info({ groupJid, mode, why }, 'catchup.mode_complete')
+        if (
+            reenter &&
+            mode === 'gap' &&
+            !backfillFinished.has(groupJid) &&
+            allowingRequests
+        ) {
+            void enqueueTrackedBackfill()
+        }
     }
 
     function historyKeyFromStored(groupJid: string, stored: LatestGroupMessage): WAMessageKey {
@@ -121,6 +164,34 @@ export function createCatchup(sock: WASocket) {
             fromMe: Boolean(me && sender && me === sender),
             ...(stored.senderJid ? { participant: stored.senderJid } : {}),
         }
+    }
+
+    function headFromCatchup(groupJid: string): { key: WAMessageKey; timestamp: number } | undefined {
+        const memory = chatHeads.get(groupJid)
+        if (memory?.key.id) return memory
+        return undefined
+    }
+
+    async function headForGroup(groupJid: string): Promise<{ key: WAMessageKey; timestamp: number } | undefined> {
+        const memory = headFromCatchup(groupJid)
+        if (memory) return memory
+        const stored = await getGroupCatchup(groupJid)
+        if (!stored?.headMessageId || stored.headTimestamp == null) return undefined
+        return {
+            key: {
+                remoteJid: groupJid,
+                id: stored.headMessageId,
+                fromMe: Boolean(stored.headFromMe),
+                ...(stored.headParticipant ? { participant: stored.headParticipant } : {}),
+            },
+            timestamp: stored.headTimestamp,
+        }
+    }
+
+    function persistHead(groupJid: string, key: WAMessageKey, timestamp: number): void {
+        void saveGroupCatchupHead(groupJid, key, timestamp).catch((err) => {
+            log.debug({ err, groupJid }, 'catchup.head_persist_failed')
+        })
     }
 
     function clearSettleTimer(): void {
@@ -155,35 +226,44 @@ export function createCatchup(sock: WASocket) {
             scheduleSettle('waiting-bulk-history')
             return
         }
-        for (const groupJid of trackedJids) {
-            if (backfillFinished.has(groupJid) || jobs.has(groupJid) || awaitingOnDemand.has(groupJid)) {
-                continue
-            }
-            const attempts = pdoAttempts.get(groupJid) ?? 0
-            if (attempts >= config.catchupBackfillMaxPages) continue
-            const page = pages.get(groupJid) ?? 0
-            if (page >= config.catchupBackfillMaxPages) continue
-            const oldest = await getOldestGroupMessage(groupJid)
+        for (const groupJid of tracked) {
+            if (jobs.has(groupJid) || pendingByGroup.has(groupJid)) continue
+            const state = await getGroupCatchup(groupJid)
+            if (state?.nextRetryAt && state.nextRetryAt * 1000 > Date.now()) continue
+
             const latest = await getLatestGroupMessage(groupJid)
-            const head = chatHeads.get(groupJid)
-            if (
-                head?.key.id &&
-                head.timestamp > backfillUntil &&
-                (!latest || head.timestamp > latest.timestamp + 2)
-            ) {
-                enqueue({
-                    groupJid,
-                    key: head.key,
-                    timestamp: head.timestamp,
-                    reason: 'tracked-backfill',
-                })
+            const oldest = await getOldestGroupMessage(groupJid)
+            const head = await headForGroup(groupJid)
+
+            if (!gapFinished.has(groupJid)) {
+                const haveHead = Boolean(head?.key.id && (await hasMessage(head.key.id)))
+                if (head?.key.id && !haveHead) {
+                    enqueue({
+                        groupJid,
+                        key: head.key,
+                        timestamp: head.timestamp,
+                        mode: latest ? 'gap' : 'backfill',
+                        overlapUntil: latest?.timestamp,
+                        attempts: 0,
+                    })
+                    continue
+                }
+                await finishMode(groupJid, 'gap', haveHead ? 'head-already-stored' : 'no-head', false)
+            }
+
+            if (backfillFinished.has(groupJid) || jobs.has(groupJid) || pendingByGroup.has(groupJid)) {
                 continue
             }
-            if (!oldest?.messageId) continue
+            if (!oldest?.messageId) {
+                await finishMode(groupJid, 'backfill', 'no-messages', false)
+                continue
+            }
             if (oldest.timestamp <= backfillUntil) {
-                finishBackfill(
+                await finishMode(
                     groupJid,
-                    latest && latest.timestamp < backfillUntil ? 'inactive' : 'already-covers-window'
+                    'backfill',
+                    latest && latest.timestamp < backfillUntil ? 'inactive' : 'already-covers-window',
+                    false
                 )
                 continue
             }
@@ -191,44 +271,56 @@ export function createCatchup(sock: WASocket) {
                 groupJid,
                 key: historyKeyFromStored(groupJid, oldest),
                 timestamp: oldest.timestamp,
-                reason: 'tracked-backfill',
+                mode: 'backfill',
+                attempts: 0,
             })
         }
     }
 
-    async function requestFromAnchor(job: CatchupJob): Promise<'done' | 'retry'> {
-        const { groupJid, key, timestamp, reason } = job
-        const outsideNotifyWindow = !isBackfillReason(reason) && timestamp < windowStart
+    async function requestFromAnchor(job: CatchupJob): Promise<'done' | 'retry' | 'wait'> {
+        const { groupJid, key, timestamp, mode } = job
         const page = pages.get(groupJid) ?? 0
-        if (!key.id || outsideNotifyWindow) return 'done'
-        if (page >= pageLimit(reason)) return 'done'
-        if (isBackfillReason(reason) && timestamp <= backfillUntil) return 'done'
+        if (!key.id) return 'done'
+        if (page >= pageLimit(mode)) {
+            await updateGroupCatchup(groupJid, {
+                status: 'error',
+                lastError: 'page-limit',
+                nextRetryAt: Math.floor(Date.now() / 1000) + 60,
+            })
+            log.warn({ groupJid, mode, page }, 'catchup.page_limit')
+            return 'done'
+        }
+        if (mode === 'backfill' && timestamp <= backfillUntil) return 'done'
+        if (job.retryAt && job.retryAt > Date.now()) return 'wait'
 
         try {
-            const latest = await getLatestGroupMessage(groupJid)
-            const coversAnchor = Boolean(latest && latest.timestamp >= timestamp - 2)
-            if (coversAnchor && !isBackfillReason(reason)) return 'done'
+            if (mode === 'gap' && job.overlapUntil == null) {
+                const haveAnchor = await hasMessage(key.id)
+                if (haveAnchor) return 'done'
+            }
 
             const waitedMs = await waitHistoryRequest()
             if (stopped) return 'done'
             if (!allowingRequests) return 'retry'
 
             await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
-            if (isBackfillReason(reason)) {
-                rememberPendingPdo(groupJid)
-                if (reason === 'tracked-backfill') {
-                    pdoAttempts.set(groupJid, (pdoAttempts.get(groupJid) ?? 0) + 1)
-                }
-            } else {
-                pages.set(groupJid, page + 1)
-            }
+            rememberPending({ groupJid, mode, overlapUntil: job.overlapUntil })
+            pages.set(groupJid, page + 1)
+            await updateGroupCatchup(groupJid, {
+                status: mode === 'gap' ? 'catching_up' : 'backfilling',
+                lastError: null,
+                retryCount: 0,
+                nextRetryAt: null,
+                incrementPages: true,
+            })
             log.info(
                 {
                     groupJid,
                     messageId: key.id,
                     page: page + 1,
-                    reason,
+                    mode,
                     waitedMs,
+                    overlapUntil: job.overlapUntil,
                     backfillUntil,
                     fromMe: key.fromMe,
                 },
@@ -236,9 +328,45 @@ export function createCatchup(sock: WASocket) {
             )
             return 'done'
         } catch (err) {
-            log.warn({ err, groupJid, messageId: key.id, reason }, 'catchup.history_request_failed')
-            return 'done'
+            const attempts = job.attempts + 1
+            const waitMs = retryBackoffMs(attempts, config.historyRetryMinMs, config.historyRetryMaxMs)
+            const retryAt = Date.now() + waitMs
+            log.warn(
+                { err, groupJid, messageId: key.id, mode, attempts, waitMs },
+                'catchup.history_request_failed'
+            )
+            await updateGroupCatchup(groupJid, {
+                status: 'error',
+                lastError: String(err),
+                retryCount: attempts,
+                nextRetryAt: Math.floor(retryAt / 1000),
+            })
+            if (attempts >= config.catchupHistoryRetryMax) return 'done'
+            job.attempts = attempts
+            job.retryAt = retryAt
+            jobs.set(groupJid, job)
+            return 'wait'
         }
+    }
+
+    function nextDueJob(): CatchupJob | undefined {
+        const now = Date.now()
+        let soonestWait: CatchupJob | undefined
+        for (const job of jobs.values()) {
+            if (!job.retryAt || job.retryAt <= now) return job
+            if (!soonestWait || job.retryAt < soonestWait.retryAt!) soonestWait = job
+        }
+        return soonestWait
+    }
+
+    function scheduleRetryWake(job: CatchupJob): void {
+        if (!job.retryAt || stopped) return
+        const delay = Math.max(50, job.retryAt - Date.now())
+        if (retryTimer) clearTimeout(retryTimer)
+        retryTimer = setTimeout(() => {
+            retryTimer = undefined
+            void drain()
+        }, delay)
     }
 
     async function drain(): Promise<void> {
@@ -246,54 +374,77 @@ export function createCatchup(sock: WASocket) {
         draining = true
         try {
             while (!stopped && allowingRequests) {
-                const next = jobs.values().next().value as CatchupJob | undefined
+                const next = nextDueJob()
                 if (!next) break
+                if (next.retryAt && next.retryAt > Date.now()) {
+                    scheduleRetryWake(next)
+                    break
+                }
                 const result = await requestFromAnchor(next)
                 if (result === 'retry') break
+                if (result === 'wait') {
+                    scheduleRetryWake(next)
+                    break
+                }
                 if (jobs.get(next.groupJid) === next) jobs.delete(next.groupJid)
             }
         } finally {
             draining = false
-            if (!stopped && allowingRequests && jobs.size > 0) void drain()
+            if (!stopped && allowingRequests) {
+                const due = nextDueJob()
+                if (due && (!due.retryAt || due.retryAt <= Date.now())) void drain()
+            }
         }
     }
 
     function enqueue(job: CatchupJob): void {
         if (stopped || !job.key.id) return
-        if (!isBackfillReason(job.reason) && job.timestamp < windowStart) return
-        if (isBackfillReason(job.reason) && job.timestamp <= backfillUntil) return
+        if (job.mode === 'backfill' && job.timestamp <= backfillUntil) return
         const page = pages.get(job.groupJid) ?? 0
-        if (page >= pageLimit(job.reason)) return
+        if (page >= pageLimit(job.mode)) return
+        const existing = jobs.get(job.groupJid)
+        if (existing && existing.mode === 'gap' && job.mode === 'backfill') return
         jobs.set(job.groupJid, job)
         if (allowingRequests) void drain()
     }
 
-    async function considerMessage(m: WAMessage, reason: string): Promise<void> {
+    async function considerMessage(m: WAMessage, _reason: string): Promise<void> {
         const groupJid = m.key.remoteJid
         if (stopped || !groupJid || !isJidGroup(groupJid) || !m.key.id) return
         if (!(await isTrackedGroup(groupJid))) return
 
         const timestamp = unixSeconds(m.messageTimestamp)
-        if (timestamp < windowStart) return
-
         const previous = await getLatestGroupMessage(groupJid)
         if (previous && previous.messageId === m.key.id) return
         if (previous && previous.timestamp >= timestamp - 2) return
+        if (await hasMessage(m.key.id)) return
 
-        enqueue({ groupJid, key: m.key, timestamp, reason })
+        gapFinished.delete(groupJid)
+        enqueue({
+            groupJid,
+            key: m.key,
+            timestamp,
+            mode: previous ? 'gap' : 'backfill',
+            overlapUntil: previous?.timestamp,
+            attempts: 0,
+        })
     }
 
     async function considerHistoryBatch(
         messages: WAMessage[],
         syncType: unknown,
-        latestBefore: Map<string, number | undefined>
+        latestBefore: Map<string, number | undefined>,
+        preexistingIds: Set<string>
     ): Promise<void> {
         if (stopped || !isMessageHistorySync(syncType)) return
         const onDemand =
             historySyncNumber(syncType) === proto.HistorySync.HistorySyncType.ON_DEMAND
         if (onDemand && messages.length === 0) {
             const groupJid = pendingPdoOrder[0]
-            if (groupJid) finishBackfill(groupJid, 'empty-on-demand')
+            if (groupJid) {
+                const pending = pendingByGroup.get(groupJid)
+                await finishMode(groupJid, pending?.mode ?? 'gap', 'empty-on-demand')
+            }
             return
         }
         if (messages.length === 0) return
@@ -308,12 +459,8 @@ export function createCatchup(sock: WASocket) {
         }
 
         for (const [groupJid, list] of byGroup) {
-            if (onDemand) {
-                awaitingOnDemand.delete(groupJid)
-                const pendingIndex = pendingPdoOrder.indexOf(groupJid)
-                if (pendingIndex >= 0) pendingPdoOrder.splice(pendingIndex, 1)
-                pages.set(groupJid, (pages.get(groupJid) ?? 0) + 1)
-            }
+            const pending = pendingByGroup.get(groupJid)
+            if (onDemand) clearPending(groupJid)
             if (!(await isTrackedGroup(groupJid))) continue
             list.sort(
                 (left, right) => unixSeconds(left.messageTimestamp) - unixSeconds(right.messageTimestamp)
@@ -321,37 +468,99 @@ export function createCatchup(sock: WASocket) {
             const oldest = list[0]
             if (!oldest?.key.id) continue
             const oldestTs = unixSeconds(oldest.messageTimestamp)
+            const lastPage = list.length < config.catchupPageSize
+
             if (onDemand) {
-                const reachedWindow = oldestTs <= backfillUntil
-                const lastPage = list.length < config.catchupPageSize
-                if (reachedWindow || lastPage) {
-                    finishBackfill(groupJid, reachedWindow ? 'reached-window' : 'short-page')
+                const mode = pending?.mode ?? 'gap'
+                if (mode === 'gap') {
+                    const overlapUntil = pending?.overlapUntil
+                    const overlapped =
+                        overlapUntil !== undefined &&
+                        (oldestTs <= overlapUntil + 2 ||
+                            list.some(
+                                (message) =>
+                                    Boolean(message.key.id) &&
+                                    preexistingIds.has(message.key.id as string) &&
+                                    unixSeconds(message.messageTimestamp) <= overlapUntil + 2
+                            ))
+                    if (overlapped || lastPage) {
+                        await finishMode(
+                            groupJid,
+                            'gap',
+                            overlapped ? 'reached-overlap' : 'short-page'
+                        )
+                        continue
+                    }
+                    enqueue({
+                        groupJid,
+                        key: oldest.key,
+                        timestamp: oldestTs,
+                        mode: 'gap',
+                        overlapUntil,
+                        attempts: 0,
+                    })
+                    continue
+                }
+                if (oldestTs <= backfillUntil || lastPage) {
+                    await finishMode(
+                        groupJid,
+                        'backfill',
+                        oldestTs <= backfillUntil ? 'reached-window' : 'short-page'
+                    )
                     continue
                 }
                 enqueue({
                     groupJid,
                     key: oldest.key,
                     timestamp: oldestTs,
-                    reason: 'on_demand_continue',
+                    mode: 'backfill',
+                    attempts: 0,
                 })
                 continue
             }
-            if (oldestTs < windowStart) continue
+
             const previousTs = latestBefore.get(groupJid)
-            if (previousTs !== undefined && previousTs >= oldestTs) continue
-            enqueue({
-                groupJid,
-                key: oldest.key,
-                timestamp: oldestTs,
-                reason: 'history.gap',
-            })
+            if (previousTs !== undefined && oldestTs > previousTs + 2) {
+                gapFinished.delete(groupJid)
+                enqueue({
+                    groupJid,
+                    key: oldest.key,
+                    timestamp: oldestTs,
+                    mode: 'gap',
+                    overlapUntil: previousTs,
+                    attempts: 0,
+                })
+                continue
+            }
+            if (previousTs === undefined && oldestTs > backfillUntil) {
+                enqueue({
+                    groupJid,
+                    key: oldest.key,
+                    timestamp: oldestTs,
+                    mode: 'backfill',
+                    attempts: 0,
+                })
+            }
         }
     }
 
     return {
-        windowStart,
         setTrackedGroups(jids: string[]) {
-            trackedJids = [...new Set([...trackedJids, ...jids])]
+            const added: string[] = []
+            for (const jid of jids) {
+                if (tracked.has(jid)) continue
+                tracked.add(jid)
+                added.push(jid)
+                gapFinished.delete(jid)
+                backfillFinished.delete(jid)
+            }
+            if (added.length === 0) return
+            for (const jid of added) {
+                const head = chatHeads.get(jid)
+                if (head) persistHead(jid, head.key, head.timestamp)
+            }
+            log.info({ added, total: tracked.size }, 'catchup.groups_tracked')
+            if (seenBulkHistory) scheduleSettle('group.tracked')
         },
         noteConnected() {
             scheduleSettle('connected')
@@ -363,6 +572,7 @@ export function createCatchup(sock: WASocket) {
             const previous = chatHeads.get(groupJid)
             if (!previous || timestamp >= previous.timestamp) {
                 chatHeads.set(groupJid, { key: m.key, timestamp })
+                if (tracked.has(groupJid)) persistHead(groupJid, m.key, timestamp)
             }
         },
         noteHistoryChunk(syncType?: unknown) {
@@ -387,7 +597,10 @@ export function createCatchup(sock: WASocket) {
             stopped = true
             allowingRequests = false
             jobs.clear()
+            pendingByGroup.clear()
+            pendingPdoOrder.length = 0
             clearSettleTimer()
+            if (retryTimer) clearTimeout(retryTimer)
         },
     }
 }

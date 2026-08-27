@@ -57,6 +57,7 @@ export async function initDb(): Promise<void> {
 
         await migrateMessagesTimestamp()
         await migrateAlbumParents()
+        await migrateCatchupAndMediaJobs()
 
         await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
@@ -69,6 +70,10 @@ export async function initDb(): Promise<void> {
         CREATE INDEX IF NOT EXISTS messages_album_parent_idx
             ON messages (album_parent_id)
             WHERE album_parent_id IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS media_jobs_due_idx
+            ON media_jobs (next_retry_at)
+            WHERE status = 'pending';
     `)
 
         const placeholders = await pool.query(
@@ -186,6 +191,40 @@ async function migrateAlbumParents(): Promise<void> {
         log.info({ albums: albums.rowCount, attached }, 'db.album_parents_backfilled')
     }
     await fillMissingAlbumIndexes()
+}
+
+async function migrateCatchupAndMediaJobs(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS group_catchup (
+            group_jid TEXT PRIMARY KEY REFERENCES groups(jid) ON DELETE CASCADE,
+            head_message_id TEXT,
+            head_from_me BOOLEAN,
+            head_participant TEXT,
+            head_timestamp TIMESTAMPTZ,
+            status TEXT NOT NULL DEFAULT 'idle',
+            last_error TEXT,
+            retry_count INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TIMESTAMPTZ,
+            pages_fetched INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS media_jobs (
+            message_id TEXT PRIMARY KEY REFERENCES messages(message_id) ON DELETE CASCADE,
+            group_jid TEXT NOT NULL,
+            group_name TEXT NOT NULL,
+            message_type TEXT NOT NULL,
+            timestamp BIGINT NOT NULL,
+            sender_name TEXT NOT NULL DEFAULT '',
+            album_index INTEGER,
+            raw_message JSONB NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_error TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    `)
 }
 
 export async function attachNearbyAlbumMedia(row: {
@@ -511,6 +550,334 @@ export async function getLatestGroupMessage(groupJid: string): Promise<LatestGro
 
 export async function getOldestGroupMessage(groupJid: string): Promise<LatestGroupMessage | undefined> {
     return getGroupMessageAnchor(groupJid, 'oldest')
+}
+
+export async function existingMessageIds(ids: string[]): Promise<Set<string>> {
+    const unique = [...new Set(ids.filter(Boolean))]
+    if (unique.length === 0) return new Set()
+    const result = await pool.query<{ message_id: string }>(
+        'SELECT message_id FROM messages WHERE message_id = ANY($1::text[])',
+        [unique]
+    )
+    return new Set(result.rows.map((row) => row.message_id))
+}
+
+export async function getMessageMediaPath(messageId: string): Promise<string | null> {
+    const result = await pool.query<{ media_path: string | null }>(
+        'SELECT media_path FROM messages WHERE message_id = $1',
+        [messageId]
+    )
+    if (!result.rows[0]) return null
+    return result.rows[0].media_path
+}
+
+export type GroupCatchupStatus = 'idle' | 'catching_up' | 'backfilling' | 'complete' | 'error'
+
+export type GroupCatchupState = {
+    groupJid: string
+    headMessageId: string | null
+    headFromMe: boolean | null
+    headParticipant: string | null
+    headTimestamp: number | null
+    status: GroupCatchupStatus
+    lastError: string | null
+    retryCount: number
+    nextRetryAt: number | null
+    pagesFetched: number
+}
+
+function asCatchupStatus(value: string): GroupCatchupStatus {
+    if (
+        value === 'idle' ||
+        value === 'catching_up' ||
+        value === 'backfilling' ||
+        value === 'complete' ||
+        value === 'error'
+    ) {
+        return value
+    }
+    return 'idle'
+}
+
+function mapCatchupRow(row: {
+    group_jid: string
+    head_message_id: string | null
+    head_from_me: boolean | null
+    head_participant: string | null
+    head_timestamp: string | null
+    status: string
+    last_error: string | null
+    retry_count: number
+    next_retry_at: string | null
+    pages_fetched: number
+}): GroupCatchupState {
+    return {
+        groupJid: row.group_jid,
+        headMessageId: row.head_message_id,
+        headFromMe: row.head_from_me,
+        headParticipant: row.head_participant,
+        headTimestamp: row.head_timestamp ? Number(row.head_timestamp) : null,
+        status: asCatchupStatus(row.status),
+        lastError: row.last_error,
+        retryCount: row.retry_count,
+        nextRetryAt: row.next_retry_at ? Number(row.next_retry_at) : null,
+        pagesFetched: row.pages_fetched,
+    }
+}
+
+const CATCHUP_SELECT = `
+    group_jid,
+    head_message_id,
+    head_from_me,
+    head_participant,
+    EXTRACT(EPOCH FROM head_timestamp)::bigint::text AS head_timestamp,
+    status,
+    last_error,
+    retry_count,
+    EXTRACT(EPOCH FROM next_retry_at)::bigint::text AS next_retry_at,
+    pages_fetched
+`
+
+export async function getGroupCatchup(groupJid: string): Promise<GroupCatchupState | undefined> {
+    const result = await pool.query<{
+        group_jid: string
+        head_message_id: string | null
+        head_from_me: boolean | null
+        head_participant: string | null
+        head_timestamp: string | null
+        status: string
+        last_error: string | null
+        retry_count: number
+        next_retry_at: string | null
+        pages_fetched: number
+    }>(`SELECT ${CATCHUP_SELECT} FROM group_catchup WHERE group_jid = $1`, [groupJid])
+    return result.rows[0] ? mapCatchupRow(result.rows[0]) : undefined
+}
+
+export async function saveGroupCatchupHead(
+    groupJid: string,
+    key: { id?: string | null; fromMe?: boolean | null; participant?: string | null },
+    timestamp: number
+): Promise<void> {
+    if (!key.id) return
+    await pool.query(
+        `INSERT INTO group_catchup (
+            group_jid, head_message_id, head_from_me, head_participant, head_timestamp, updated_at
+         )
+         SELECT $1, $2, $3, $4, to_timestamp($5), NOW()
+         WHERE EXISTS (SELECT 1 FROM groups WHERE jid = $1)
+         ON CONFLICT (group_jid) DO UPDATE SET
+            head_message_id = CASE
+                WHEN group_catchup.head_timestamp IS NULL
+                    OR EXCLUDED.head_timestamp >= group_catchup.head_timestamp
+                THEN EXCLUDED.head_message_id
+                ELSE group_catchup.head_message_id
+            END,
+            head_from_me = CASE
+                WHEN group_catchup.head_timestamp IS NULL
+                    OR EXCLUDED.head_timestamp >= group_catchup.head_timestamp
+                THEN EXCLUDED.head_from_me
+                ELSE group_catchup.head_from_me
+            END,
+            head_participant = CASE
+                WHEN group_catchup.head_timestamp IS NULL
+                    OR EXCLUDED.head_timestamp >= group_catchup.head_timestamp
+                THEN EXCLUDED.head_participant
+                ELSE group_catchup.head_participant
+            END,
+            head_timestamp = CASE
+                WHEN group_catchup.head_timestamp IS NULL
+                    OR EXCLUDED.head_timestamp >= group_catchup.head_timestamp
+                THEN EXCLUDED.head_timestamp
+                ELSE group_catchup.head_timestamp
+            END,
+            updated_at = NOW()`,
+        [groupJid, key.id, Boolean(key.fromMe), key.participant ?? null, timestamp]
+    )
+}
+
+export async function updateGroupCatchup(
+    groupJid: string,
+    patch: {
+        status?: GroupCatchupStatus
+        lastError?: string | null
+        retryCount?: number
+        nextRetryAt?: number | null
+        incrementPages?: boolean
+    }
+): Promise<void> {
+    await pool.query(
+        `INSERT INTO group_catchup (
+            group_jid, status, last_error, retry_count, next_retry_at, pages_fetched, updated_at
+         )
+         SELECT $1, COALESCE($2, 'idle'), $3, COALESCE($4, 0), CASE WHEN $5::bigint IS NULL THEN NULL ELSE to_timestamp($5) END, $6, NOW()
+         WHERE EXISTS (SELECT 1 FROM groups WHERE jid = $1)
+         ON CONFLICT (group_jid) DO UPDATE SET
+            status = COALESCE($2, group_catchup.status),
+            last_error = CASE WHEN $7 THEN $3 ELSE group_catchup.last_error END,
+            retry_count = COALESCE($4, group_catchup.retry_count),
+            next_retry_at = CASE
+                WHEN $8 THEN NULL
+                WHEN $5::bigint IS NULL THEN group_catchup.next_retry_at
+                ELSE to_timestamp($5)
+            END,
+            pages_fetched = CASE
+                WHEN $9 THEN group_catchup.pages_fetched + 1
+                ELSE group_catchup.pages_fetched
+            END,
+            updated_at = NOW()`,
+        [
+            groupJid,
+            patch.status ?? null,
+            patch.lastError ?? null,
+            patch.retryCount ?? null,
+            patch.nextRetryAt ?? null,
+            patch.incrementPages ? 1 : 0,
+            patch.lastError !== undefined,
+            patch.nextRetryAt === null,
+            Boolean(patch.incrementPages),
+        ]
+    )
+}
+
+export type MediaJobStatus = 'pending' | 'done' | 'unavailable'
+
+export type MediaJobRow = {
+    messageId: string
+    groupJid: string
+    groupName: string
+    messageType: string
+    timestamp: number
+    senderName: string
+    albumIndex: number | null
+    rawMessage: unknown
+    attempts: number
+    nextRetryAt: number
+    lastError: string | null
+    status: MediaJobStatus
+}
+
+export async function upsertMediaJob(row: {
+    messageId: string
+    groupJid: string
+    groupName: string
+    messageType: string
+    timestamp: number
+    senderName: string
+    albumIndex: number | null
+    rawMessage: unknown
+}): Promise<void> {
+    await pool.query(
+        `INSERT INTO media_jobs (
+            message_id, group_jid, group_name, message_type, timestamp, sender_name,
+            album_index, raw_message, attempts, next_retry_at, last_error, status, updated_at
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb, 0, NOW(), NULL, 'pending', NOW())
+         ON CONFLICT (message_id) DO UPDATE SET
+            group_jid = EXCLUDED.group_jid,
+            group_name = EXCLUDED.group_name,
+            message_type = EXCLUDED.message_type,
+            timestamp = EXCLUDED.timestamp,
+            sender_name = EXCLUDED.sender_name,
+            album_index = COALESCE(EXCLUDED.album_index, media_jobs.album_index),
+            raw_message = EXCLUDED.raw_message,
+            status = CASE
+                WHEN media_jobs.status = 'done' THEN media_jobs.status
+                ELSE 'pending'
+            END,
+            next_retry_at = CASE
+                WHEN media_jobs.status = 'done' THEN media_jobs.next_retry_at
+                ELSE LEAST(media_jobs.next_retry_at, NOW())
+            END,
+            updated_at = NOW()`,
+        [
+            row.messageId,
+            row.groupJid,
+            row.groupName,
+            row.messageType,
+            row.timestamp,
+            row.senderName,
+            row.albumIndex,
+            JSON.stringify(row.rawMessage),
+        ]
+    )
+}
+
+export async function listDueMediaJobs(limit: number): Promise<MediaJobRow[]> {
+    const result = await pool.query<{
+        message_id: string
+        group_jid: string
+        group_name: string
+        message_type: string
+        timestamp: string
+        sender_name: string
+        album_index: number | null
+        raw_message: unknown
+        attempts: number
+        next_retry_at: string
+        last_error: string | null
+        status: string
+    }>(
+        `SELECT
+            message_id, group_jid, group_name, message_type, timestamp::text, sender_name,
+            album_index, raw_message, attempts,
+            EXTRACT(EPOCH FROM next_retry_at)::bigint::text AS next_retry_at,
+            last_error, status
+         FROM media_jobs
+         WHERE status = 'pending' AND next_retry_at <= NOW()
+         ORDER BY next_retry_at ASC, message_id ASC
+         LIMIT $1`,
+        [limit]
+    )
+    return result.rows.map((row) => ({
+        messageId: row.message_id,
+        groupJid: row.group_jid,
+        groupName: row.group_name,
+        messageType: row.message_type,
+        timestamp: Number(row.timestamp),
+        senderName: row.sender_name,
+        albumIndex: row.album_index,
+        rawMessage: row.raw_message,
+        attempts: row.attempts,
+        nextRetryAt: Number(row.next_retry_at),
+        lastError: row.last_error,
+        status: row.status === 'done' || row.status === 'unavailable' ? row.status : 'pending',
+    }))
+}
+
+export async function markMediaJobDone(messageId: string): Promise<void> {
+    await pool.query(
+        `UPDATE media_jobs
+         SET status = 'done', last_error = NULL, updated_at = NOW()
+         WHERE message_id = $1`,
+        [messageId]
+    )
+}
+
+export async function markMediaJobRetry(
+    messageId: string,
+    attempts: number,
+    nextRetryAt: number,
+    error: string
+): Promise<void> {
+    await pool.query(
+        `UPDATE media_jobs
+         SET attempts = $2,
+             next_retry_at = to_timestamp($3),
+             last_error = $4,
+             status = 'pending',
+             updated_at = NOW()
+         WHERE message_id = $1`,
+        [messageId, attempts, nextRetryAt, error]
+    )
+}
+
+export async function markMediaJobUnavailable(messageId: string, error: string): Promise<void> {
+    await pool.query(
+        `UPDATE media_jobs
+         SET status = 'unavailable', last_error = $2, updated_at = NOW()
+         WHERE message_id = $1`,
+        [messageId, error]
+    )
 }
 
 export type ReactionRow = {

@@ -31,6 +31,11 @@ import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
 import { noteConnected, noteConnecting, noteDisconnected } from './connection.js'
 import {
+    createMediaRetry,
+    type MediaDownloadResult,
+    type MediaMeta,
+} from './mediaRetry.js'
+import {
     buildMediaFilename,
     filenameTypeForMessage,
     getFilenameFormatSettings,
@@ -46,7 +51,9 @@ import {
 } from './cache.js'
 import {
     getLatestGroupMessage,
+    getMessageMediaPath,
     getStoredMessageContent,
+    existingMessageIds,
     hasMessage,
     initDb,
     insertMessage,
@@ -136,6 +143,10 @@ const participatingMeta = new Map<string, GroupMetadata>()
 const senderDisplayNames = new Map<string, string>()
 const lidToPn = new Map<string, string>()
 const pnToLid = new Map<string, string>()
+
+let groupsCacheReady = Promise.resolve()
+let groupsCacheFailed = false
+let activeMediaRetry: ReturnType<typeof createMediaRetry> | undefined
 
 type NamedContact = Pick<Contact, 'id' | 'lid' | 'phoneNumber' | 'name' | 'notify' | 'verifiedName'>
 
@@ -363,6 +374,10 @@ function historyCutoffSeconds(): number {
     return Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
 }
 
+function isMediaType(messageType: string): boolean {
+    return Boolean(fileTypes[messageType])
+}
+
 function secondsFromMillis(value: unknown, fallback: number): number {
     const millis = Number(value)
     return Number.isFinite(millis) && millis > 0 ? Math.floor(millis / 1000) : fallback
@@ -512,20 +527,11 @@ async function storeMediaFile(
         isHistory,
         senderName,
         albumIndex,
-    }: {
-        messageId: string
-        groupJid: string
-        groupName: string
-        messageType: string
-        timestamp: number
-        isHistory: boolean
-        senderName: string
-        albumIndex: number | null
-    }
-): Promise<string | null> {
+    }: MediaMeta
+): Promise<MediaDownloadResult> {
     const fallbackExt = fileTypes[messageType]
-    if (!fallbackExt) return null
-    if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
+    if (!fallbackExt) return { status: 'skipped' }
+    if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return { status: 'skipped' }
     try {
         await waitMediaDownload()
         const stream = await downloadMediaMessage(
@@ -568,23 +574,32 @@ async function storeMediaFile(
         )
         await pipeline(stream as Readable, createWriteStream(fileName))
         await updateMessageMediaPath(messageId, fileName)
-        return fileName
+        return { status: 'stored', path: fileName }
     } catch (err) {
-        const timeout =
-            String(err).includes('Connect Timeout') || String(err).includes('fetch failed')
-        if (isHistory && timeout) {
-            log.debug(
-                { messageId, groupJid, groupName, messageType },
-                'media.history_unavailable'
-            )
-            return null
-        }
+        const error = String(err)
+        const timeout = error.includes('Connect Timeout') || error.includes('fetch failed')
         log.warn(
-            { err, messageId, groupJid, groupName, messageType, isHistory },
-            'media.download_failed'
+            { err, messageId, groupJid, groupName, messageType, isHistory, timeout },
+            timeout ? 'media.download_retryable' : 'media.download_failed'
         )
-        return null
+        return { status: 'retry', error }
     }
+}
+
+async function saveMessageMedia(
+    m: WAMessage,
+    sock: WASocket,
+    meta: MediaMeta
+): Promise<void> {
+    if (!isMediaType(meta.messageType)) return
+    const run = async (): Promise<void> => {
+        const result = await storeMediaFile(m, sock, meta)
+        if (result.status === 'retry' || result.status === 'unavailable') {
+            await activeMediaRetry?.enqueue(m, meta, result)
+        }
+    }
+    if (meta.isHistory) void run()
+    else await run()
 }
 
 async function resolveGroupMetadata(
@@ -619,7 +634,7 @@ async function processMessage(
     const jid = m.key.remoteJid
     if (!isJidGroup(jid)) return 'ignored'
 
-    const groupMetadata = await resolveGroupMetadata(jid, sock, !isHistory)
+    const groupMetadata = await resolveGroupMetadata(jid, sock, !isHistory || groupsCacheFailed)
     if (!groupMetadata) return 'ignored'
 
     const groupName = groupMetadata.subject
@@ -649,7 +664,6 @@ async function processMessage(
         }
     }
     const timestamp = unixSeconds(m.messageTimestamp)
-    if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
     const messageSecret = extractMessageSecret(m.message)
     const alreadyEdited = isEditedWrapper(m.message)
@@ -677,6 +691,18 @@ async function processMessage(
                 })
                 if (result === 'applied') return 'edited'
             }
+        }
+        if (isMediaType(messageType) && !(await getMessageMediaPath(messageId))) {
+            await saveMessageMedia(m, sock, {
+                messageId,
+                groupJid: jid,
+                groupName,
+                messageType,
+                timestamp,
+                isHistory,
+                senderName,
+                albumIndex: association.index ?? null,
+            })
         }
         if (messageType !== 'reactionMessage') return 'ignored'
     }
@@ -826,8 +852,7 @@ async function processMessage(
             senderName,
             albumIndex: albumIndex ?? null,
         }
-        if (isHistory) void storeMediaFile(m, sock, mediaMeta)
-        else await storeMediaFile(m, sock, mediaMeta)
+        await saveMessageMedia(m, sock, mediaMeta)
         ingestLog(
             {
                 messageId,
@@ -897,6 +922,19 @@ async function connectToWhatsApp() {
     })
     const catchup = createCatchup(sock)
     const runIngest = createSerialQueue()
+    activeMediaRetry?.stop()
+    activeMediaRetry = createMediaRetry((message, meta) => storeMediaFile(message, sock, meta))
+
+    groupsCacheFailed = false
+    let groupsReleased = false
+    let resolveGroupsReady = (): void => {}
+    groupsCacheReady = new Promise<void>((resolve) => {
+        resolveGroupsReady = () => {
+            if (groupsReleased) return
+            groupsReleased = true
+            resolve()
+        }
+    })
 
     function handleConnectionUpdate(update: BaileysEventMap['connection.update']): void {
         const { connection, lastDisconnect, qr } = update
@@ -931,45 +969,56 @@ async function connectToWhatsApp() {
                         ? `Connection closed (${statusCode})`
                         : 'Connection closed'
             )
+            resolveGroupsReady()
             catchup.stop()
+            activeMediaRetry?.stop()
+            activeMediaRetry = undefined
             void connectToWhatsApp()
         } else if (connection === 'open') {
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
             noteConnected()
-            void cacheParticipatingGroups()
+            void cacheParticipatingGroups().finally(() => resolveGroupsReady())
         }
     }
 
     async function cacheParticipatingGroups(): Promise<void> {
         skippedGroupJids.clear()
         participatingMeta.clear()
-        const response = await sock.groupFetchAllParticipating()
-        let cached = 0
-        const trackedJids: string[] = []
-        for (const key in response) {
-            const metadata = response[key]
-            if (!metadata) continue
-            participatingMeta.set(metadata.id, metadata)
-        }
-        for (const metadata of participatingMeta.values()) {
-            if (await persistMatchingGroup(metadata)) {
-                cached += 1
-                trackedJids.push(metadata.id)
+        try {
+            const response = await sock.groupFetchAllParticipating()
+            let cached = 0
+            const trackedJids: string[] = []
+            for (const key in response) {
+                const metadata = response[key]
+                if (!metadata) continue
+                participatingMeta.set(metadata.id, metadata)
             }
+            for (const metadata of participatingMeta.values()) {
+                if (await persistMatchingGroup(metadata)) {
+                    cached += 1
+                    trackedJids.push(metadata.id)
+                }
+            }
+            catchup.setTrackedGroups(trackedJids)
+            log.info(
+                {
+                    matchingGroups: cached,
+                    pattern: config.groupPatternSource,
+                    catchupBackfillSeconds: config.catchupBackfillSeconds,
+                    catchupGapMaxPages: config.catchupGapMaxPages,
+                },
+                'groups.cached'
+            )
+            catchup.noteConnected()
+        } catch (err) {
+            groupsCacheFailed = true
+            log.warn({ err }, 'groups.cache_failed')
+            catchup.noteConnected()
         }
-        catchup.setTrackedGroups(trackedJids)
-        log.info(
-            {
-                matchingGroups: cached,
-                pattern: config.groupPatternSource,
-                catchupBackfillSeconds: config.catchupBackfillSeconds,
-            },
-            'groups.cached'
-        )
-        catchup.noteConnected()
     }
 
     async function ingestEvents(events: Partial<BaileysEventMap>): Promise<void> {
+        await groupsCacheReady
         const history = events['messaging-history.set']
         if (history) {
             const { messages, contacts, syncType, lidPnMappings } = history
@@ -977,27 +1026,30 @@ async function connectToWhatsApp() {
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
             const latestBefore = new Map<string, number | undefined>()
             const cutoff = historyCutoffSeconds()
+            const batch = messages || []
 
             await rememberLidMappings(lidPnMappings)
             await rememberContacts(contacts)
 
-            for (const m of messages || []) {
-                if (unixSeconds(m.messageTimestamp) < cutoff) {
-                    counts.tooOld += 1
-                    continue
-                }
+            const preexistingIds = await existingMessageIds(
+                batch.map((m) => m.key.id).filter((id): id is string => Boolean(id))
+            )
+            for (const m of batch) {
                 const groupJid = m.key.remoteJid
                 if (groupJid && !latestBefore.has(groupJid)) {
                     const latest = await getLatestGroupMessage(groupJid)
                     latestBefore.set(groupJid, latest?.timestamp)
                 }
+            }
+            for (const m of batch) {
+                if (unixSeconds(m.messageTimestamp) < cutoff) counts.tooOld += 1
                 counts[await processMessage(m, sock, true)] += 1
             }
-            for (const m of messages || []) {
+            for (const m of batch) {
                 const result = await applyIncomingEdit(m, true)
                 if (result === 'applied') counts.edited += 1
             }
-            await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
+            await catchup.considerHistoryBatch(batch, syncType, latestBefore, preexistingIds)
             catchup.noteHistoryChunk(syncType)
             log.info({ syncType, ms: Date.now() - started, ...counts }, 'history.sync.done')
         }
@@ -1103,7 +1155,8 @@ async function connectToWhatsApp() {
                 continue
             }
             if (event.subject && matchesGroupPattern(event.subject)) {
-                await refreshGroup(sock, event.id, 'groups.update-matched')
+                const metadata = await refreshGroup(sock, event.id, 'groups.update-matched')
+                if (metadata) catchup.setTrackedGroups([event.id])
                 continue
             }
             skippedGroupJids.add(event.id)
