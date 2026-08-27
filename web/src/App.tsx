@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
+import FilenameSettings from './FilenameSettings'
 import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
 
 type Group = {
@@ -125,7 +126,11 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
     return body
 }
 
-function Icon({ name }: { name: 'archive' | 'calendar' | 'search' | 'users' | 'message' | 'image' }) {
+function Icon({
+    name,
+}: {
+    name: 'archive' | 'calendar' | 'search' | 'users' | 'message' | 'image' | 'settings'
+}) {
     const paths = {
         archive: (
             <>
@@ -162,6 +167,12 @@ function Icon({ name }: { name: 'archive' | 'calendar' | 'search' | 'users' | 'm
                 <rect x="3" y="5" width="18" height="14" rx="2" />
                 <circle cx="8.5" cy="10" r="1.5" />
                 <path d="m21 16-5.5-5.5-4 4L9 12l-6 6" />
+            </>
+        ),
+        settings: (
+            <>
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z" />
             </>
         ),
     }
@@ -653,6 +664,7 @@ export default function App() {
     const [agentState, setAgentState] = useState<AgentConnectionState>('connecting')
     const [connectionEvents, setConnectionEvents] = useState<AgentConnectionEvent[]>([])
     const [linkDown, setLinkDown] = useState(typeof navigator !== 'undefined' && !navigator.onLine)
+    const [settingsOpen, setSettingsOpen] = useState(false)
     const groupsRequestId = useRef(0)
     const messagesRequestId = useRef(0)
     const silentGen = useRef(0)
@@ -971,6 +983,15 @@ export default function App() {
                             ))}
                         </div>
                     )}
+                    <button
+                        type="button"
+                        className="settings-toggle"
+                        aria-label="Filename format settings"
+                        title="Filename format"
+                        onClick={() => setSettingsOpen(true)}
+                    >
+                        <Icon name="settings" />
+                    </button>
                     <ConnectionStatus
                         state={connectionState}
                         events={connectionEvents}
@@ -1217,6 +1238,7 @@ export default function App() {
                     />
                 </div>
             </main>
+            <FilenameSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         </div>
     )
 }

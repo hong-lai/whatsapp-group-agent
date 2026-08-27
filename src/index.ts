@@ -30,7 +30,14 @@ import { startApi } from './api.js'
 import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
 import { noteConnected, noteConnecting, noteDisconnected } from './connection.js'
-import { hktStamp, safePathSegment, uniqueHktFilename } from './hkt.js'
+import {
+    buildMediaFilename,
+    filenameTypeForMessage,
+    getFilenameFormatSettings,
+    loadFilenameFormatSettings,
+    uniqueMediaPath,
+} from './filenameFormat.js'
+import { hktStamp, safePathSegment } from './hkt.js'
 import { log } from './log.js'
 import {
     deleteGroupMetadata,
@@ -102,14 +109,24 @@ function originalMediaName(
     content: proto.IMessage | null | undefined,
     fallbackExt: string
 ): string | null {
-    const doc = content?.documentMessage
-    if (!doc) return null
-    const raw = (doc.fileName || doc.title || '').trim()
+    const media =
+        content?.documentMessage ||
+        content?.imageMessage ||
+        content?.videoMessage ||
+        content?.audioMessage ||
+        content?.stickerMessage
+    if (!media) return null
+    const named = media as {
+        fileName?: string | null
+        title?: string | null
+        mimetype?: string | null
+    }
+    const raw = (named.fileName || named.title || '').trim()
     if (!raw) return null
     const name = basename(raw.replace(/\\/g, '/'))
     if (!name || name === '.' || name === '..') return null
     if (extname(name).length > 1) return name
-    const mime = doc.mimetype?.split(';')[0]?.trim().toLowerCase()
+    const mime = named.mimetype?.split(';')[0]?.trim().toLowerCase()
     const fromMime = mime ? mimeExtensions[mime] : undefined
     return `${name}.${fromMime || fallbackExt}`
 }
@@ -493,6 +510,8 @@ async function storeMediaFile(
         messageType,
         timestamp,
         isHistory,
+        senderName,
+        albumIndex,
     }: {
         messageId: string
         groupJid: string
@@ -500,9 +519,12 @@ async function storeMediaFile(
         messageType: string
         timestamp: number
         isHistory: boolean
+        senderName: string
+        albumIndex: number | null
     }
 ): Promise<string | null> {
-    if (!fileTypes[messageType]) return null
+    const fallbackExt = fileTypes[messageType]
+    if (!fallbackExt) return null
     if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
     try {
         await waitMediaDownload()
@@ -525,14 +547,23 @@ async function storeMediaFile(
 
         const originalName = originalMediaName(
             contentForIngest(m.message) || m.message,
-            fileTypes[messageType]
+            fallbackExt
         )
-        const fileName = uniqueHktFilename(
+        const filenameType = filenameTypeForMessage(messageType)
+        const typePattern = filenameType
+            ? getFilenameFormatSettings()[filenameType]
+            : getFilenameFormatSettings().images
+        const fileName = uniqueMediaPath(
             folderPath,
-            timestamp,
-            messageId,
-            `media.${fileTypes[messageType]}`,
-            originalName,
+            buildMediaFilename(typePattern, {
+                timestamp,
+                messageId,
+                originalName,
+                groupName,
+                mediaIndex: albumIndex,
+                senderName,
+                mediaPath: `media.${fallbackExt}`,
+            }),
             existsSync
         )
         await pipeline(stream as Readable, createWriteStream(fileName))
@@ -792,6 +823,8 @@ async function processMessage(
             messageType,
             timestamp,
             isHistory,
+            senderName,
+            albumIndex: albumIndex ?? null,
         }
         if (isHistory) void storeMediaFile(m, sock, mediaMeta)
         else await storeMediaFile(m, sock, mediaMeta)
@@ -1136,6 +1169,7 @@ async function connectToWhatsApp() {
     try {
         log.info({ pattern: config.groupPatternSource, logLevel: config.logLevel }, 'agent.starting')
         await initDb()
+        await loadFilenameFormatSettings()
         startApi()
         await connectToWhatsApp()
     } catch (err) {

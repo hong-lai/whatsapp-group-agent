@@ -47,6 +47,12 @@ export async function initDb(): Promise<void> {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             PRIMARY KEY (target_message_id, sender_jid)
         );
+
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value JSONB NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
     `)
 
         await migrateMessagesTimestamp()
@@ -325,6 +331,23 @@ function isPersonJid(jid: string): boolean {
         server === 'c.us' ||
         server === 'hosted' ||
         server === 'hosted.lid'
+    )
+}
+
+export async function getAppSetting(key: string): Promise<unknown> {
+    const result = await pool.query<{ value: unknown }>(
+        `SELECT value FROM app_settings WHERE key = $1`,
+        [key]
+    )
+    return result.rows[0]?.value
+}
+
+export async function setAppSetting(key: string, value: unknown): Promise<void> {
+    await pool.query(
+        `INSERT INTO app_settings (key, value, updated_at)
+         VALUES ($1, $2::jsonb, NOW())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+        [key, JSON.stringify(value)]
     )
 }
 

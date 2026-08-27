@@ -2077,6 +2077,245 @@ video.media-frame {
     }
 }
 
+.settings-toggle {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    color: #4f6861;
+    background: transparent;
+}
+
+.settings-toggle:hover {
+    color: var(--green-dark);
+    background: #edf3f0;
+}
+
+.settings-toggle svg {
+    width: 1.05rem;
+    height: 1.05rem;
+}
+
+.settings-overlay {
+    display: grid;
+    position: fixed;
+    z-index: 40;
+    inset: 0;
+    place-items: center;
+    padding: 24px;
+    background: rgba(13, 39, 33, 0.38);
+    backdrop-filter: blur(8px);
+    animation: fade-in 180ms var(--ease-out);
+}
+
+.settings-panel {
+    width: min(560px, 100%);
+    max-height: min(720px, calc(100dvh - 48px));
+    overflow: auto;
+    padding: 22px 22px 18px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: var(--paper);
+    box-shadow: var(--shadow);
+    animation: rise-in 220ms var(--ease-out);
+}
+
+.settings-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.settings-header h2 {
+    margin: 0;
+    font: 700 1.05rem 'Manrope', sans-serif;
+    color: var(--ink);
+}
+
+.settings-header p {
+    margin: 6px 0 0;
+    color: var(--muted);
+    font-size: 0.72rem;
+    line-height: 1.4;
+}
+
+.settings-close {
+    width: 32px;
+    height: 32px;
+    flex-shrink: 0;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    color: #60756f;
+    background: #f7faf8;
+    font-size: 1.2rem;
+    line-height: 1;
+}
+
+.settings-status,
+.settings-error {
+    margin: 0 0 12px;
+    font-size: 0.74rem;
+    font-weight: 600;
+}
+
+.settings-error {
+    color: #b54040;
+}
+
+.settings-types {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-bottom: 16px;
+    padding: 3px;
+    border-radius: 11px;
+    background: #edf3f0;
+}
+
+.settings-types button {
+    flex: 1 1 auto;
+    min-height: 32px;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 8px;
+    color: #647b74;
+    background: transparent;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.settings-types button.active {
+    color: var(--green-dark);
+    background: white;
+    box-shadow: 0 3px 10px rgba(28, 60, 50, 0.09);
+}
+
+.settings-tokens {
+    margin: 0 0 14px;
+    padding: 0;
+    border: 0;
+}
+
+.settings-tokens legend {
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+}
+
+.settings-token-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.settings-token-list label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: #4f6861;
+    background: #f7faf8;
+    font-size: 0.7rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.settings-token-list label.is-checked {
+    border-color: rgba(22, 134, 111, 0.35);
+    color: var(--green-dark);
+    background: var(--mint);
+}
+
+.settings-token-list input {
+    accent-color: var(--green);
+}
+
+.settings-regex {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 14px;
+}
+
+.settings-regex > span {
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+}
+
+.settings-regex input {
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--ink);
+    background: #f7faf8;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+}
+
+.settings-regex small {
+    color: var(--muted);
+    font-size: 0.64rem;
+    line-height: 1.4;
+}
+
+.settings-regex-error {
+    color: #b54040 !important;
+}
+
+.settings-preview {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 16px;
+    padding: 12px;
+    border-radius: 12px;
+    background: #f2f7f4;
+}
+
+.settings-preview > span {
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+}
+
+.settings-preview code {
+    overflow-wrap: anywhere;
+    color: var(--ink);
+    font-size: 0.8rem;
+}
+
+.settings-preview small {
+    color: var(--muted);
+    font-size: 0.62rem;
+}
+
+.settings-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+.settings-save {
+    padding: 8px 14px;
+    border: 0;
+    border-radius: 9px;
+    color: white;
+    background: var(--green);
+    font-size: 0.74rem;
+    font-weight: 700;
+}
+
+.settings-save:disabled {
+    opacity: 0.7;
+}
+
 @media (max-width: 720px) {
     .app-shell {
         height: auto;

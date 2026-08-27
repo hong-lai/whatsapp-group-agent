@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
 import { getConnectionStatus } from './connection.js'
 import {
+    getFilenameFormatSettings,
+    parseFilenameFormatSettings,
+    saveFilenameFormatSettings,
+} from './filenameFormat.js'
+import {
     contentDisposition,
     safePathSegment,
     storedDownloadName,
@@ -363,12 +368,25 @@ export function createApiApp() {
                     groupJids?.length === 1
                         ? filename
                         : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`,
-                    item.messageId,
                     usedPaths
                 )
                 archive.append(createReadStream(item.resolvedPath), { name: archivePath })
             }
             await archive.finalize()
+        })
+    )
+
+    app.get('/api/settings/filename-format', (_request, response) => {
+        response.json(getFilenameFormatSettings())
+    })
+
+    app.put(
+        '/api/settings/filename-format',
+        express.json({ limit: '32kb' }),
+        asyncRoute(async (request, response) => {
+            const parsed = parseFilenameFormatSettings(request.body)
+            const saved = await saveFilenameFormatSettings(parsed)
+            response.json(saved)
         })
     )
 

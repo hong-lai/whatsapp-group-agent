@@ -1,7 +1,6 @@
 import { basename, extname } from 'node:path'
 
 const HONG_KONG_OFFSET_MS = 8 * 60 * 60 * 1000
-const DATED_NAME = /^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_/
 
 export function safePathSegment(value: string, fallback: string): string {
     const sanitized = value
@@ -42,10 +41,28 @@ export function mediaExtension(nameOrPath: string, fallback = 'bin'): string {
     return `.${clean || 'bin'}`
 }
 
-function fileStem(name: string, fallback: string): string {
+export function fileStem(name: string, fallback: string): string {
     const extension = extname(name)
     const stem = extension ? basename(name, extension) : basename(name)
     return safePathSegment(stem, fallback)
+}
+
+export function firstAvailableName(
+    preferred: string,
+    taken: (candidate: string) => boolean
+): string {
+    if (!taken(preferred)) return preferred
+
+    const slash = preferred.lastIndexOf('/')
+    const dir = slash >= 0 ? preferred.slice(0, slash + 1) : ''
+    const name = slash >= 0 ? preferred.slice(slash + 1) : preferred
+    const extension = mediaExtension(name)
+    const stem = fileStem(name, 'media')
+    for (let n = 1; n < 10000; n++) {
+        const candidate = `${dir}${stem}_${String(n).padStart(2, '0')}${extension}`
+        if (!taken(candidate)) return candidate
+    }
+    return `${dir}${stem}_dup${extension}`
 }
 
 export function hktFilename(
@@ -63,43 +80,16 @@ export function hktFilename(
     return `${stamp.date}_${stamp.time}_${safePathSegment(messageId, 'media')}${extension}`
 }
 
-export function uniqueHktFilename(
-    folderPath: string,
-    timestamp: number,
-    messageId: string,
-    mediaPath: string,
-    originalName: string | null | undefined,
-    exists: (path: string) => boolean
-): string {
-    const preferred = `${folderPath}/${hktFilename(timestamp, messageId, mediaPath, originalName)}`
-    if (!exists(preferred)) return preferred
-
-    const stamp = hktStamp(timestamp)
-    const source = originalName?.trim() || ''
-    const extension = mediaExtension(source || mediaPath)
-    const stem = source ? fileStem(source, 'document') : 'media'
-    return `${folderPath}/${stamp.date}_${stamp.time}_${stem}_${safePathSegment(messageId, 'media')}${extension}`
-}
-
 export function storedDownloadName(storedPath: string, timestamp: number, messageId: string): string {
     const stored = basename(storedPath)
-    if (stored && stored !== '.' && stored !== '..' && DATED_NAME.test(stored)) {
+    if (stored && stored !== '.' && stored !== '..') {
         return stored
     }
     return hktFilename(timestamp, messageId, storedPath)
 }
 
-export function uniqueArchivePath(path: string, messageId: string, used: Set<string>): string {
-    if (!used.has(path)) {
-        used.add(path)
-        return path
-    }
-    const slash = path.lastIndexOf('/')
-    const dir = slash >= 0 ? path.slice(0, slash + 1) : ''
-    const name = slash >= 0 ? path.slice(slash + 1) : path
-    const extension = mediaExtension(name)
-    const stem = fileStem(name, 'media')
-    const unique = `${dir}${stem}_${safePathSegment(messageId, 'id')}${extension}`
+export function uniqueArchivePath(path: string, used: Set<string>): string {
+    const unique = firstAvailableName(path, (candidate) => used.has(candidate))
     used.add(unique)
     return unique
 }
