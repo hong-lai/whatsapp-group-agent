@@ -33,6 +33,7 @@ type Message = {
     isEdited: boolean
     isDeleted: boolean
     isHistory: boolean
+    isForwarded: boolean
     hasMedia: boolean
     fileName: string | null
     reactions: Reaction[]
@@ -581,6 +582,15 @@ function MessageCard({ message }: { message: Message }) {
                     <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
                     <time>{hkDateTime.format(message.timestamp * 1000)}</time>
                 </header>
+                {message.isForwarded && (!message.isDeleted || revealed) && (
+                    <p className="forwarded-label">
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M15 7h-1.8A5.2 5.2 0 0 0 8 12.2V17" />
+                            <path d="m12 4 4 3-4 3" />
+                        </svg>
+                        Forwarded
+                    </p>
+                )}
                 {message.quotedMessage && (!message.isDeleted || revealed) && (
                     <blockquote>{message.quotedMessage}</blockquote>
                 )}

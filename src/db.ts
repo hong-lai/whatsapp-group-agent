@@ -34,7 +34,8 @@ export async function initDb(): Promise<void> {
             timestamp TIMESTAMPTZ,
             is_edited BOOLEAN NOT NULL DEFAULT FALSE,
             is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
-            is_history BOOLEAN NOT NULL DEFAULT FALSE
+            is_history BOOLEAN NOT NULL DEFAULT FALSE,
+            is_forwarded BOOLEAN NOT NULL DEFAULT FALSE
         );
 
         CREATE TABLE IF NOT EXISTS reactions (
@@ -57,6 +58,7 @@ export async function initDb(): Promise<void> {
 
         await migrateMessagesTimestamp()
         await migrateAlbumParents()
+        await migrateForwarded()
 
         await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
@@ -152,6 +154,12 @@ async function migrateMessagesTimestamp(): Promise<void> {
 // never across another album from the same sender. Live children carry parentMessageKey.
 const ALBUM_ASSOCIATION_WINDOW_SECONDS = 300
 const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage'] as const
+
+async function migrateForwarded(): Promise<void> {
+    await pool.query(
+        `ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_forwarded BOOLEAN NOT NULL DEFAULT FALSE`
+    )
+}
 
 async function migrateAlbumParents(): Promise<void> {
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_parent_id TEXT`)
@@ -406,6 +414,7 @@ export type MessageRow = {
     timestamp: number
     isEdited: boolean
     isHistory: boolean
+    isForwarded: boolean
 }
 
 export async function insertMessage(row: MessageRow): Promise<void> {
@@ -413,12 +422,13 @@ export async function insertMessage(row: MessageRow): Promise<void> {
         `INSERT INTO messages (
             message_id, group_jid, sender_jid, message_secret, message_type,
             text_content, media_path, reply_to_id, quoted_message, album_parent_id,
-            album_index, timestamp, is_edited, is_deleted, is_history
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, to_timestamp($12), $13, FALSE, $14)
+            album_index, timestamp, is_edited, is_deleted, is_history, is_forwarded
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, to_timestamp($12), $13, FALSE, $14, $15)
          ON CONFLICT (message_id) DO UPDATE SET
             message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret),
             album_parent_id = COALESCE(EXCLUDED.album_parent_id, messages.album_parent_id),
-            album_index = COALESCE(EXCLUDED.album_index, messages.album_index)`,
+            album_index = COALESCE(EXCLUDED.album_index, messages.album_index),
+            is_forwarded = messages.is_forwarded OR EXCLUDED.is_forwarded`,
         [
             row.messageId,
             row.groupJid,
@@ -434,6 +444,7 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.timestamp,
             row.isEdited,
             row.isHistory,
+            row.isForwarded,
         ]
     )
 }
@@ -464,6 +475,13 @@ export async function updateMessageMediaPath(messageId: string, mediaPath: strin
 export async function hasMessage(messageId: string): Promise<boolean> {
     const result = await pool.query('SELECT 1 FROM messages WHERE message_id = $1 LIMIT 1', [messageId])
     return (result.rowCount ?? 0) > 0
+}
+
+export async function markMessageForwarded(messageId: string): Promise<void> {
+    await pool.query(
+        `UPDATE messages SET is_forwarded = TRUE WHERE message_id = $1 AND is_forwarded = FALSE`,
+        [messageId]
+    )
 }
 
 export async function getStoredMessageContent(messageId: string): Promise<string | null> {
@@ -783,6 +801,7 @@ export type DashboardMessage = {
     isEdited: boolean
     isDeleted: boolean
     isHistory: boolean
+    isForwarded: boolean
     hasMedia: boolean
     fileName: string | null
     reactions: MessageReaction[]
@@ -801,6 +820,7 @@ type DashboardMessageRow = {
     is_edited: boolean
     is_deleted: boolean
     is_history: boolean
+    is_forwarded: boolean
     has_media: boolean
     file_name: string | null
 }
@@ -867,6 +887,7 @@ function toDashboardMessage(
         isEdited: row.is_edited,
         isDeleted: row.is_deleted,
         isHistory: row.is_history,
+        isForwarded: row.is_forwarded,
         hasMedia: row.has_media,
         fileName: row.file_name,
         reactions,
@@ -898,6 +919,7 @@ export async function listDashboardMessages(
             m.is_edited,
             m.is_deleted,
             m.is_history,
+            m.is_forwarded,
             (m.media_path IS NOT NULL) AS has_media,
             CASE
                 WHEN m.media_path IS NULL THEN NULL
@@ -953,6 +975,7 @@ export async function listDashboardMessages(
                 m.is_edited,
                 m.is_deleted,
                 m.is_history,
+                m.is_forwarded,
                 (m.media_path IS NOT NULL) AS has_media,
                 CASE
                     WHEN m.media_path IS NULL THEN NULL
@@ -990,6 +1013,8 @@ export async function listDashboardMessages(
                     ...row,
                     text_content: withMentions(row.text_content),
                     quoted_message: withMentions(row.quoted_message),
+                    is_forwarded:
+                        row.is_forwarded || childRows.some((child) => child.is_forwarded),
                 },
                 reactions.get(row.message_id) ?? [],
                 childRows.map((child) =>

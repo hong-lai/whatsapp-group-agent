@@ -51,6 +51,7 @@ import {
     initDb,
     insertMessage,
     markGroupDeleted,
+    markMessageForwarded,
     markMessagesDeleted,
     removeReaction,
     attachNearbyAlbumMedia,
@@ -482,7 +483,19 @@ function contextInfoOf(content: proto.IMessage | null | undefined): proto.IConte
         content.contactsArrayMessage?.contextInfo ||
         content.locationMessage?.contextInfo ||
         content.liveLocationMessage?.contextInfo ||
+        content.albumMessage?.contextInfo ||
         undefined
+    )
+}
+
+function isForwardedContent(content: proto.IMessage | null | undefined): boolean {
+    const ctx = contextInfoOf(content)
+    if (!ctx) return false
+    return Boolean(
+        ctx.isForwarded ||
+            (ctx.forwardingScore ?? 0) > 0 ||
+            ctx.forwardedNewsletterMessageInfo ||
+            ctx.businessMessageForwardInfo
     )
 }
 
@@ -821,6 +834,7 @@ async function processMessage(
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
     const messageSecret = extractMessageSecret(m.message)
     const alreadyEdited = isEditedWrapper(m.message)
+    const isForwarded = isForwardedContent(content)
 
     if (messageType === 'protocolMessage') return 'ignored'
     if (isLivePhotoMotionVideo(m.message, content)) {
@@ -836,6 +850,7 @@ async function processMessage(
         if (association.parentId || association.index != null) {
             await updateAlbumLink(messageId, association.parentId, association.index)
         }
+        if (isForwarded) await markMessageForwarded(messageId)
         if (alreadyEdited) {
             const editedText = textFromMessage(m.message)
             if (editedText != null) {
@@ -967,6 +982,7 @@ async function processMessage(
             timestamp,
             isEdited: alreadyEdited,
             isHistory,
+            isForwarded,
         })
         if (messageId) await flushPendingEdits(messageId)
         if (messageType === 'albumMessage') {
@@ -1008,6 +1024,7 @@ async function processMessage(
                 albumParentId,
                 albumIndex,
                 isHistory,
+                isForwarded,
             },
             'message.ingested'
         )
