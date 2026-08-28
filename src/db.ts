@@ -1388,7 +1388,10 @@ export async function listDashboardMessages(
                 SELECT 1
                 FROM messages parent
                 WHERE parent.message_id = m.album_parent_id
-                  AND parent.is_deleted = FALSE
+                  AND (
+                      parent.is_deleted = FALSE
+                      OR m.is_deleted = TRUE
+                  )
            )
            AND (
                 $4::bigint IS NULL
