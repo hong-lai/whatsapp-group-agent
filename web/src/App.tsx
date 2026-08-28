@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
 import FilenameSettings from './FilenameSettings'
 import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
@@ -413,68 +414,74 @@ function ConversationAlbum({
                     )
                 })}
             </div>
-            {openItem && openIndex !== null && (
-                <div className="lightbox" role="dialog" aria-modal="true" aria-label="Album preview">
-                    <button className="lightbox-close" onClick={() => setOpenIndex(null)} aria-label="Close">
-                        ×
-                    </button>
-                    {visible.length > 1 && (
-                        <>
-                            <button
-                                className="lightbox-nav prev"
-                                type="button"
-                                aria-label="Previous"
-                                onClick={() =>
-                                    setOpenIndex((openIndex - 1 + visible.length) % visible.length)
-                                }
-                            >
-                                ‹
-                            </button>
-                            <button
-                                className="lightbox-nav next"
-                                type="button"
-                                aria-label="Next"
-                                onClick={() => setOpenIndex((openIndex + 1) % visible.length)}
-                            >
-                                ›
-                            </button>
-                        </>
-                    )}
-                    <div className="lightbox-media">
-                        {openItem.messageType === 'videoMessage' ? (
-                            <video
-                                key={openItem.messageId}
-                                src={mediaUrl(openItem.messageId)}
-                                controls
-                                autoPlay
-                            />
-                        ) : (
-                            <img
-                                key={openItem.messageId}
-                                src={mediaUrl(openItem.messageId)}
-                                alt={openItem.textContent || 'Album photo'}
-                            />
-                        )}
-                    </div>
-                    <div className="lightbox-info">
-                        <strong>{albumSummary(visible)}</strong>
-                        <span className="lightbox-meta">
-                            {openIndex + 1} of {visible.length}
-                        </span>
-                        {openItem.textContent && (
-                            <p className="lightbox-copy">{openItem.textContent}</p>
-                        )}
-                        <a
-                            href={mediaUrl(openItem.messageId)}
-                            target="_blank"
-                            rel="noreferrer"
-                            download={openItem.fileName || undefined}
+            {openItem && openIndex !== null &&
+                createPortal(
+                    <div className="lightbox" role="dialog" aria-modal="true" aria-label="Album preview">
+                        <button
+                            className="lightbox-close"
+                            onClick={() => setOpenIndex(null)}
+                            aria-label="Close"
                         >
-                            Download
-                        </a>
-                    </div>
-                </div>
-            )}
+                            ×
+                        </button>
+                        {visible.length > 1 && (
+                            <>
+                                <button
+                                    className="lightbox-nav prev"
+                                    type="button"
+                                    aria-label="Previous"
+                                    onClick={() =>
+                                        setOpenIndex((openIndex - 1 + visible.length) % visible.length)
+                                    }
+                                >
+                                    ‹
+                                </button>
+                                <button
+                                    className="lightbox-nav next"
+                                    type="button"
+                                    aria-label="Next"
+                                    onClick={() => setOpenIndex((openIndex + 1) % visible.length)}
+                                >
+                                    ›
+                                </button>
+                            </>
+                        )}
+                        <div className="lightbox-media">
+                            {openItem.messageType === 'videoMessage' ? (
+                                <video
+                                    key={openItem.messageId}
+                                    src={mediaUrl(openItem.messageId)}
+                                    controls
+                                    autoPlay
+                                />
+                            ) : (
+                                <img
+                                    key={openItem.messageId}
+                                    src={mediaUrl(openItem.messageId)}
+                                    alt={openItem.textContent || 'Album photo'}
+                                />
+                            )}
+                        </div>
+                        <div className="lightbox-info">
+                            <strong>{albumSummary(visible)}</strong>
+                            <span className="lightbox-meta">
+                                {openIndex + 1} of {visible.length}
+                            </span>
+                            {openItem.textContent && (
+                                <p className="lightbox-copy">{openItem.textContent}</p>
+                            )}
+                            <a
+                                href={mediaUrl(openItem.messageId)}
+                                target="_blank"
+                                rel="noreferrer"
+                                download={openItem.fileName || undefined}
+                            >
+                                Download
+                            </a>
+                        </div>
+                    </div>,
+                    document.body
+                )}
         </>
     )
 }

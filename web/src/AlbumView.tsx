@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { createPortal } from 'react-dom'
 import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
 
 export type MediaCategory = 'image' | 'video' | 'document' | 'audio' | 'sticker'
@@ -759,7 +760,8 @@ export default function AlbumView({
                 </div>
             )}
 
-            {lightbox && (
+            {lightbox &&
+                createPortal(
                 <div
                     className="lightbox"
                     role="dialog"
@@ -812,7 +814,8 @@ export default function AlbumView({
                             <SelectGlyph selected={selected.has(lightbox.messageId)} />
                         </button>
                     </div>
-                </div>
+                </div>,
+                document.body
             )}
         </section>
     )
