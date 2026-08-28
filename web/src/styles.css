@@ -1296,17 +1296,23 @@ h3 {
     background: #071410;
 }
 
-.lightbox-media img,
-.lightbox-media video {
+.lightbox-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     position: absolute;
-    top: 48px;
-    right: 72px;
-    bottom: 48px;
-    left: 72px;
-    width: calc(100% - 144px);
-    height: calc(100% - 96px);
+    inset: 48px 72px;
+}
+
+.lightbox-stage img,
+.lightbox-stage video {
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
     border-radius: 12px;
     object-fit: contain;
+    background: #000;
     animation: media-in 280ms var(--ease-out);
 }
 
@@ -1696,6 +1702,50 @@ blockquote {
     white-space: nowrap;
 }
 
+blockquote.quoted-preview {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: normal;
+}
+
+blockquote.quoted-preview .quoted-thumb {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    overflow: hidden;
+    border-radius: 6px;
+    background: #d5e4de;
+}
+
+blockquote.quoted-preview .quoted-thumb img,
+blockquote.quoted-preview .quoted-thumb video {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+blockquote.quoted-preview .quoted-copy {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+blockquote.quoted-preview .quoted-kind {
+    color: #3d6f62;
+    font-size: 0.68rem;
+    font-weight: 700;
+    font-style: normal;
+}
+
+blockquote.quoted-preview .quoted-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .reaction-row {
     display: flex;
     flex-wrap: wrap;
@@ -1759,6 +1809,20 @@ blockquote {
     overflow: hidden;
     border-radius: 11px;
     background: #e8eeeb;
+}
+
+.conversation-album-stack {
+    max-width: min(420px, 100%);
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.conversation-album-stack .conversation-album,
+.conversation-album-stack .media-frame {
+    margin-top: 0;
 }
 
 .conversation-album {
@@ -1828,6 +1892,7 @@ blockquote {
 }
 
 .conversation-album-play {
+    z-index: 2;
     width: 34px;
     height: 34px;
     border-radius: 50%;
@@ -1837,6 +1902,7 @@ blockquote {
 }
 
 .conversation-album-more {
+    z-index: 1;
     color: white;
     background: rgba(17, 32, 28, 0.55);
     font: 700 1.15rem/1 'Manrope', sans-serif;
@@ -1855,6 +1921,7 @@ video.media-frame {
     max-height: 260px;
     display: block;
     object-fit: contain;
+    background: #0c1c18;
 }
 
 .audio-player {
@@ -2699,15 +2766,8 @@ video.media-frame {
         padding: 0;
     }
 
-    .lightbox-media img,
-    .lightbox-media video {
-        top: 56px;
-        right: 56px;
-        bottom: 16px;
-        left: 56px;
-        width: calc(100% - 112px);
-        height: calc(100% - 72px);
-        padding: 0;
+    .lightbox-stage {
+        inset: 56px 56px 16px;
     }
 
     .lightbox-info {

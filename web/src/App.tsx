@@ -29,6 +29,10 @@ type Message = {
     textContent: string | null
     replyToId: string | null
     quotedMessage: string | null
+    quotedMessageType: string | null
+    quotedMediaId: string | null
+    quotedMediaType: string | null
+    quotedFileName: string | null
     timestamp: number
     isEdited: boolean
     isDeleted: boolean
@@ -186,6 +190,71 @@ function Icon({
     )
 }
 
+function quotedTypeLabel(type: string | null | undefined): string | null {
+    switch (type) {
+        case 'imageMessage':
+            return 'Photo'
+        case 'videoMessage':
+        case 'ptvMessage':
+            return 'Video'
+        case 'stickerMessage':
+            return 'Sticker'
+        case 'audioMessage':
+            return 'Audio'
+        case 'documentMessage':
+            return 'Document'
+        case 'albumMessage':
+            return 'Album'
+        case 'contactMessage':
+        case 'contactsArrayMessage':
+            return 'Contact'
+        case 'locationMessage':
+            return 'Location'
+        case 'liveLocationMessage':
+            return 'Live location'
+        default:
+            return null
+    }
+}
+
+function isVisualQuotedMedia(type: string | null | undefined): boolean {
+    return type === 'imageMessage' || type === 'videoMessage' || type === 'ptvMessage' || type === 'stickerMessage'
+}
+
+function QuotePreview({ message }: { message: Message }) {
+    const kind = quotedTypeLabel(message.quotedMessageType)
+    const text = message.quotedMessage
+    const thumbType = message.quotedMediaType || message.quotedMessageType
+    const thumbUrl = message.quotedMediaId ? mediaUrl(message.quotedMediaId) : null
+    const showThumb = Boolean(thumbUrl && isVisualQuotedMedia(thumbType))
+    const documentName =
+        kind === 'Document' && !text ? message.quotedFileName : null
+    if (!text && !kind && !showThumb && !documentName) return null
+    if (!kind && !showThumb && !documentName) {
+        return <blockquote>{text}</blockquote>
+    }
+
+    return (
+        <blockquote className="quoted-preview">
+            {showThumb && thumbUrl && (
+                <a className="quoted-thumb" href={thumbUrl} target="_blank" rel="noreferrer">
+                    {thumbType === 'videoMessage' || thumbType === 'ptvMessage' ? (
+                        <video src={`${thumbUrl}#t=0.001`} muted playsInline preload="metadata" />
+                    ) : (
+                        <img src={thumbUrl} alt="" />
+                    )}
+                </a>
+            )}
+            <span className="quoted-copy">
+                {kind && <span className="quoted-kind">{kind}</span>}
+                {(text || documentName) && (
+                    <span className="quoted-text">{text || documentName}</span>
+                )}
+            </span>
+        </blockquote>
+    )
+}
+
 function isContactMessage(type: string): boolean {
     return type === 'contactMessage' || type === 'contactsArrayMessage'
 }
@@ -307,8 +376,16 @@ function MediaPreview({ message }: { message: Message }) {
             </a>
         )
     }
-    if (type === 'videoMessage') {
-        return <video className="media-frame" src={url} controls preload="metadata" />
+    if (type === 'videoMessage' || type === 'ptvMessage') {
+        return (
+            <video
+                className="media-frame"
+                src={url}
+                controls
+                playsInline
+                preload="metadata"
+            />
+        )
     }
     if (type === 'audioMessage') {
         return <audio className="audio-player" src={url} controls preload="metadata" />
@@ -325,9 +402,13 @@ function MediaPreview({ message }: { message: Message }) {
     )
 }
 
+function isAlbumVideo(item: Message): boolean {
+    return item.messageType === 'videoMessage' || item.messageType === 'ptvMessage'
+}
+
 function albumSummary(items: Message[]): string {
-    const photos = items.filter((item) => item.messageType === 'imageMessage').length
-    const videos = items.filter((item) => item.messageType === 'videoMessage').length
+    const photos = items.filter((item) => !isAlbumVideo(item)).length
+    const videos = items.filter(isAlbumVideo).length
     const parts = []
     if (photos) parts.push(`${photos} photo${photos === 1 ? '' : 's'}`)
     if (videos) parts.push(`${videos} video${videos === 1 ? '' : 's'}`)
@@ -346,10 +427,12 @@ function ConversationAlbum({
     includeDeleted?: boolean
 }) {
     const visible = items.filter((item) => (includeDeleted || !item.isDeleted) && item.hasMedia)
-    const preview = visible.slice(0, 4)
-    const extra = visible.length - preview.length
+    const photos = visible.filter((item) => !isAlbumVideo(item))
+    const videos = visible.filter(isAlbumVideo)
+    const preview = photos.slice(0, 4)
+    const extra = photos.length - preview.length
     const [openIndex, setOpenIndex] = useState<number | null>(null)
-    const openItem = openIndex === null ? null : visible[openIndex]
+    const openItem = openIndex === null ? null : photos[openIndex]
 
     useEffect(() => {
         if (openIndex === null) return undefined
@@ -357,57 +440,47 @@ function ConversationAlbum({
             if (event.key === 'Escape') setOpenIndex(null)
             if (event.key === 'ArrowRight') {
                 setOpenIndex((current) =>
-                    current === null ? current : (current + 1) % visible.length
+                    current === null ? current : (current + 1) % photos.length
                 )
             }
             if (event.key === 'ArrowLeft') {
                 setOpenIndex((current) =>
-                    current === null ? current : (current - 1 + visible.length) % visible.length
+                    current === null ? current : (current - 1 + photos.length) % photos.length
                 )
             }
         }
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
-    }, [openIndex, visible.length])
+    }, [openIndex, photos.length])
 
     if (visible.length === 0) {
         return <p className="album-pending">Grouped photos or videos</p>
     }
 
     return (
-        <>
+        <div className="conversation-album-stack">
+            {preview.length > 0 && (
             <div
                 className={`conversation-album count-${Math.min(preview.length, 4)}`}
-                aria-label={albumSummary(visible)}
+                aria-label={albumSummary(photos)}
             >
                 {preview.map((item, index) => {
-                    const url = mediaUrl(item.messageId)
-                    const isVideo = item.messageType === 'videoMessage'
                     const showMore = extra > 0 && index === preview.length - 1
                     return (
                         <button
-                            className={`conversation-album-tile ${isVideo ? 'video' : ''}`}
+                            className="conversation-album-tile"
                             key={item.messageId}
                             type="button"
                             onClick={() => setOpenIndex(index)}
                             aria-label={
-                                showMore
-                                    ? `Open album, ${extra} more`
-                                    : isVideo
-                                      ? 'Open video'
-                                      : 'Open photo'
+                                showMore ? `Open album, ${extra} more` : 'Open photo'
                             }
                         >
-                            {isVideo ? (
-                                <video src={url} preload="metadata" muted playsInline />
-                            ) : (
-                                <img src={url} alt={item.textContent || 'Album photo'} loading="lazy" />
-                            )}
-                            {isVideo && !showMore && (
-                                <span className="conversation-album-play" aria-hidden="true">
-                                    ▶
-                                </span>
-                            )}
+                            <img
+                                src={mediaUrl(item.messageId)}
+                                alt={item.textContent || 'Album photo'}
+                                loading="lazy"
+                            />
                             {showMore && (
                                 <span className="conversation-album-more">+{extra}</span>
                             )}
@@ -415,6 +488,17 @@ function ConversationAlbum({
                     )
                 })}
             </div>
+            )}
+            {videos.map((item) => (
+                <video
+                    className="media-frame"
+                    key={item.messageId}
+                    src={mediaUrl(item.messageId)}
+                    controls
+                    playsInline
+                    preload="auto"
+                />
+            ))}
             {openItem && openIndex !== null &&
                 createPortal(
                     <div className="lightbox" role="dialog" aria-modal="true" aria-label="Album preview">
@@ -425,14 +509,14 @@ function ConversationAlbum({
                         >
                             ×
                         </button>
-                        {visible.length > 1 && (
+                        {photos.length > 1 && (
                             <>
                                 <button
                                     className="lightbox-nav prev"
                                     type="button"
                                     aria-label="Previous"
                                     onClick={() =>
-                                        setOpenIndex((openIndex - 1 + visible.length) % visible.length)
+                                        setOpenIndex((openIndex - 1 + photos.length) % photos.length)
                                     }
                                 >
                                     ‹
@@ -441,32 +525,25 @@ function ConversationAlbum({
                                     className="lightbox-nav next"
                                     type="button"
                                     aria-label="Next"
-                                    onClick={() => setOpenIndex((openIndex + 1) % visible.length)}
+                                    onClick={() => setOpenIndex((openIndex + 1) % photos.length)}
                                 >
                                     ›
                                 </button>
                             </>
                         )}
                         <div className="lightbox-media">
-                            {openItem.messageType === 'videoMessage' ? (
-                                <video
-                                    key={openItem.messageId}
-                                    src={mediaUrl(openItem.messageId)}
-                                    controls
-                                    autoPlay
-                                />
-                            ) : (
+                            <div className="lightbox-stage">
                                 <img
                                     key={openItem.messageId}
                                     src={mediaUrl(openItem.messageId)}
                                     alt={openItem.textContent || 'Album photo'}
                                 />
-                            )}
+                            </div>
                         </div>
                         <div className="lightbox-info">
-                            <strong>{albumSummary(visible)}</strong>
+                            <strong>{albumSummary(photos)}</strong>
                             <span className="lightbox-meta">
-                                {openIndex + 1} of {visible.length}
+                                {openIndex + 1} of {photos.length}
                             </span>
                             {openItem.textContent && (
                                 <p className="lightbox-copy">{openItem.textContent}</p>
@@ -483,12 +560,13 @@ function ConversationAlbum({
                     </div>,
                     document.body
                 )}
-        </>
+        </div>
     )
 }
 
 function hasStoredContent(message: Message): boolean {
     if (message.textContent || message.hasMedia || message.quotedMessage) return true
+    if (message.quotedMessageType || message.quotedMediaId) return true
     if (isContactMessage(message.messageType) || isLocationMessage(message.messageType)) return true
     return (message.albumItems ?? []).some((item) => item.hasMedia || item.textContent)
 }
@@ -591,9 +669,7 @@ function MessageCard({ message }: { message: Message }) {
                         Forwarded
                     </p>
                 )}
-                {message.quotedMessage && (!message.isDeleted || revealed) && (
-                    <blockquote>{message.quotedMessage}</blockquote>
-                )}
+                {(!message.isDeleted || revealed) && <QuotePreview message={message} />}
                 <MessageBody message={message} revealed={revealed} />
                 {canReveal && (
                     <button

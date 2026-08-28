@@ -59,6 +59,7 @@ export async function initDb(): Promise<void> {
         await migrateMessagesTimestamp()
         await migrateAlbumParents()
         await migrateForwarded()
+        await migrateQuotedMessageType()
 
         await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
@@ -159,6 +160,10 @@ async function migrateForwarded(): Promise<void> {
     await pool.query(
         `ALTER TABLE messages ADD COLUMN IF NOT EXISTS is_forwarded BOOLEAN NOT NULL DEFAULT FALSE`
     )
+}
+
+async function migrateQuotedMessageType(): Promise<void> {
+    await pool.query(`ALTER TABLE messages DROP COLUMN IF EXISTS quoted_message_type`)
 }
 
 async function migrateAlbumParents(): Promise<void> {
@@ -428,6 +433,8 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret),
             album_parent_id = COALESCE(EXCLUDED.album_parent_id, messages.album_parent_id),
             album_index = COALESCE(EXCLUDED.album_index, messages.album_index),
+            quoted_message = COALESCE(NULLIF(BTRIM(messages.quoted_message), ''), EXCLUDED.quoted_message),
+            reply_to_id = COALESCE(messages.reply_to_id, EXCLUDED.reply_to_id),
             is_forwarded = messages.is_forwarded OR EXCLUDED.is_forwarded`,
         [
             row.messageId,
@@ -797,6 +804,10 @@ export type DashboardMessage = {
     textContent: string | null
     replyToId: string | null
     quotedMessage: string | null
+    quotedMessageType: string | null
+    quotedMediaId: string | null
+    quotedMediaType: string | null
+    quotedFileName: string | null
     timestamp: number
     isEdited: boolean
     isDeleted: boolean
@@ -816,6 +827,10 @@ type DashboardMessageRow = {
     text_content: string | null
     reply_to_id: string | null
     quoted_message: string | null
+    quoted_message_type: string | null
+    quoted_media_id: string | null
+    quoted_media_type: string | null
+    quoted_file_name: string | null
     timestamp: string
     is_edited: boolean
     is_deleted: boolean
@@ -870,6 +885,97 @@ async function resolveMentionedText(
     return (text) => applyMentionNames(text, names)
 }
 
+type QuotedTarget = {
+    messageType: string
+    textContent: string | null
+    mediaId: string | null
+    mediaType: string | null
+    fileName: string | null
+}
+
+async function loadQuotedTargets(messageIds: string[]): Promise<Map<string, QuotedTarget>> {
+    const uniqueIds = [...new Set(messageIds.filter(Boolean))]
+    const targets = new Map<string, QuotedTarget>()
+    if (uniqueIds.length === 0) return targets
+
+    const result = await pool.query<{
+        message_id: string
+        message_type: string
+        text_content: string | null
+        has_media: boolean
+        file_name: string | null
+    }>(
+        `SELECT
+            message_id,
+            message_type,
+            text_content,
+            (media_path IS NOT NULL) AS has_media,
+            CASE
+                WHEN media_path IS NULL THEN NULL
+                ELSE regexp_replace(media_path, '^.*[\\\\/]', '')
+            END AS file_name
+         FROM messages
+         WHERE message_id = ANY($1::text[])`,
+        [uniqueIds]
+    )
+
+    const albumIds: string[] = []
+    for (const row of result.rows) {
+        targets.set(row.message_id, {
+            messageType: row.message_type,
+            textContent: row.text_content,
+            mediaId: row.has_media ? row.message_id : null,
+            mediaType: row.has_media ? row.message_type : null,
+            fileName: row.file_name,
+        })
+        if (row.message_type === 'albumMessage' && !row.has_media) {
+            albumIds.push(row.message_id)
+        }
+    }
+
+    if (albumIds.length === 0) return targets
+
+    const previews = await pool.query<{
+        album_parent_id: string
+        message_id: string
+        message_type: string
+        file_name: string | null
+    }>(
+        `SELECT DISTINCT ON (album_parent_id)
+            album_parent_id,
+            message_id,
+            message_type,
+            regexp_replace(media_path, '^.*[\\\\/]', '') AS file_name
+         FROM messages
+         WHERE album_parent_id = ANY($1::text[])
+           AND media_path IS NOT NULL
+         ORDER BY album_parent_id, album_index ASC NULLS LAST, timestamp ASC, message_id ASC`,
+        [albumIds]
+    )
+    for (const preview of previews.rows) {
+        const current = targets.get(preview.album_parent_id)
+        if (!current || current.mediaId) continue
+        targets.set(preview.album_parent_id, {
+            ...current,
+            mediaId: preview.message_id,
+            mediaType: preview.message_type,
+            fileName: preview.file_name,
+        })
+    }
+    return targets
+}
+
+function applyQuotedTarget(row: DashboardMessageRow, quoted?: QuotedTarget): DashboardMessageRow {
+    return {
+        ...row,
+        quoted_message: row.quoted_message || quoted?.textContent || null,
+        quoted_message_type: quoted?.messageType || null,
+        quoted_media_id: quoted?.mediaId ?? null,
+        quoted_media_type: quoted?.mediaType ?? null,
+        quoted_file_name: quoted?.fileName ?? null,
+    }
+}
+
 function toDashboardMessage(
     row: DashboardMessageRow,
     reactions: MessageReaction[] = [],
@@ -883,6 +989,10 @@ function toDashboardMessage(
         textContent: row.text_content,
         replyToId: row.reply_to_id,
         quotedMessage: row.quoted_message,
+        quotedMessageType: row.quoted_message_type,
+        quotedMediaId: row.quoted_media_id,
+        quotedMediaType: row.quoted_media_type,
+        quotedFileName: row.quoted_file_name,
         timestamp: Number(row.timestamp),
         isEdited: row.is_edited,
         isDeleted: row.is_deleted,
@@ -995,29 +1105,53 @@ export async function listDashboardMessages(
         }
     }
 
+    const childRows = [...childrenByParent.values()].flat()
+    const quotedTargets = await loadQuotedTargets(
+        [...pageRows, ...childRows]
+            .map((row) => row.reply_to_id)
+            .filter((id): id is string => Boolean(id))
+    )
+    const quotedPageRows = pageRows.map((row) =>
+        applyQuotedTarget(row, row.reply_to_id ? quotedTargets.get(row.reply_to_id) : undefined)
+    )
+    const quotedChildrenByParent = new Map<string, DashboardMessageRow[]>()
+    for (const [parentId, items] of childrenByParent) {
+        quotedChildrenByParent.set(
+            parentId,
+            items.map((child) =>
+                applyQuotedTarget(
+                    child,
+                    child.reply_to_id ? quotedTargets.get(child.reply_to_id) : undefined
+                )
+            )
+        )
+    }
+
     const reactionIds = [
-        ...pageRows.map((row) => row.message_id),
-        ...[...childrenByParent.values()].flat().map((row) => row.message_id),
+        ...quotedPageRows.map((row) => row.message_id),
+        ...[...quotedChildrenByParent.values()].flat().map((row) => row.message_id),
     ]
     const reactions = await loadReactions(reactionIds)
     const withMentions = await resolveMentionedText([
-        ...pageRows.flatMap((row) => [row.text_content, row.quoted_message]),
-        ...[...childrenByParent.values()].flat().flatMap((row) => [row.text_content, row.quoted_message]),
+        ...quotedPageRows.flatMap((row) => [row.text_content, row.quoted_message]),
+        ...[...quotedChildrenByParent.values()]
+            .flat()
+            .flatMap((row) => [row.text_content, row.quoted_message]),
     ])
 
     return {
-        messages: pageRows.map((row) => {
-            const childRows = childrenByParent.get(row.message_id) ?? []
+        messages: quotedPageRows.map((row) => {
+            const albumChildren = quotedChildrenByParent.get(row.message_id) ?? []
             return toDashboardMessage(
                 {
                     ...row,
                     text_content: withMentions(row.text_content),
                     quoted_message: withMentions(row.quoted_message),
                     is_forwarded:
-                        row.is_forwarded || childRows.some((child) => child.is_forwarded),
+                        row.is_forwarded || albumChildren.some((child) => child.is_forwarded),
                 },
                 reactions.get(row.message_id) ?? [],
-                childRows.map((child) =>
+                albumChildren.map((child) =>
                     toDashboardMessage(
                         {
                             ...child,

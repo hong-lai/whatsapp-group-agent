@@ -928,7 +928,12 @@ async function processMessage(
     const textContent = textFromMessage(content)
     const ctx = contextInfoOf(content)
     const replyToId = ctx?.stanzaId || content.extendedTextMessage?.contextInfo?.stanzaId || null
-    const quotedMessage = textFromMessage(ctx?.quotedMessage) ||
+    const quotedRaw = ctx?.quotedMessage
+    const quotedContent = quotedRaw ? contentForIngest(quotedRaw) || quotedRaw : null
+    const quotedMessage =
+        textFromMessage(quotedContent) ||
+        quotedContent?.documentMessage?.fileName ||
+        quotedContent?.documentMessage?.title ||
         content.extendedTextMessage?.contextInfo?.quotedMessage?.conversation ||
         content.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage?.caption ||
         null

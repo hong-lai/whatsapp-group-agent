@@ -329,7 +329,7 @@ function MediaTile({
                 >
                     {item.category === 'video' ? (
                         <>
-                            <video src={item.mediaUrl} muted preload="metadata" />
+                            <video src={`${item.mediaUrl}#t=0.001`} muted playsInline preload="metadata" />
                             <span className="video-mark">▶</span>
                         </>
                     ) : (
@@ -777,15 +777,23 @@ export default function AlbumView({
                         ×
                     </button>
                     <div className="lightbox-media" onClick={stopTileAction}>
-                        {lightbox.category === 'video' ? (
-                            <video key={lightbox.messageId} src={lightbox.mediaUrl} controls autoPlay />
-                        ) : (
-                            <img
-                                key={lightbox.messageId}
-                                src={lightbox.mediaUrl}
-                                alt={lightbox.textContent || lightbox.category}
-                            />
-                        )}
+                        <div className="lightbox-stage">
+                            {lightbox.category === 'video' ? (
+                                <video
+                                    key={lightbox.messageId}
+                                    src={lightbox.mediaUrl}
+                                    controls
+                                    playsInline
+                                    preload="auto"
+                                />
+                            ) : (
+                                <img
+                                    key={lightbox.messageId}
+                                    src={lightbox.mediaUrl}
+                                    alt={lightbox.textContent || lightbox.category}
+                                />
+                            )}
+                        </div>
                     </div>
                     <div className="lightbox-info" onClick={stopTileAction}>
                         <strong>{lightbox.groupName}</strong>
