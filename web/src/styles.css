@@ -1802,6 +1802,7 @@ blockquote.quoted-preview .quoted-text {
 }
 
 .media-frame {
+    position: relative;
     width: fit-content;
     max-width: min(420px, 100%);
     display: inline-block;
@@ -1811,18 +1812,22 @@ blockquote.quoted-preview .quoted-text {
     background: #e8eeeb;
 }
 
-.conversation-album-stack {
-    max-width: min(420px, 100%);
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 8px;
-    margin-top: 8px;
+button.media-frame {
+    padding: 0;
+    border: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
 }
 
-.conversation-album-stack .conversation-album,
-.conversation-album-stack .media-frame {
-    margin-top: 0;
+button.media-frame:hover img,
+button.media-frame:hover video {
+    transform: scale(1.02);
+}
+
+button.media-frame img,
+button.media-frame video {
+    transition: transform 180ms ease;
 }
 
 .conversation-album {
@@ -1915,6 +1920,7 @@ blockquote.quoted-preview .quoted-text {
 
 img.media-frame,
 .media-frame img,
+.media-frame video,
 video.media-frame {
     width: auto;
     max-width: min(420px, 100%);

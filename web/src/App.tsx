@@ -363,28 +363,183 @@ function fileExtensionLabel(fileName: string | null | undefined, fallback: strin
     return (ext || fallback).slice(0, 5).toUpperCase()
 }
 
+function isAlbumVideo(item: { messageType: string }): boolean {
+    return item.messageType === 'videoMessage' || item.messageType === 'ptvMessage'
+}
+
+function mediaUrl(messageId: string): string {
+    return `/api/media/${encodeURIComponent(messageId)}`
+}
+
+function MediaLightbox({
+    items,
+    index,
+    onClose,
+    onIndexChange,
+    heading,
+}: {
+    items: Message[]
+    index: number
+    onClose: () => void
+    onIndexChange: (index: number) => void
+    heading?: string
+}) {
+    const item = items[index]
+
+    useEffect(() => {
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') onClose()
+            if (items.length < 2) return
+            if (event.key === 'ArrowRight') onIndexChange((index + 1) % items.length)
+            if (event.key === 'ArrowLeft') {
+                onIndexChange((index - 1 + items.length) % items.length)
+            }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [index, items.length, onClose, onIndexChange])
+
+    if (!item) return null
+    const url = mediaUrl(item.messageId)
+
+    return createPortal(
+        <div
+            className="lightbox"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Media preview"
+            onClick={onClose}
+        >
+            <button
+                className="lightbox-close"
+                onClick={(event) => {
+                    event.stopPropagation()
+                    onClose()
+                }}
+                type="button"
+                aria-label="Close"
+            >
+                ×
+            </button>
+            {items.length > 1 && (
+                <>
+                    <button
+                        className="lightbox-nav prev"
+                        type="button"
+                        aria-label="Previous"
+                        onClick={(event) => {
+                            event.stopPropagation()
+                            onIndexChange((index - 1 + items.length) % items.length)
+                        }}
+                    >
+                        ‹
+                    </button>
+                    <button
+                        className="lightbox-nav next"
+                        type="button"
+                        aria-label="Next"
+                        onClick={(event) => {
+                            event.stopPropagation()
+                            onIndexChange((index + 1) % items.length)
+                        }}
+                    >
+                        ›
+                    </button>
+                </>
+            )}
+            <div className="lightbox-media" onClick={(event) => event.stopPropagation()}>
+                <div className="lightbox-stage">
+                    {isAlbumVideo(item) ? (
+                        <video
+                            key={item.messageId}
+                            src={url}
+                            controls
+                            playsInline
+                            preload="auto"
+                        />
+                    ) : (
+                        <img
+                            key={item.messageId}
+                            src={url}
+                            alt={item.textContent || 'Shared media'}
+                        />
+                    )}
+                </div>
+            </div>
+            <div className="lightbox-info" onClick={(event) => event.stopPropagation()}>
+                <strong>{heading || item.senderName || 'Media'}</strong>
+                {heading && item.senderName && (
+                    <span className="lightbox-meta">{item.senderName}</span>
+                )}
+                <time className="lightbox-meta">{hkDateTime.format(item.timestamp * 1000)}</time>
+                {items.length > 1 && (
+                    <span className="lightbox-meta">
+                        {index + 1} of {items.length}
+                    </span>
+                )}
+                {item.textContent && <p className="lightbox-copy">{item.textContent}</p>}
+                {item.fileName && <span className="lightbox-meta">{item.fileName}</span>}
+                <a href={url} target="_blank" rel="noreferrer" download={item.fileName || undefined}>
+                    Download
+                </a>
+            </div>
+        </div>,
+        document.body
+    )
+}
+
 function MediaPreview({ message }: { message: Message }) {
+    const [open, setOpen] = useState(false)
     if (!message.hasMedia) return null
-    const url = `/api/media/${encodeURIComponent(message.messageId)}`
+    const url = mediaUrl(message.messageId)
     const type = message.messageType
     const fileName = message.fileName || undefined
 
     if (type === 'imageMessage' || type === 'stickerMessage') {
         return (
-            <a className="media-frame" href={url} target="_blank" rel="noreferrer">
-                <img src={url} alt={message.textContent || 'Shared media'} loading="lazy" />
-            </a>
+            <>
+                <button
+                    type="button"
+                    className="media-frame"
+                    onClick={() => setOpen(true)}
+                    aria-label="Open photo"
+                >
+                    <img src={url} alt={message.textContent || 'Shared media'} loading="lazy" />
+                </button>
+                {open && (
+                    <MediaLightbox
+                        items={[message]}
+                        index={0}
+                        onClose={() => setOpen(false)}
+                        onIndexChange={() => {}}
+                    />
+                )}
+            </>
         )
     }
-    if (type === 'videoMessage' || type === 'ptvMessage') {
+    if (isAlbumVideo(message)) {
         return (
-            <video
-                className="media-frame"
-                src={url}
-                controls
-                playsInline
-                preload="metadata"
-            />
+            <>
+                <button
+                    type="button"
+                    className="media-frame is-video"
+                    onClick={() => setOpen(true)}
+                    aria-label="Open video"
+                >
+                    <video src={`${url}#t=0.001`} muted playsInline preload="metadata" />
+                    <span className="conversation-album-play" aria-hidden="true">
+                        ▶
+                    </span>
+                </button>
+                {open && (
+                    <MediaLightbox
+                        items={[message]}
+                        index={0}
+                        onClose={() => setOpen(false)}
+                        onIndexChange={() => {}}
+                    />
+                )}
+            </>
         )
     }
     if (type === 'audioMessage') {
@@ -402,10 +557,6 @@ function MediaPreview({ message }: { message: Message }) {
     )
 }
 
-function isAlbumVideo(item: Message): boolean {
-    return item.messageType === 'videoMessage' || item.messageType === 'ptvMessage'
-}
-
 function albumSummary(items: Message[]): string {
     const photos = items.filter((item) => !isAlbumVideo(item)).length
     const videos = items.filter(isAlbumVideo).length
@@ -413,10 +564,6 @@ function albumSummary(items: Message[]): string {
     if (photos) parts.push(`${photos} photo${photos === 1 ? '' : 's'}`)
     if (videos) parts.push(`${videos} video${videos === 1 ? '' : 's'}`)
     return parts.join(' · ') || 'Album'
-}
-
-function mediaUrl(messageId: string): string {
-    return `/api/media/${encodeURIComponent(messageId)}`
 }
 
 function ConversationAlbum({
@@ -427,60 +574,56 @@ function ConversationAlbum({
     includeDeleted?: boolean
 }) {
     const visible = items.filter((item) => (includeDeleted || !item.isDeleted) && item.hasMedia)
-    const photos = visible.filter((item) => !isAlbumVideo(item))
-    const videos = visible.filter(isAlbumVideo)
-    const preview = photos.slice(0, 4)
-    const extra = photos.length - preview.length
+    const preview = visible.slice(0, 4)
+    const extra = visible.length - preview.length
     const [openIndex, setOpenIndex] = useState<number | null>(null)
-    const openItem = openIndex === null ? null : photos[openIndex]
-
-    useEffect(() => {
-        if (openIndex === null) return undefined
-        const onKey = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') setOpenIndex(null)
-            if (event.key === 'ArrowRight') {
-                setOpenIndex((current) =>
-                    current === null ? current : (current + 1) % photos.length
-                )
-            }
-            if (event.key === 'ArrowLeft') {
-                setOpenIndex((current) =>
-                    current === null ? current : (current - 1 + photos.length) % photos.length
-                )
-            }
-        }
-        window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
-    }, [openIndex, photos.length])
 
     if (visible.length === 0) {
         return <p className="album-pending">Grouped photos or videos</p>
     }
 
     return (
-        <div className="conversation-album-stack">
-            {preview.length > 0 && (
+        <>
             <div
                 className={`conversation-album count-${Math.min(preview.length, 4)}`}
-                aria-label={albumSummary(photos)}
+                aria-label={albumSummary(visible)}
             >
                 {preview.map((item, index) => {
+                    const isVideo = isAlbumVideo(item)
                     const showMore = extra > 0 && index === preview.length - 1
                     return (
                         <button
-                            className="conversation-album-tile"
+                            className={`conversation-album-tile ${isVideo ? 'video' : ''}`}
                             key={item.messageId}
                             type="button"
                             onClick={() => setOpenIndex(index)}
                             aria-label={
-                                showMore ? `Open album, ${extra} more` : 'Open photo'
+                                showMore
+                                    ? `Open album, ${extra} more`
+                                    : isVideo
+                                      ? 'Open video'
+                                      : 'Open photo'
                             }
                         >
-                            <img
-                                src={mediaUrl(item.messageId)}
-                                alt={item.textContent || 'Album photo'}
-                                loading="lazy"
-                            />
+                            {isVideo ? (
+                                <video
+                                    src={`${mediaUrl(item.messageId)}#t=0.001`}
+                                    preload="metadata"
+                                    muted
+                                    playsInline
+                                />
+                            ) : (
+                                <img
+                                    src={mediaUrl(item.messageId)}
+                                    alt={item.textContent || 'Album photo'}
+                                    loading="lazy"
+                                />
+                            )}
+                            {isVideo && (
+                                <span className="conversation-album-play" aria-hidden="true">
+                                    ▶
+                                </span>
+                            )}
                             {showMore && (
                                 <span className="conversation-album-more">+{extra}</span>
                             )}
@@ -488,79 +631,16 @@ function ConversationAlbum({
                     )
                 })}
             </div>
-            )}
-            {videos.map((item) => (
-                <video
-                    className="media-frame"
-                    key={item.messageId}
-                    src={mediaUrl(item.messageId)}
-                    controls
-                    playsInline
-                    preload="auto"
+            {openIndex !== null && visible[openIndex] && (
+                <MediaLightbox
+                    items={visible}
+                    index={openIndex}
+                    heading={albumSummary(visible)}
+                    onClose={() => setOpenIndex(null)}
+                    onIndexChange={setOpenIndex}
                 />
-            ))}
-            {openItem && openIndex !== null &&
-                createPortal(
-                    <div className="lightbox" role="dialog" aria-modal="true" aria-label="Album preview">
-                        <button
-                            className="lightbox-close"
-                            onClick={() => setOpenIndex(null)}
-                            aria-label="Close"
-                        >
-                            ×
-                        </button>
-                        {photos.length > 1 && (
-                            <>
-                                <button
-                                    className="lightbox-nav prev"
-                                    type="button"
-                                    aria-label="Previous"
-                                    onClick={() =>
-                                        setOpenIndex((openIndex - 1 + photos.length) % photos.length)
-                                    }
-                                >
-                                    ‹
-                                </button>
-                                <button
-                                    className="lightbox-nav next"
-                                    type="button"
-                                    aria-label="Next"
-                                    onClick={() => setOpenIndex((openIndex + 1) % photos.length)}
-                                >
-                                    ›
-                                </button>
-                            </>
-                        )}
-                        <div className="lightbox-media">
-                            <div className="lightbox-stage">
-                                <img
-                                    key={openItem.messageId}
-                                    src={mediaUrl(openItem.messageId)}
-                                    alt={openItem.textContent || 'Album photo'}
-                                />
-                            </div>
-                        </div>
-                        <div className="lightbox-info">
-                            <strong>{albumSummary(photos)}</strong>
-                            <span className="lightbox-meta">
-                                {openIndex + 1} of {photos.length}
-                            </span>
-                            {openItem.textContent && (
-                                <p className="lightbox-copy">{openItem.textContent}</p>
-                            )}
-                            <a
-                                href={mediaUrl(openItem.messageId)}
-                                target="_blank"
-                                rel="noreferrer"
-                                download={openItem.fileName || undefined}
-                            >
-                                Download
-                            </a>
-                        </div>
-                    </div>,
-                    document.body
-                )}
-        </div>
+            )}
+        </>
     )
 }
 
