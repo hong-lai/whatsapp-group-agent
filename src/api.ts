@@ -57,11 +57,6 @@ function dateStringFromHongKongTime(timestamp = Date.now()): string {
     return `${year}-${month}-${day}`
 }
 
-function addDays(date: string, days: number): string {
-    const timestamp = parseHongKongDate(date)
-    return dateStringFromHongKongTime(timestamp * 1000 + days * DAY_MS)
-}
-
 function parseHongKongDate(value: string): number {
     const match = DATE_PATTERN.exec(value)
     if (!match) throw new Error(`Invalid date: ${value}`)
@@ -83,7 +78,7 @@ function parseHongKongDate(value: string): number {
 
 function getDateRange(request: Request): DateRange {
     const today = dateStringFromHongKongTime()
-    const from = typeof request.query.from === 'string' ? request.query.from : addDays(today, -1)
+    const from = typeof request.query.from === 'string' ? request.query.from : today
     const to = typeof request.query.to === 'string' ? request.query.to : today
     const fromTimestamp = parseHongKongDate(from)
     const toStartTimestamp = parseHongKongDate(to)
