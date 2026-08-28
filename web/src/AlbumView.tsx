@@ -105,6 +105,23 @@ function stopTileAction(event: MouseEvent) {
     event.stopPropagation()
 }
 
+function fileExtensionLabel(fileName: string | null | undefined, fallback = 'FILE'): string {
+    if (!fileName) return fallback
+    const dot = fileName.lastIndexOf('.')
+    const ext = dot >= 0 ? fileName.slice(dot + 1) : ''
+    return (ext || fallback).slice(0, 5).toUpperCase()
+}
+
+function isPdfFile(item: AlbumItem): boolean {
+    return fileExtensionLabel(item.fileName, '').toLowerCase() === 'pdf'
+}
+
+function stepAlbumItem(currentId: string, items: AlbumItem[], delta: number): string {
+    const index = items.findIndex((item) => item.messageId === currentId)
+    if (index < 0 || items.length === 0) return currentId
+    return items[(index + delta + items.length) % items.length].messageId
+}
+
 function groupAlbumItems(
     items: AlbumItem[]
 ): Array<{ jid: string; name: string; items: AlbumItem[] }> {
@@ -284,15 +301,72 @@ function ToolbarIcon({
     )
 }
 
-function SelectGlyph({ selected }: { selected: boolean }) {
-    return selected ? (
+function DownloadIcon() {
+    return (
         <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M5 12.5 10 17l9-10" />
+            <path d="M12 4v12" />
+            <path d="m7 11 5 5 5-5" />
+            <path d="M5 20h14" />
         </svg>
-    ) : (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" />
-        </svg>
+    )
+}
+
+function LightboxPreview({ item }: { item: AlbumItem }) {
+    if (item.category === 'video') {
+        return (
+            <video
+                key={item.messageId}
+                src={item.mediaUrl}
+                controls
+                playsInline
+                preload="auto"
+            />
+        )
+    }
+    if (item.category === 'image' || item.category === 'sticker') {
+        return (
+            <img
+                key={item.messageId}
+                src={item.mediaUrl}
+                alt={item.textContent || item.category}
+            />
+        )
+    }
+    if (item.category === 'audio') {
+        return (
+            <div className="lightbox-file audio">
+                <span className="file-glyph">♪</span>
+                <strong>{item.fileName || 'Audio message'}</strong>
+                <audio key={item.messageId} src={item.mediaUrl} controls preload="auto" />
+            </div>
+        )
+    }
+    if (isPdfFile(item)) {
+        return (
+            <iframe
+                key={item.messageId}
+                className="lightbox-pdf"
+                title={item.fileName || 'PDF document'}
+                src={item.mediaUrl}
+            />
+        )
+    }
+    return (
+        <div className="lightbox-file">
+            <span className="file-glyph">{fileExtensionLabel(item.fileName)}</span>
+            <strong>{item.fileName || 'Shared document'}</strong>
+            <p>This file can't be previewed here.</p>
+            <a
+                href={item.mediaUrl}
+                target="_blank"
+                rel="noreferrer"
+                download={item.fileName || undefined}
+                className="download-button"
+            >
+                <DownloadIcon />
+                Download
+            </a>
+        </div>
     )
 }
 
@@ -338,17 +412,24 @@ function MediaTile({
                 </button>
             ) : (
                 <div className={`album-file-card ${item.category}`}>
-                    <span className="file-glyph">
-                        {item.category === 'audio'
-                            ? '♪'
-                            : (item.fileName?.split('.').pop() || 'PDF').slice(0, 5).toUpperCase()}
-                    </span>
-                    <span className="file-name">
-                        {item.fileName ||
-                            (item.category === 'audio' ? 'Audio message' : 'Shared document')}
-                    </span>
+                    <button
+                        type="button"
+                        className="album-file-open"
+                        onClick={onOpen}
+                        aria-label={`View ${item.category} from ${item.groupName}`}
+                    >
+                        <span className="file-glyph">
+                            {item.category === 'audio'
+                                ? '♪'
+                                : fileExtensionLabel(item.fileName, 'FILE')}
+                        </span>
+                        <span className="file-name">
+                            {item.fileName ||
+                                (item.category === 'audio' ? 'Audio message' : 'Shared document')}
+                        </span>
+                    </button>
                     {item.category === 'audio' && (
-                        <audio src={item.mediaUrl} controls preload="none" onClick={stopTileAction} />
+                        <audio src={item.mediaUrl} controls preload="none" />
                     )}
                     {item.category === 'document' && (
                         <a
@@ -356,7 +437,6 @@ function MediaTile({
                             target="_blank"
                             rel="noreferrer"
                             download={item.fileName || undefined}
-                            onClick={stopTileAction}
                         >
                             Download ↗
                         </a>
@@ -388,7 +468,7 @@ export default function AlbumView({
     const [counts, setCounts] = useState<Record<MediaCategory, number>>(emptyCounts)
     const [nextCursor, setNextCursor] = useState<string | null>(null)
     const [selected, setSelected] = useState<Set<string>>(new Set())
-    const [lightbox, setLightbox] = useState<AlbumItem | null>(null)
+    const [lightboxId, setLightboxId] = useState<string | null>(null)
     const [loading, setLoading] = useState(true)
     const [loadingMore, setLoadingMore] = useState(false)
     const [downloading, setDownloading] = useState(false)
@@ -423,7 +503,7 @@ export default function AlbumView({
     useEffect(() => {
         silentGen.current += 1
         setSelected(new Set())
-        setLightbox(null)
+        setLightboxId(null)
         const controller = new AbortController()
         const currentRequest = ++requestId.current
         scrollRestore.current = null
@@ -467,22 +547,6 @@ export default function AlbumView({
             })
             setNextCursor(nextCursorRef.current)
             setCounts(data.counts)
-            setLightbox((open) => {
-                if (!open) return open
-                const next = data.items.find((item) => item.messageId === open.messageId)
-                if (!next) return open
-                if (
-                    next.mediaUrl === open.mediaUrl &&
-                    next.textContent === open.textContent &&
-                    next.senderName === open.senderName &&
-                    next.timestamp === open.timestamp &&
-                    next.groupName === open.groupName &&
-                    next.fileName === open.fileName
-                ) {
-                    return open
-                }
-                return next
-            })
             setError(null)
             onLiveUpdate()
         } catch (reason: unknown) {
@@ -502,20 +566,39 @@ export default function AlbumView({
         active && Boolean(nextCursor) && !loadingMore && !loading
     )
 
-    useEffect(() => {
-        if (!lightbox) return undefined
-        const onKey = (event: globalThis.KeyboardEvent) => {
-            if (event.key === 'Escape') setLightbox(null)
-        }
-        window.addEventListener('keydown', onKey)
-        return () => window.removeEventListener('keydown', onKey)
-    }, [lightbox])
-
     const selectedItems = useMemo(
         () => items.filter((item) => selected.has(item.messageId)),
         [items, selected]
     )
     const groupedItems = useMemo(() => groupAlbumItems(items), [items])
+    const displayItems = useMemo(
+        () => groupedItems.flatMap((group) => group.items),
+        [groupedItems]
+    )
+    const lightboxIndex = lightboxId
+        ? displayItems.findIndex((item) => item.messageId === lightboxId)
+        : -1
+    const lightbox = lightboxIndex >= 0 ? displayItems[lightboxIndex] : null
+
+    useEffect(() => {
+        if (!lightboxId) return undefined
+        const onKey = (event: globalThis.KeyboardEvent) => {
+            if (event.key === 'Escape') setLightboxId(null)
+            if (displayItems.length < 2) return
+            if (event.key === 'ArrowRight') {
+                setLightboxId((current) =>
+                    current ? stepAlbumItem(current, displayItems, 1) : current
+                )
+            }
+            if (event.key === 'ArrowLeft') {
+                setLightboxId((current) =>
+                    current ? stepAlbumItem(current, displayItems, -1) : current
+                )
+            }
+        }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+    }, [lightboxId, displayItems])
 
     function toggleType(category: MediaCategory) {
         if (showingAll) {
@@ -723,7 +806,7 @@ export default function AlbumView({
                                             item={item}
                                             selected={selected.has(item.messageId)}
                                             onToggle={() => toggleSelected(item.messageId)}
-                                            onOpen={() => setLightbox(item)}
+                                            onOpen={() => setLightboxId(item.messageId)}
                                             key={item.messageId}
                                         />
                                     ))}
@@ -755,6 +838,7 @@ export default function AlbumView({
                         )}
                     </div>
                     <button className="download-button" onClick={downloadZip} disabled={downloading}>
+                        <DownloadIcon />
                         {downloading ? 'Preparing ZIP…' : 'Download ZIP'}
                     </button>
                 </div>
@@ -767,38 +851,61 @@ export default function AlbumView({
                     role="dialog"
                     aria-modal="true"
                     aria-label="Media preview"
-                    onClick={() => setLightbox(null)}
+                    onClick={() => setLightboxId(null)}
                 >
                     <button
                         className="lightbox-close"
-                        onClick={() => setLightbox(null)}
+                        onClick={(event) => {
+                            event.stopPropagation()
+                            setLightboxId(null)
+                        }}
                         aria-label="Close"
+                        type="button"
                     >
                         ×
                     </button>
+                    {displayItems.length > 1 && (
+                        <>
+                            <button
+                                className="lightbox-nav prev"
+                                type="button"
+                                aria-label="Previous"
+                                onClick={(event) => {
+                                    event.stopPropagation()
+                                    setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, -1))
+                                }}
+                            >
+                                ‹
+                            </button>
+                            <button
+                                className="lightbox-nav next"
+                                type="button"
+                                aria-label="Next"
+                                onClick={(event) => {
+                                    event.stopPropagation()
+                                    setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, 1))
+                                }}
+                            >
+                                ›
+                            </button>
+                        </>
+                    )}
                     <div className="lightbox-media" onClick={stopTileAction}>
-                        <div className="lightbox-stage">
-                            {lightbox.category === 'video' ? (
-                                <video
-                                    key={lightbox.messageId}
-                                    src={lightbox.mediaUrl}
-                                    controls
-                                    playsInline
-                                    preload="auto"
-                                />
-                            ) : (
-                                <img
-                                    key={lightbox.messageId}
-                                    src={lightbox.mediaUrl}
-                                    alt={lightbox.textContent || lightbox.category}
-                                />
-                            )}
+                        <div
+                            className={`lightbox-stage${isPdfFile(lightbox) ? ' is-embed' : ''}`}
+                        >
+                            <LightboxPreview item={lightbox} />
                         </div>
                     </div>
                     <div className="lightbox-info" onClick={stopTileAction}>
                         <strong>{lightbox.groupName}</strong>
                         <span className="lightbox-meta">{lightbox.senderName || 'Unknown sender'}</span>
                         <time className="lightbox-meta">{hkDateTime.format(lightbox.timestamp * 1000)}</time>
+                        {displayItems.length > 1 && (
+                            <span className="lightbox-meta">
+                                {lightboxIndex + 1} of {displayItems.length}
+                            </span>
+                        )}
                         {lightbox.textContent && <p className="lightbox-copy">{lightbox.textContent}</p>}
                         {lightbox.fileName && <span className="lightbox-meta">{lightbox.fileName}</span>}
                         <a
@@ -806,21 +913,11 @@ export default function AlbumView({
                             target="_blank"
                             rel="noreferrer"
                             download={lightbox.fileName || undefined}
+                            className="download-button"
                         >
+                            <DownloadIcon />
                             Download
                         </a>
-                        <button
-                            type="button"
-                            className={`lightbox-select ${selected.has(lightbox.messageId) ? 'is-selected' : ''}`}
-                            aria-label={
-                                selected.has(lightbox.messageId)
-                                    ? 'Remove from selection'
-                                    : 'Select this media'
-                            }
-                            onClick={() => toggleSelected(lightbox.messageId)}
-                        >
-                            <SelectGlyph selected={selected.has(lightbox.messageId)} />
-                        </button>
                     </div>
                 </div>,
                 document.body

@@ -367,8 +367,82 @@ function isAlbumVideo(item: { messageType: string }): boolean {
     return item.messageType === 'videoMessage' || item.messageType === 'ptvMessage'
 }
 
+function isPdfFile(item: { fileName: string | null }): boolean {
+    return fileExtensionLabel(item.fileName, '').toLowerCase() === 'pdf'
+}
+
 function mediaUrl(messageId: string): string {
     return `/api/media/${encodeURIComponent(messageId)}`
+}
+
+function DownloadIcon() {
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 4v12" />
+            <path d="m7 11 5 5 5-5" />
+            <path d="M5 20h14" />
+        </svg>
+    )
+}
+
+function LightboxStage({ item }: { item: Message }) {
+    const url = mediaUrl(item.messageId)
+    if (isAlbumVideo(item)) {
+        return (
+            <video
+                key={item.messageId}
+                src={url}
+                controls
+                playsInline
+                preload="auto"
+            />
+        )
+    }
+    if (item.messageType === 'imageMessage' || item.messageType === 'stickerMessage') {
+        return (
+            <img
+                key={item.messageId}
+                src={url}
+                alt={item.textContent || 'Shared media'}
+            />
+        )
+    }
+    if (item.messageType === 'audioMessage') {
+        return (
+            <div className="lightbox-file audio">
+                <span className="file-glyph">♪</span>
+                <strong>{item.fileName || 'Audio message'}</strong>
+                <audio key={item.messageId} src={url} controls preload="auto" />
+            </div>
+        )
+    }
+    if (isPdfFile(item)) {
+        return (
+            <iframe
+                key={item.messageId}
+                className="lightbox-pdf"
+                title={item.fileName || 'PDF document'}
+                src={url}
+            />
+        )
+    }
+    return (
+        <div className="lightbox-file">
+            <span className="file-glyph">{fileExtensionLabel(item.fileName, 'FILE')}</span>
+            <strong>{item.fileName || 'Shared document'}</strong>
+            <p>This file can't be previewed here.</p>
+            <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                download={item.fileName || undefined}
+                className="download-button"
+            >
+                <DownloadIcon />
+                Download
+            </a>
+        </div>
+    )
 }
 
 function MediaLightbox({
@@ -448,22 +522,8 @@ function MediaLightbox({
                 </>
             )}
             <div className="lightbox-media" onClick={(event) => event.stopPropagation()}>
-                <div className="lightbox-stage">
-                    {isAlbumVideo(item) ? (
-                        <video
-                            key={item.messageId}
-                            src={url}
-                            controls
-                            playsInline
-                            preload="auto"
-                        />
-                    ) : (
-                        <img
-                            key={item.messageId}
-                            src={url}
-                            alt={item.textContent || 'Shared media'}
-                        />
-                    )}
+                <div className={`lightbox-stage${isPdfFile(item) ? ' is-embed' : ''}`}>
+                    <LightboxStage item={item} />
                 </div>
             </div>
             <div className="lightbox-info" onClick={(event) => event.stopPropagation()}>
@@ -479,7 +539,14 @@ function MediaLightbox({
                 )}
                 {item.textContent && <p className="lightbox-copy">{item.textContent}</p>}
                 {item.fileName && <span className="lightbox-meta">{item.fileName}</span>}
-                <a href={url} target="_blank" rel="noreferrer" download={item.fileName || undefined}>
+                <a
+                    href={url}
+                    target="_blank"
+                    rel="noreferrer"
+                    download={item.fileName || undefined}
+                    className="download-button"
+                >
+                    <DownloadIcon />
                     Download
                 </a>
             </div>
@@ -493,7 +560,6 @@ function MediaPreview({ message }: { message: Message }) {
     if (!message.hasMedia) return null
     const url = mediaUrl(message.messageId)
     const type = message.messageType
-    const fileName = message.fileName || undefined
 
     if (type === 'imageMessage' || type === 'stickerMessage') {
         return (
@@ -546,14 +612,28 @@ function MediaPreview({ message }: { message: Message }) {
         return <audio className="audio-player" src={url} controls preload="metadata" />
     }
     return (
-        <a className="document-link" href={url} target="_blank" rel="noreferrer" download={fileName}>
-            <span className="document-icon">{fileExtensionLabel(message.fileName, 'PDF')}</span>
-            <span>
-                <strong>{message.fileName || 'Open document'}</strong>
-                <small>Shared attachment</small>
-            </span>
-            <span aria-hidden="true">↗</span>
-        </a>
+        <>
+            <button
+                type="button"
+                className="document-link"
+                onClick={() => setOpen(true)}
+                aria-label={isPdfFile(message) ? 'Open PDF' : 'Open document'}
+            >
+                <span className="document-icon">{fileExtensionLabel(message.fileName, 'FILE')}</span>
+                <span>
+                    <strong>{message.fileName || 'Open document'}</strong>
+                    <small>Shared attachment</small>
+                </span>
+            </button>
+            {open && (
+                <MediaLightbox
+                    items={[message]}
+                    index={0}
+                    onClose={() => setOpen(false)}
+                    onIndexChange={() => {}}
+                />
+            )}
+        </>
     )
 }
 

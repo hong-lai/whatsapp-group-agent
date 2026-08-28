@@ -1104,6 +1104,20 @@ h3 {
     font-weight: 700;
 }
 
+.album-file-open {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    cursor: pointer;
+}
+
 .album-file-card.audio {
     background: linear-gradient(145deg, #eef7f4, #dcece6);
 }
@@ -1234,7 +1248,7 @@ h3 {
     font-size: 0.65rem;
 }
 
-.selection-bar button {
+.selection-bar button:not(.download-button) {
     padding: 8px 12px;
     border: 0;
     border-radius: 9px;
@@ -1244,9 +1258,63 @@ h3 {
     font-weight: 700;
 }
 
-.selection-bar .download-button {
+.download-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 0 16px 0 13px;
+    border: 0;
+    border-radius: 999px;
     color: white;
-    background: var(--green);
+    background: linear-gradient(180deg, #1b9a80 0%, var(--green) 100%);
+    box-shadow: 0 8px 18px rgba(13, 102, 85, 0.28);
+    font: 700 0.78rem/1 'Manrope', sans-serif;
+    letter-spacing: 0.01em;
+    text-decoration: none;
+    transition: background 160ms var(--ease-out), transform 160ms var(--ease-out),
+        box-shadow 160ms var(--ease-out), filter 160ms var(--ease-out);
+}
+
+.download-button svg {
+    width: 1rem;
+    height: 1rem;
+    stroke-width: 2.1;
+}
+
+.download-button:hover {
+    transform: translateY(-1px);
+    filter: brightness(1.06);
+    box-shadow: 0 12px 24px rgba(13, 102, 85, 0.34);
+}
+
+.download-button:active {
+    transform: translateY(0);
+    filter: none;
+}
+
+.download-button:disabled {
+    cursor: wait;
+    opacity: 0.72;
+    transform: none;
+    filter: none;
+    box-shadow: none;
+}
+
+.lightbox-info .download-button {
+    width: 100%;
+    margin-top: 22px;
+}
+
+.lightbox-file .download-button {
+    margin-top: 6px;
+}
+
+.selection-bar .download-button {
+    min-height: 36px;
+    padding-inline: 14px 13px;
+    font-size: 0.72rem;
 }
 
 .selection-bar button:disabled {
@@ -1304,6 +1372,12 @@ h3 {
     inset: 48px 72px;
 }
 
+.lightbox-stage.is-embed {
+    inset: 0;
+    align-items: stretch;
+    justify-content: stretch;
+}
+
 .lightbox-stage img,
 .lightbox-stage video {
     max-width: 100%;
@@ -1314,6 +1388,46 @@ h3 {
     object-fit: contain;
     background: #000;
     animation: media-in 280ms var(--ease-out);
+}
+
+.lightbox-pdf {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    border: 0;
+    background: #fff;
+}
+
+.lightbox-file {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    max-width: min(420px, 100%);
+    padding: 36px 28px;
+    border-radius: 16px;
+    color: #f7faf9;
+    background: #12241f;
+    text-align: center;
+}
+
+.lightbox-file strong {
+    overflow-wrap: anywhere;
+    color: #ffffff;
+    font: 700 1rem 'Manrope', sans-serif;
+}
+
+.lightbox-file p {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.78);
+    font-size: 0.82rem;
+    line-height: 1.45;
+}
+
+.lightbox-file audio {
+    width: min(420px, 100%);
+    height: 40px;
 }
 
 .lightbox-info {
@@ -1356,8 +1470,8 @@ h3 {
     line-height: 1.5;
 }
 
-.lightbox-info button,
-.lightbox-info a {
+.lightbox-info button:not(.download-button),
+.lightbox-info a:not(.download-button) {
     display: inline-block;
     margin-top: 24px;
     padding: 9px 12px;
@@ -1368,29 +1482,6 @@ h3 {
     font-size: 0.7rem;
     font-weight: 700;
     text-decoration: none;
-}
-
-.lightbox-select {
-    width: 42px;
-    height: 42px;
-    display: grid;
-    place-items: center;
-    margin-top: 24px;
-    padding: 0;
-    border: 1px solid rgba(255, 255, 255, 0.24);
-    border-radius: 12px;
-    color: white;
-    background: rgba(255, 255, 255, 0.12);
-}
-
-.lightbox-select svg {
-    width: 1.2rem;
-    height: 1.2rem;
-}
-
-.lightbox-select.is-selected {
-    border-color: rgba(110, 214, 176, 0.7);
-    background: rgba(22, 134, 111, 0.55);
 }
 
 .lightbox-nav {
@@ -1948,6 +2039,13 @@ video.media-frame {
     color: #315c51;
     background: #f6faf8;
     text-decoration: none;
+}
+
+button.document-link {
+    width: min(360px, 100%);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
 }
 
 .document-link > span:nth-child(2) {
@@ -2776,13 +2874,16 @@ video.media-frame {
         inset: 56px 56px 16px;
     }
 
+    .lightbox-stage.is-embed {
+        inset: 0;
+    }
+
     .lightbox-info {
         padding: 16px;
     }
 
     .lightbox-info button,
-    .lightbox-info a,
-    .lightbox-select {
+    .lightbox-info a.download-button {
         margin-top: 12px;
     }
 }
