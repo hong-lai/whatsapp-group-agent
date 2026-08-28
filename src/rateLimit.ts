@@ -6,8 +6,14 @@ function jitter(minMs: number, maxMs: number): number {
     return minMs + Math.floor(Math.random() * (maxMs - minMs + 1))
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+export function retryBackoffMs(attempts: number, minMs: number, maxMs: number): number {
+    const shift = Math.max(0, attempts - 1)
+    const exp = Math.min(maxMs, minMs * 2 ** Math.min(shift, 10))
+    return jitter(minMs, Math.max(minMs, Math.floor(exp)))
 }
 
 export function createSerialQueue() {

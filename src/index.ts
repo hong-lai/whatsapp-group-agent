@@ -20,7 +20,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
-import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'fs'
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, unlinkSync } from 'fs'
 import { basename, extname, join } from 'path'
 import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
@@ -73,7 +73,7 @@ import {
     rememberMessageSecret,
     textFromMessage,
 } from './edits.js'
-import { createSerialQueue, waitMediaDownload } from './rateLimit.js'
+import { createSerialQueue, retryBackoffMs, sleep, waitMediaDownload } from './rateLimit.js'
 
 const fileTypes: Record<string, string> = {
     imageMessage: 'jpeg',
@@ -544,88 +544,213 @@ async function markDeletedAndRenameMedia(messageIds: string[]): Promise<void> {
     }
 }
 
+type MediaStoreMeta = {
+    messageId: string
+    groupJid: string
+    groupName: string
+    messageType: string
+    timestamp: number
+    isHistory: boolean
+    senderName: string
+    albumIndex: number | null
+}
+
+function mediaErrorText(err: unknown): string {
+    return err instanceof Error ? err.message : String(err)
+}
+
+function isTimeoutMediaError(err: unknown): boolean {
+    const error = mediaErrorText(err)
+    return error.includes('Connect Timeout') || error.includes('fetch failed')
+}
+
+function isRetryableMediaError(err: unknown): boolean {
+    const error = mediaErrorText(err)
+    return (
+        isTimeoutMediaError(err) ||
+        /ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ECONNRESET|ECONNREFUSED|UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|socket hang up/i.test(
+            error
+        )
+    )
+}
+
+function removePartialMedia(fileName: string): void {
+    if (!existsSync(fileName)) return
+    try {
+        unlinkSync(fileName)
+    } catch {
+        // ignore leftover partials
+    }
+}
+
+function mediaDestPath(m: WAMessage, meta: MediaStoreMeta, fallbackExt: string): string {
+    const { date: hktDate } = hktStamp(meta.timestamp)
+    const safeFolderName = safePathSegment(meta.groupName, meta.groupJid)
+    const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
+    if (!existsSync(folderPath)) {
+        mkdirSync(folderPath, { recursive: true })
+    }
+    const originalName = originalMediaName(
+        contentForIngest(m.message) || m.message,
+        fallbackExt
+    )
+    const filenameType = filenameTypeForMessage(meta.messageType)
+    const typePattern = filenameType
+        ? getFilenameFormatSettings()[filenameType]
+        : getFilenameFormatSettings().images
+    return uniqueMediaPath(
+        folderPath,
+        buildMediaFilename(typePattern, {
+            timestamp: meta.timestamp,
+            messageId: meta.messageId,
+            originalName,
+            groupName: meta.groupName,
+            mediaIndex: meta.albumIndex,
+            senderName: meta.senderName,
+            mediaPath: `media.${fallbackExt}`,
+        }),
+        existsSync
+    )
+}
+
+async function downloadMediaOnce(
+    m: WAMessage,
+    sock: WASocket,
+    fileName: string
+): Promise<void> {
+    await waitMediaDownload()
+    const stream = (await downloadMediaMessage(
+        messageForMediaDownload(m),
+        'stream',
+        {},
+        {
+            logger,
+            reuploadRequest: sock.updateMediaMessage,
+        }
+    )) as Readable
+    try {
+        await pipeline(stream, createWriteStream(fileName))
+    } catch (err) {
+        stream.destroy()
+        removePartialMedia(fileName)
+        throw err
+    }
+}
+
+function logMediaDownloadFailure(
+    err: unknown,
+    meta: MediaStoreMeta,
+    attempts: number
+): void {
+    if (meta.isHistory && isTimeoutMediaError(err)) {
+        log.debug(
+            {
+                messageId: meta.messageId,
+                groupJid: meta.groupJid,
+                groupName: meta.groupName,
+                messageType: meta.messageType,
+                attempts,
+            },
+            'media.history_unavailable'
+        )
+        return
+    }
+    log.warn(
+        {
+            err,
+            messageId: meta.messageId,
+            groupJid: meta.groupJid,
+            groupName: meta.groupName,
+            messageType: meta.messageType,
+            isHistory: meta.isHistory,
+            attempts,
+        },
+        'media.download_failed'
+    )
+}
+
+async function retryMediaDownload(
+    m: WAMessage,
+    sock: WASocket,
+    meta: MediaStoreMeta,
+    fileName: string,
+    firstErr: unknown
+): Promise<void> {
+    const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
+    let err = firstErr
+    for (let failedAttempt = 1; failedAttempt < maxAttempts; failedAttempt++) {
+        if (!isRetryableMediaError(err)) {
+            logMediaDownloadFailure(err, meta, failedAttempt)
+            return
+        }
+        const nextAttempt = failedAttempt + 1
+        const delayMs = retryBackoffMs(failedAttempt, config.mediaRetryMinMs, config.mediaRetryMaxMs)
+        log.warn(
+            {
+                err,
+                messageId: meta.messageId,
+                groupJid: meta.groupJid,
+                groupName: meta.groupName,
+                messageType: meta.messageType,
+                isHistory: meta.isHistory,
+                attempt: failedAttempt,
+                nextAttempt,
+                maxAttempts,
+                delayMs,
+            },
+            'media.download_retry'
+        )
+        await sleep(delayMs)
+        try {
+            await downloadMediaOnce(m, sock, fileName)
+            const storedPath = await persistMediaPath(meta.messageId, fileName)
+            log.info(
+                {
+                    messageId: meta.messageId,
+                    groupJid: meta.groupJid,
+                    groupName: meta.groupName,
+                    attempt: nextAttempt,
+                    maxAttempts,
+                    fileName: storedPath,
+                },
+                'media.download_recovered'
+            )
+            return
+        } catch (nextErr) {
+            err = nextErr
+        }
+    }
+    logMediaDownloadFailure(err, meta, maxAttempts)
+}
+
 async function storeMediaFile(
     m: WAMessage,
     sock: WASocket,
-    {
-        messageId,
-        groupJid,
-        groupName,
-        messageType,
-        timestamp,
-        isHistory,
-        senderName,
-        albumIndex,
-    }: {
-        messageId: string
-        groupJid: string
-        groupName: string
-        messageType: string
-        timestamp: number
-        isHistory: boolean
-        senderName: string
-        albumIndex: number | null
-    }
+    meta: MediaStoreMeta
 ): Promise<string | null> {
-    const fallbackExt = fileTypes[messageType]
+    const fallbackExt = fileTypes[meta.messageType]
     if (!fallbackExt) return null
     if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
+    const fileName = mediaDestPath(m, meta, fallbackExt)
     try {
-        await waitMediaDownload()
-        const stream = await downloadMediaMessage(
-            messageForMediaDownload(m),
-            'stream',
-            {},
-            {
-                logger,
-                reuploadRequest: sock.updateMediaMessage,
-            }
-        )
-        const { date: hktDate } = hktStamp(timestamp)
-        const safeFolderName = safePathSegment(groupName, groupJid)
-        const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
-
-        if (!existsSync(folderPath)) {
-            mkdirSync(folderPath, { recursive: true })
-        }
-
-        const originalName = originalMediaName(
-            contentForIngest(m.message) || m.message,
-            fallbackExt
-        )
-        const filenameType = filenameTypeForMessage(messageType)
-        const typePattern = filenameType
-            ? getFilenameFormatSettings()[filenameType]
-            : getFilenameFormatSettings().images
-        const fileName = uniqueMediaPath(
-            folderPath,
-            buildMediaFilename(typePattern, {
-                timestamp,
-                messageId,
-                originalName,
-                groupName,
-                mediaIndex: albumIndex,
-                senderName,
-                mediaPath: `media.${fallbackExt}`,
-            }),
-            existsSync
-        )
-        await pipeline(stream as Readable, createWriteStream(fileName))
-        return persistMediaPath(messageId, fileName)
+        await downloadMediaOnce(m, sock, fileName)
+        return persistMediaPath(meta.messageId, fileName)
     } catch (err) {
-        const timeout =
-            String(err).includes('Connect Timeout') || String(err).includes('fetch failed')
-        if (isHistory && timeout) {
-            log.debug(
-                { messageId, groupJid, groupName, messageType },
-                'media.history_unavailable'
-            )
+        const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
+        if (isRetryableMediaError(err) && maxAttempts > 1) {
+            void retryMediaDownload(m, sock, meta, fileName, err).catch((retryErr) => {
+                log.warn(
+                    {
+                        err: retryErr,
+                        messageId: meta.messageId,
+                        groupJid: meta.groupJid,
+                    },
+                    'media.retry_loop_failed'
+                )
+            })
             return null
         }
-        log.warn(
-            { err, messageId, groupJid, groupName, messageType, isHistory },
-            'media.download_failed'
-        )
+        logMediaDownloadFailure(err, meta, 1)
         return null
     }
 }
