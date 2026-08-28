@@ -20,7 +20,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import qrcode from 'qrcode-terminal'
-import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync } from 'fs'
+import { createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'fs'
 import { basename, extname, join } from 'path'
 import { pipeline } from 'stream/promises'
 import type { Readable } from 'stream'
@@ -37,7 +37,7 @@ import {
     loadFilenameFormatSettings,
     uniqueMediaPath,
 } from './filenameFormat.js'
-import { hktStamp, safePathSegment } from './hkt.js'
+import { firstAvailableName, hktStamp, safePathSegment, withDeletedSuffix } from './hkt.js'
 import { log } from './log.js'
 import {
     deleteGroupMetadata,
@@ -500,6 +500,50 @@ function mentionedJidsOf(content: proto.IMessage | null | undefined): string[] {
     return out
 }
 
+function suffixDeletedMediaFile(currentPath: string): string | null {
+    const preferred = withDeletedSuffix(currentPath)
+    if (preferred === currentPath) {
+        return existsSync(currentPath) ? currentPath : null
+    }
+    if (existsSync(currentPath)) {
+        const dest = firstAvailableName(preferred, existsSync)
+        try {
+            renameSync(currentPath, dest)
+            return dest
+        } catch (err) {
+            log.warn({ err, from: currentPath, to: dest }, 'media.delete_rename_failed')
+            if (existsSync(currentPath)) return currentPath
+            if (existsSync(preferred)) return preferred
+            return null
+        }
+    }
+    return existsSync(preferred) ? preferred : null
+}
+
+async function persistMediaPath(messageId: string, filePath: string): Promise<string> {
+    const isDeleted = await updateMessageMediaPath(messageId, filePath)
+    if (!isDeleted) return filePath
+    const deletedPath = suffixDeletedMediaFile(filePath)
+    if (!deletedPath || deletedPath === filePath) return filePath
+    await updateMessageMediaPath(messageId, deletedPath)
+    log.info({ messageId, from: filePath, to: deletedPath }, 'media.deleted_renamed')
+    return deletedPath
+}
+
+async function markDeletedAndRenameMedia(messageIds: string[]): Promise<void> {
+    const rows = await markMessagesDeleted(messageIds)
+    for (const row of rows) {
+        if (!row.mediaPath) continue
+        const deletedPath = suffixDeletedMediaFile(row.mediaPath)
+        if (!deletedPath || deletedPath === row.mediaPath) continue
+        await updateMessageMediaPath(row.messageId, deletedPath)
+        log.info(
+            { messageId: row.messageId, from: row.mediaPath, to: deletedPath },
+            'media.deleted_renamed'
+        )
+    }
+}
+
 async function storeMediaFile(
     m: WAMessage,
     sock: WASocket,
@@ -567,8 +611,7 @@ async function storeMediaFile(
             existsSync
         )
         await pipeline(stream as Readable, createWriteStream(fileName))
-        await updateMessageMediaPath(messageId, fileName)
-        return fileName
+        return persistMediaPath(messageId, fileName)
     } catch (err) {
         const timeout =
             String(err).includes('Connect Timeout') || String(err).includes('fetch failed')
@@ -1058,7 +1101,7 @@ async function connectToWhatsApp() {
                 }
             }
             if (deletedIds.length > 0) {
-                await markMessagesDeleted(deletedIds)
+                await markDeletedAndRenameMedia(deletedIds)
                 log.info({ count: deletedIds.length, messageIds: deletedIds }, 'messages.deleted')
             }
         }
@@ -1067,7 +1110,7 @@ async function connectToWhatsApp() {
         if (deleted) {
             if ('keys' in deleted) {
                 const ids = deleted.keys.map((k) => k.id).filter((id): id is string => Boolean(id))
-                await markMessagesDeleted(ids)
+                await markDeletedAndRenameMedia(ids)
                 log.info({ count: ids.length, messageIds: ids }, 'messages.deleted')
             } else {
                 log.warn({ groupJid: deleted.jid }, 'messages.deleted_all')

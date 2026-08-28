@@ -47,6 +47,18 @@ export function fileStem(name: string, fallback: string): string {
     return safePathSegment(stem, fallback)
 }
 
+export const DELETED_FILENAME_SUFFIX = '_deleted'
+
+export function withDeletedSuffix(filePath: string): string {
+    const slash = filePath.lastIndexOf('/')
+    const dir = slash >= 0 ? filePath.slice(0, slash + 1) : ''
+    const name = slash >= 0 ? filePath.slice(slash + 1) : filePath
+    const extension = extname(name)
+    const stem = extension ? name.slice(0, -extension.length) : name
+    if (!stem || stem.endsWith(DELETED_FILENAME_SUFFIX)) return filePath
+    return `${dir}${stem}${DELETED_FILENAME_SUFFIX}${extension}`
+}
+
 export function firstAvailableName(
     preferred: string,
     taken: (candidate: string) => boolean

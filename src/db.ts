@@ -453,8 +453,12 @@ export async function updateAlbumLink(
     )
 }
 
-export async function updateMessageMediaPath(messageId: string, mediaPath: string): Promise<void> {
-    await pool.query('UPDATE messages SET media_path = $1 WHERE message_id = $2', [mediaPath, messageId])
+export async function updateMessageMediaPath(messageId: string, mediaPath: string): Promise<boolean> {
+    const result = await pool.query<{ is_deleted: boolean }>(
+        'UPDATE messages SET media_path = $1 WHERE message_id = $2 RETURNING is_deleted',
+        [mediaPath, messageId]
+    )
+    return Boolean(result.rows[0]?.is_deleted)
 }
 
 export async function hasMessage(messageId: string): Promise<boolean> {
@@ -651,12 +655,20 @@ export async function markMessageEdited(messageId: string, textContent: string):
     return (result.rowCount ?? 0) > 0
 }
 
-export async function markMessagesDeleted(messageIds: string[]): Promise<void> {
-    if (messageIds.length === 0) return
-    await pool.query(
-        'UPDATE messages SET is_deleted = TRUE WHERE message_id = ANY($1::text[])',
+export async function markMessagesDeleted(
+    messageIds: string[]
+): Promise<Array<{ messageId: string; mediaPath: string | null }>> {
+    if (messageIds.length === 0) return []
+    const result = await pool.query<{ message_id: string; media_path: string | null }>(
+        `UPDATE messages SET is_deleted = TRUE
+         WHERE message_id = ANY($1::text[])
+         RETURNING message_id, media_path`,
         [messageIds]
     )
+    return result.rows.map((row) => ({
+        messageId: row.message_id,
+        mediaPath: row.media_path,
+    }))
 }
 
 async function matchingGroupJids(): Promise<string[]> {
