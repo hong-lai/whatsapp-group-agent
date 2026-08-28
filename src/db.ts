@@ -151,10 +151,28 @@ async function migrateMessagesTimestamp(): Promise<void> {
     log.info('db.messages_timestamp_migrated')
 }
 
-// History sync often strips messageAssociation. Group only within this window, and
-// never across another album from the same sender. Live children carry parentMessageKey.
-const ALBUM_ASSOCIATION_WINDOW_SECONDS = 300
+// History sync often strips messageAssociation. Group only within a short burst of
+// the album itself, and never across another album from the same sender. Live
+// children carry parentMessageKey; do not absorb a later standalone photo just
+// because it arrived a few minutes after an album.
+const ALBUM_BURST_GAP_SECONDS = 2
+const ALBUM_ASSOCIATION_WINDOW_SECONDS = 30
 const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage'] as const
+const ALBUM_PARENTS_BACKFILL_KEY = 'album_parents_backfilled'
+const ALBUM_BURST_UNLINK_KEY = 'album_burst_unlinked_v1'
+
+type AlbumCandidate = {
+    messageId: string
+    messageType: string
+    timestamp: number
+}
+
+type AlbumMeta = {
+    messageId: string
+    timestamp: number
+    expectedImages: number | null
+    expectedVideos: number | null
+}
 
 async function migrateForwarded(): Promise<void> {
     await pool.query(
@@ -169,36 +187,265 @@ async function migrateQuotedMessageType(): Promise<void> {
 async function migrateAlbumParents(): Promise<void> {
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_parent_id TEXT`)
     await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_index INTEGER`)
+    await pool.query(
+        `ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_expected_images INTEGER`
+    )
+    await pool.query(
+        `ALTER TABLE messages ADD COLUMN IF NOT EXISTS album_expected_videos INTEGER`
+    )
 
-    const albums = await pool.query<{
+    if (!(await getAppSetting(ALBUM_PARENTS_BACKFILL_KEY))) {
+        const linked = await pool.query(
+            `SELECT 1 FROM messages WHERE album_parent_id IS NOT NULL LIMIT 1`
+        )
+        if ((linked.rowCount ?? 0) > 0) {
+            await setAppSetting(ALBUM_PARENTS_BACKFILL_KEY, true)
+        } else {
+            const albums = await pool.query<{
+                message_id: string
+                group_jid: string
+                sender_jid: string | null
+                timestamp: string
+                album_expected_images: number | null
+                album_expected_videos: number | null
+            }>(
+                `SELECT
+                    message_id,
+                    group_jid,
+                    sender_jid,
+                    EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp,
+                    album_expected_images,
+                    album_expected_videos
+                 FROM messages
+                 WHERE message_type = 'albumMessage' AND timestamp IS NOT NULL
+                 ORDER BY timestamp ASC, message_id ASC`
+            )
+
+            let attached = 0
+            for (const album of albums.rows) {
+                attached += await attachNearbyAlbumMedia({
+                    parentId: album.message_id,
+                    groupJid: album.group_jid,
+                    senderJid: album.sender_jid,
+                    timestamp: Number(album.timestamp),
+                    expectedImages: album.album_expected_images,
+                    expectedVideos: album.album_expected_videos,
+                })
+            }
+            if (attached > 0) {
+                log.info({ albums: albums.rowCount, attached }, 'db.album_parents_backfilled')
+            }
+            await setAppSetting(ALBUM_PARENTS_BACKFILL_KEY, true)
+        }
+        await fillMissingAlbumIndexes()
+    }
+
+    if (!(await getAppSetting(ALBUM_BURST_UNLINK_KEY))) {
+        const unlinked = await unlinkAlbumMediaOutsideBurst()
+        await setAppSetting(ALBUM_BURST_UNLINK_KEY, { count: unlinked, at: Date.now() })
+        if (unlinked > 0) {
+            log.info({ unlinked }, 'db.album_burst_unlinked')
+        }
+    }
+}
+
+function asEpochSeconds(value: string | number | null | undefined): number {
+    return Number(value)
+}
+
+function albumBurst(
+    items: AlbumCandidate[],
+    centerTs: number,
+    gapSeconds = ALBUM_BURST_GAP_SECONDS
+): AlbumCandidate[] {
+    if (items.length === 0) return []
+    const kept = new Set<string>()
+    for (const item of items) {
+        if (Math.abs(item.timestamp - centerTs) <= gapSeconds) kept.add(item.messageId)
+    }
+    if (kept.size === 0) return []
+    let changed = true
+    while (changed) {
+        changed = false
+        for (const item of items) {
+            if (kept.has(item.messageId)) continue
+            for (const other of items) {
+                if (!kept.has(other.messageId)) continue
+                if (Math.abs(item.timestamp - other.timestamp) <= gapSeconds) {
+                    kept.add(item.messageId)
+                    changed = true
+                    break
+                }
+            }
+        }
+    }
+    return items.filter((item) => kept.has(item.messageId))
+}
+
+function expectedKnown(album: Pick<AlbumMeta, 'expectedImages' | 'expectedVideos'>): boolean {
+    return album.expectedImages != null || album.expectedVideos != null
+}
+
+function albumSlotsRemaining(
+    album: Pick<AlbumMeta, 'expectedImages' | 'expectedVideos'>,
+    children: AlbumCandidate[],
+    messageType: string
+): boolean {
+    if (!expectedKnown(album)) return true
+    const images = children.filter((child) => child.messageType === 'imageMessage').length
+    const videos = children.filter((child) => child.messageType === 'videoMessage').length
+    const imageLimit = album.expectedImages ?? 0
+    const videoLimit = album.expectedVideos ?? 0
+    if (messageType === 'videoMessage') return videos < videoLimit
+    return images < imageLimit
+}
+
+function pickAlbumMembers(
+    burst: AlbumCandidate[],
+    album: AlbumMeta
+): AlbumCandidate[] {
+    const byDistance = [...burst].sort((left, right) => {
+        const delta =
+            Math.abs(left.timestamp - album.timestamp) - Math.abs(right.timestamp - album.timestamp)
+        if (delta !== 0) return delta
+        return left.messageId.localeCompare(right.messageId)
+    })
+    if (!expectedKnown(album)) return byDistance
+    const imageLimit = album.expectedImages ?? 0
+    const videoLimit = album.expectedVideos ?? 0
+    const picked: AlbumCandidate[] = []
+    let images = 0
+    let videos = 0
+    for (const item of byDistance) {
+        const isVideo = item.messageType === 'videoMessage'
+        if (isVideo) {
+            if (videos >= videoLimit) continue
+            videos += 1
+        } else {
+            if (images >= imageLimit) continue
+            images += 1
+        }
+        picked.push(item)
+    }
+    return picked
+}
+
+function mediaFitsAlbum(
+    album: AlbumMeta,
+    children: AlbumCandidate[],
+    candidate: AlbumCandidate
+): boolean {
+    if (!albumSlotsRemaining(album, children, candidate.messageType)) return false
+    const burst = albumBurst([...children, candidate], album.timestamp)
+    if (!burst.some((item) => item.messageId === candidate.messageId)) return false
+    if (!expectedKnown(album)) return true
+    return pickAlbumMembers(burst, album).some((item) => item.messageId === candidate.messageId)
+}
+
+async function loadAlbumMeta(parentId: string): Promise<AlbumMeta | null> {
+    const result = await pool.query<{
         message_id: string
-        group_jid: string
-        sender_jid: string | null
+        timestamp: string
+        album_expected_images: number | null
+        album_expected_videos: number | null
+    }>(
+        `SELECT
+            message_id,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp,
+            album_expected_images,
+            album_expected_videos
+         FROM messages
+         WHERE message_id = $1 AND message_type = 'albumMessage'`,
+        [parentId]
+    )
+    const row = result.rows[0]
+    if (!row || !Number.isFinite(asEpochSeconds(row.timestamp))) return null
+    return {
+        messageId: row.message_id,
+        timestamp: asEpochSeconds(row.timestamp),
+        expectedImages: row.album_expected_images,
+        expectedVideos: row.album_expected_videos,
+    }
+}
+
+async function loadAlbumChildren(parentId: string): Promise<AlbumCandidate[]> {
+    const result = await pool.query<{
+        message_id: string
+        message_type: string
         timestamp: string
     }>(
         `SELECT
             message_id,
-            group_jid,
-            sender_jid,
+            message_type,
             EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
          FROM messages
-         WHERE message_type = 'albumMessage' AND timestamp IS NOT NULL
-         ORDER BY timestamp ASC, message_id ASC`
+         WHERE album_parent_id = $1`,
+        [parentId]
     )
+    return result.rows
+        .filter((row) => Number.isFinite(asEpochSeconds(row.timestamp)))
+        .map((row) => ({
+            messageId: row.message_id,
+            messageType: row.message_type,
+            timestamp: asEpochSeconds(row.timestamp),
+        }))
+}
 
-    let attached = 0
-    for (const album of albums.rows) {
-        attached += await attachNearbyAlbumMedia({
-            parentId: album.message_id,
-            groupJid: album.group_jid,
-            senderJid: album.sender_jid,
-            timestamp: Number(album.timestamp),
-        })
-    }
-    if (attached > 0) {
-        log.info({ albums: albums.rowCount, attached }, 'db.album_parents_backfilled')
-    }
-    await fillMissingAlbumIndexes()
+async function clearAlbumLinks(messageIds: string[]): Promise<number> {
+    if (messageIds.length === 0) return 0
+    const result = await pool.query(
+        `UPDATE messages
+         SET album_parent_id = NULL, album_index = NULL
+         WHERE message_id = ANY($1::text[])`,
+        [messageIds]
+    )
+    return result.rowCount ?? 0
+}
+
+export async function clearAlbumLink(messageId: string): Promise<void> {
+    await clearAlbumLinks([messageId])
+}
+
+async function unlinkAlbumMediaOutsideBurst(): Promise<number> {
+    const result = await pool.query<{ message_id: string }>(
+        `WITH RECURSIVE burst AS (
+            SELECT
+                child.message_id,
+                child.timestamp,
+                child.album_parent_id
+            FROM messages child
+            JOIN messages parent ON parent.message_id = child.album_parent_id
+            WHERE parent.message_type = 'albumMessage'
+              AND child.album_parent_id IS NOT NULL
+              AND child.timestamp IS NOT NULL
+              AND parent.timestamp IS NOT NULL
+              AND ABS(EXTRACT(EPOCH FROM child.timestamp) - EXTRACT(EPOCH FROM parent.timestamp))
+                  <= $1
+            UNION
+            SELECT
+                sibling.message_id,
+                sibling.timestamp,
+                sibling.album_parent_id
+            FROM messages sibling
+            JOIN burst ON burst.album_parent_id = sibling.album_parent_id
+            WHERE sibling.timestamp IS NOT NULL
+              AND ABS(EXTRACT(EPOCH FROM sibling.timestamp) - EXTRACT(EPOCH FROM burst.timestamp))
+                  <= $1
+         )
+         UPDATE messages
+         SET album_parent_id = NULL, album_index = NULL
+         WHERE album_parent_id IS NOT NULL
+           AND message_id NOT IN (SELECT message_id FROM burst)
+           AND EXISTS (
+                SELECT 1
+                FROM messages parent
+                WHERE parent.message_id = messages.album_parent_id
+                  AND parent.message_type = 'albumMessage'
+           )
+         RETURNING message_id`,
+        [ALBUM_BURST_GAP_SECONDS]
+    )
+    return result.rowCount ?? 0
 }
 
 export async function attachNearbyAlbumMedia(row: {
@@ -206,11 +453,28 @@ export async function attachNearbyAlbumMedia(row: {
     groupJid: string
     senderJid: string | null
     timestamp: number
+    expectedImages?: number | null
+    expectedVideos?: number | null
 }): Promise<number> {
+    const album: AlbumMeta = {
+        messageId: row.parentId,
+        timestamp: row.timestamp,
+        expectedImages: row.expectedImages ?? null,
+        expectedVideos: row.expectedVideos ?? null,
+    }
     const windowStart = row.timestamp - ALBUM_ASSOCIATION_WINDOW_SECONDS
     const windowEnd = row.timestamp + ALBUM_ASSOCIATION_WINDOW_SECONDS
-    const result = await pool.query(
-        `UPDATE messages SET album_parent_id = $1
+    const existing = await loadAlbumChildren(row.parentId)
+    const candidates = await pool.query<{
+        message_id: string
+        message_type: string
+        timestamp: string
+    }>(
+        `SELECT
+            message_id,
+            message_type,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
          WHERE group_jid = $2
            AND sender_jid IS NOT DISTINCT FROM $3
            AND message_id <> $1
@@ -266,9 +530,96 @@ export async function attachNearbyAlbumMedia(row: {
             windowEnd,
         ]
     )
-    const attached = result.rowCount ?? 0
+    const nearby = candidates.rows
+        .filter((item) => Number.isFinite(asEpochSeconds(item.timestamp)))
+        .map((item) => ({
+            messageId: item.message_id,
+            messageType: item.message_type,
+            timestamp: asEpochSeconds(item.timestamp),
+        }))
+    const burst = albumBurst([...existing, ...nearby], album.timestamp)
+    const keep = new Set(pickAlbumMembers(burst, album).map((item) => item.messageId))
+    const attachIds = nearby
+        .filter((item) => keep.has(item.messageId))
+        .map((item) => item.messageId)
+    const dropIds = existing
+        .filter((item) => !keep.has(item.messageId))
+        .map((item) => item.messageId)
+
+    let attached = 0
+    if (attachIds.length > 0) {
+        const result = await pool.query(
+            `UPDATE messages SET album_parent_id = $1
+             WHERE message_id = ANY($2::text[]) AND album_parent_id IS NULL`,
+            [row.parentId, attachIds]
+        )
+        attached = result.rowCount ?? 0
+    }
+    if (dropIds.length > 0) await clearAlbumLinks(dropIds)
     if (attached > 0) await fillMissingAlbumIndexes(row.parentId)
     return attached
+}
+
+export async function resolveAlbumParent(params: {
+    groupJid: string
+    senderJid: string | null
+    timestamp: number
+    messageType: string
+    explicitParentId: string | null
+    isHistory: boolean
+}): Promise<string | null> {
+    const candidate: AlbumCandidate = {
+        messageId: '__candidate__',
+        messageType: params.messageType,
+        timestamp: params.timestamp,
+    }
+    if (params.explicitParentId) {
+        const album = await loadAlbumMeta(params.explicitParentId)
+        if (!album) return params.explicitParentId
+        const children = await loadAlbumChildren(params.explicitParentId)
+        return mediaFitsAlbum(album, children, candidate) ? params.explicitParentId : null
+    }
+    if (!params.isHistory) return null
+    if (
+        params.messageType !== 'imageMessage' &&
+        params.messageType !== 'videoMessage'
+    ) {
+        return null
+    }
+
+    const windowStart = params.timestamp - ALBUM_ASSOCIATION_WINDOW_SECONDS
+    const windowEnd = params.timestamp + ALBUM_ASSOCIATION_WINDOW_SECONDS
+    const albums = await pool.query<{
+        message_id: string
+        timestamp: string
+        album_expected_images: number | null
+        album_expected_videos: number | null
+    }>(
+        `SELECT
+            message_id,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp,
+            album_expected_images,
+            album_expected_videos
+         FROM messages
+         WHERE group_jid = $1
+           AND sender_jid IS NOT DISTINCT FROM $2
+           AND message_type = 'albumMessage'
+           AND timestamp BETWEEN to_timestamp($3) AND to_timestamp($4)
+         ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - $5::double precision) ASC, message_id DESC`,
+        [params.groupJid, params.senderJid, windowStart, windowEnd, params.timestamp]
+    )
+    for (const row of albums.rows) {
+        if (!Number.isFinite(asEpochSeconds(row.timestamp))) continue
+        const album: AlbumMeta = {
+            messageId: row.message_id,
+            timestamp: asEpochSeconds(row.timestamp),
+            expectedImages: row.album_expected_images,
+            expectedVideos: row.album_expected_videos,
+        }
+        const children = await loadAlbumChildren(album.messageId)
+        if (mediaFitsAlbum(album, children, candidate)) return album.messageId
+    }
+    return null
 }
 
 export async function nextAlbumIndex(parentId: string): Promise<number> {
@@ -313,27 +664,6 @@ async function fillMissingAlbumIndexes(parentId?: string): Promise<void> {
          WHERE messages.message_id = ranked.message_id`,
         [parentId ?? null]
     )
-}
-
-export async function findRecentAlbumParent(
-    groupJid: string,
-    senderJid: string | null,
-    timestamp: number
-): Promise<string | null> {
-    const windowStart = timestamp - ALBUM_ASSOCIATION_WINDOW_SECONDS
-    const windowEnd = timestamp + ALBUM_ASSOCIATION_WINDOW_SECONDS
-    const result = await pool.query<{ message_id: string }>(
-        `SELECT message_id
-         FROM messages
-         WHERE group_jid = $1
-           AND sender_jid IS NOT DISTINCT FROM $2
-           AND message_type = 'albumMessage'
-           AND timestamp BETWEEN to_timestamp($3) AND to_timestamp($4)
-         ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - $5::double precision) ASC, message_id DESC
-         LIMIT 1`,
-        [groupJid, senderJid, windowStart, windowEnd, timestamp]
-    )
-    return result.rows[0]?.message_id ?? null
 }
 
 function isPersonJid(jid: string): boolean {
@@ -416,6 +746,8 @@ export type MessageRow = {
     quotedMessage: string | null
     albumParentId: string | null
     albumIndex: number | null
+    albumExpectedImages?: number | null
+    albumExpectedVideos?: number | null
     timestamp: number
     isEdited: boolean
     isHistory: boolean
@@ -427,12 +759,22 @@ export async function insertMessage(row: MessageRow): Promise<void> {
         `INSERT INTO messages (
             message_id, group_jid, sender_jid, message_secret, message_type,
             text_content, media_path, reply_to_id, quoted_message, album_parent_id,
-            album_index, timestamp, is_edited, is_deleted, is_history, is_forwarded
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, to_timestamp($12), $13, FALSE, $14, $15)
+            album_index, album_expected_images, album_expected_videos,
+            timestamp, is_edited, is_deleted, is_history, is_forwarded
+         ) VALUES (
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
+            to_timestamp($14), $15, FALSE, $16, $17
+         )
          ON CONFLICT (message_id) DO UPDATE SET
             message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret),
             album_parent_id = COALESCE(EXCLUDED.album_parent_id, messages.album_parent_id),
             album_index = COALESCE(EXCLUDED.album_index, messages.album_index),
+            album_expected_images = COALESCE(
+                EXCLUDED.album_expected_images, messages.album_expected_images
+            ),
+            album_expected_videos = COALESCE(
+                EXCLUDED.album_expected_videos, messages.album_expected_videos
+            ),
             quoted_message = COALESCE(NULLIF(BTRIM(messages.quoted_message), ''), EXCLUDED.quoted_message),
             reply_to_id = COALESCE(messages.reply_to_id, EXCLUDED.reply_to_id),
             is_forwarded = messages.is_forwarded OR EXCLUDED.is_forwarded`,
@@ -448,6 +790,8 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.quotedMessage,
             row.albumParentId,
             row.albumIndex,
+            row.albumExpectedImages ?? null,
+            row.albumExpectedVideos ?? null,
             row.timestamp,
             row.isEdited,
             row.isHistory,
@@ -1040,11 +1384,11 @@ export async function listDashboardMessages(
          WHERE m.group_jid = $1
            AND m.timestamp >= to_timestamp($2)
            AND m.timestamp < to_timestamp($3)
-           AND (
-                m.album_parent_id IS NULL
-                OR NOT EXISTS (
-                    SELECT 1 FROM messages parent WHERE parent.message_id = m.album_parent_id
-                )
+           AND NOT EXISTS (
+                SELECT 1
+                FROM messages parent
+                WHERE parent.message_id = m.album_parent_id
+                  AND parent.is_deleted = FALSE
            )
            AND (
                 $4::bigint IS NULL
@@ -1068,6 +1412,12 @@ export async function listDashboardMessages(
     const last = pageRows.at(-1)
     const albumIds = pageRows
         .filter((row) => row.message_type === 'albumMessage')
+        .map((row) => row.message_id)
+    const liveAlbumIds = pageRows
+        .filter((row) => row.message_type === 'albumMessage' && !row.is_deleted)
+        .map((row) => row.message_id)
+    const deletedAlbumIds = pageRows
+        .filter((row) => row.message_type === 'albumMessage' && row.is_deleted)
         .map((row) => row.message_id)
 
     const childrenByParent = new Map<string, DashboardMessageRow[]>()
@@ -1095,8 +1445,9 @@ export async function listDashboardMessages(
              FROM messages m
              LEFT JOIN senders s ON s.jid = m.sender_jid
              WHERE m.album_parent_id = ANY($1::text[])
+                OR (m.album_parent_id = ANY($2::text[]) AND m.is_deleted)
              ORDER BY m.album_index ASC NULLS LAST, m.timestamp ASC, m.message_id ASC`,
-            [albumIds]
+            [liveAlbumIds, deletedAlbumIds]
         )
         for (const child of children.rows) {
             const items = childrenByParent.get(child.album_parent_id) ?? []

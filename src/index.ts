@@ -55,8 +55,9 @@ import {
     markMessagesDeleted,
     removeReaction,
     attachNearbyAlbumMedia,
-    findRecentAlbumParent,
+    resolveAlbumParent,
     nextAlbumIndex,
+    clearAlbumLink,
     updateAlbumLink,
     updateMessageMediaPath,
     upsertGroup,
@@ -432,6 +433,19 @@ function albumAssociationOf(
         }
     }
     return { parentId: null, index: null }
+}
+
+function albumExpectedOf(
+    content: proto.IMessage | null | undefined
+): { images: number | null; videos: number | null } {
+    const album = content?.albumMessage
+    if (!album) return { images: null, videos: null }
+    const images = asAlbumIndex(album.expectedImageCount)
+    const videos = asAlbumIndex(album.expectedVideoCount)
+    return {
+        images: images != null && images >= 0 ? images : null,
+        videos: videos != null && videos >= 0 ? videos : null,
+    }
 }
 
 function contentForIngest(message: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
@@ -847,7 +861,21 @@ async function processMessage(
     if (messageId && (await hasMessage(messageId))) {
         await rememberMessageSecret(messageId, messageSecret)
         const association = albumAssociationOf(m.message, content)
-        if (association.parentId || association.index != null) {
+        if (messageType === 'imageMessage' || messageType === 'videoMessage') {
+            const albumParentId = await resolveAlbumParent({
+                groupJid: jid,
+                senderJid: senderId || null,
+                timestamp,
+                messageType,
+                explicitParentId: association.parentId,
+                isHistory,
+            })
+            if (albumParentId) {
+                await updateAlbumLink(messageId, albumParentId, association.index)
+            } else {
+                await clearAlbumLink(messageId)
+            }
+        } else if (association.parentId || association.index != null) {
             await updateAlbumLink(messageId, association.parentId, association.index)
         }
         if (isForwarded) await markMessageForwarded(messageId)
@@ -939,13 +967,19 @@ async function processMessage(
         null
 
     const association = albumAssociationOf(m.message, content)
+    const expected = albumExpectedOf(content)
     let albumParentId = association.parentId
     let albumIndex = association.index
-    if (
-        !albumParentId &&
-        (messageType === 'imageMessage' || messageType === 'videoMessage')
-    ) {
-        albumParentId = await findRecentAlbumParent(jid, senderId || null, timestamp)
+    if (messageType === 'imageMessage' || messageType === 'videoMessage') {
+        albumParentId = await resolveAlbumParent({
+            groupJid: jid,
+            senderJid: senderId || null,
+            timestamp,
+            messageType,
+            explicitParentId: association.parentId,
+            isHistory,
+        })
+        if (!albumParentId) albumIndex = null
     }
     if (
         albumParentId &&
@@ -984,6 +1018,8 @@ async function processMessage(
             quotedMessage,
             albumParentId,
             albumIndex,
+            albumExpectedImages: expected.images,
+            albumExpectedVideos: expected.videos,
             timestamp,
             isEdited: alreadyEdited,
             isHistory,
@@ -997,6 +1033,8 @@ async function processMessage(
                     groupJid: jid,
                     senderJid: senderId || null,
                     timestamp,
+                    expectedImages: expected.images,
+                    expectedVideos: expected.videos,
                 })
             } catch (err) {
                 log.warn(
