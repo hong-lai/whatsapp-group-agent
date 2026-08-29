@@ -321,13 +321,14 @@ function ConnectionStatus({
             <button
                 type="button"
                 className={`connection-toggle is-${state}`}
+                aria-label={label}
                 aria-expanded={open}
                 aria-haspopup="dialog"
                 title="Connection log"
                 onClick={() => setOpen((current) => !current)}
             >
                 <span className={`status-dot is-${state}${live ? ' is-live' : ''}`} />
-                {label}
+                <span className="connection-label">{label}</span>
             </button>
             {open && (
                 <div className="connection-log" role="dialog" aria-label="Connection log">
@@ -902,6 +903,7 @@ export default function App() {
     const [albumTypes, setAlbumTypes] = useState<MediaCategory[]>(
         initialMediaCategories(initialParams)
     )
+    const [albumQuery, setAlbumQuery] = useState(initialParams.get('q') || '')
     const [search, setSearch] = useState('')
     const [showEmptyGroups, setShowEmptyGroups] = useState(initialParams.get('empty') === '1')
     const [groups, setGroups] = useState<Group[]>([])
@@ -960,9 +962,10 @@ export default function App() {
             if (albumScope === 'group' && albumGroupJids.length) {
                 params.set('groups', albumGroupJids.join(','))
             }
+            if (albumQuery.trim()) params.set('q', albumQuery.trim())
         }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
-    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, showEmptyGroups])
+    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, albumQuery, showEmptyGroups])
 
     useEffect(() => {
         if (groupsLoading) return
@@ -1213,7 +1216,7 @@ export default function App() {
     }
 
     return (
-        <div className="app-shell">
+        <div className={`app-shell${view === 'album' ? ' is-album' : ''}`}>
             <header className="topbar">
                 <div className="brand">
                     <span className="brand-mark">
@@ -1486,6 +1489,8 @@ export default function App() {
                         onScopeChange={setAlbumScope}
                         types={albumTypes}
                         onTypesChange={setAlbumTypes}
+                        query={albumQuery}
+                        onQueryChange={setAlbumQuery}
                         active={view === 'album'}
                         onLiveUpdate={pulseLive}
                     />

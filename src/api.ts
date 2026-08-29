@@ -142,6 +142,17 @@ function parseMediaCategories(value: unknown): MediaCategory[] {
     return categories as MediaCategory[]
 }
 
+function parseFileNameQuery(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    return trimmed || undefined
+}
+
+function albumMessageTypes(categories: MediaCategory[], fileNameQuery?: string): string[] {
+    if (fileNameQuery) return [MEDIA_TYPES.document]
+    return categories.map((category) => MEDIA_TYPES[category])
+}
+
 function parseOptionalGroups(query: Request['query']): string[] | undefined {
     const raw = query.groups ?? query.group
     if (raw === undefined) return undefined
@@ -243,8 +254,9 @@ export function createApiApp() {
         '/api/album',
         asyncRoute(async (request, response) => {
             const range = getDateRange(request)
+            const fileNameQuery = parseFileNameQuery(request.query.q)
             const categories = parseMediaCategories(request.query.types)
-            const messageTypes = categories.map((category) => MEDIA_TYPES[category])
+            const messageTypes = albumMessageTypes(categories, fileNameQuery)
             const groupJids = parseOptionalGroups(request.query)
             const cursor = decodeCursor(request.query.cursor)
             const limit = parseAlbumLimit(request.query.limit)
@@ -255,7 +267,8 @@ export function createApiApp() {
                     messageTypes,
                     limit,
                     groupJids,
-                    cursor
+                    cursor,
+                    fileNameQuery
                 ),
                 countAlbumMedia(range.fromTimestamp, range.toTimestamp, groupJids),
             ])
@@ -286,8 +299,9 @@ export function createApiApp() {
         express.json({ limit: '64kb' }),
         asyncRoute(async (request, response) => {
             const range = getDateRange(request)
+            const fileNameQuery = parseFileNameQuery(request.query.q)
             const categories = parseMediaCategories(request.query.types)
-            const messageTypes = categories.map((category) => MEDIA_TYPES[category])
+            const messageTypes = albumMessageTypes(categories, fileNameQuery)
             const groupJids = parseOptionalGroups(request.query)
             const rawMessageIds = (request.body as { messageIds?: unknown } | undefined)?.messageIds
             if (

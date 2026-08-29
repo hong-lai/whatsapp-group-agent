@@ -41,6 +41,8 @@ type Props = {
     onScopeChange: (scope: AlbumScope) => void
     types: MediaCategory[]
     onTypesChange: (types: MediaCategory[]) => void
+    query: string
+    onQueryChange: (query: string) => void
     active: boolean
     onLiveUpdate: () => void
 }
@@ -79,9 +81,12 @@ function albumUrl(
     scope: AlbumScope,
     selectedJids: string[],
     types: MediaCategory[],
+    query: string,
     cursor?: string
 ): string {
     const params = new URLSearchParams({ from, to, types: types.join(',') })
+    const needle = query.trim()
+    if (needle) params.set('q', needle)
     if (scope === 'group') {
         params.set('groups', selectedJids.join(','))
         if (selectedJids.length === 1) params.set('group', selectedJids[0])
@@ -232,6 +237,7 @@ function ToolbarIcon({
         | 'document'
         | 'audio'
         | 'sticker'
+        | 'search'
 }) {
     const paths = {
         groups: (
@@ -290,6 +296,12 @@ function ToolbarIcon({
             <>
                 <path d="M5 8.5A3.5 3.5 0 0 1 8.5 5h7A3.5 3.5 0 0 1 19 8.5v7A3.5 3.5 0 0 1 15.5 19h-7A3.5 3.5 0 0 1 5 15.5z" />
                 <path d="M9 10.2h.01M15 10.2h.01M9.5 14.5s1.3 1.8 2.5 1.8 2.5-1.8 2.5-1.8" />
+            </>
+        ),
+        search: (
+            <>
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
             </>
         ),
     }
@@ -461,6 +473,8 @@ export default function AlbumView({
     onScopeChange,
     types,
     onTypesChange,
+    query,
+    onQueryChange,
     active,
     onLiveUpdate,
 }: Props) {
@@ -473,6 +487,7 @@ export default function AlbumView({
     const [loadingMore, setLoadingMore] = useState(false)
     const [downloading, setDownloading] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [queryInput, setQueryInput] = useState(query)
     const requestId = useRef(0)
     const silentGen = useRef(0)
     const silentBusy = useRef(false)
@@ -484,7 +499,18 @@ export default function AlbumView({
     const totalCount = Object.values(counts).reduce((sum, count) => sum + count, 0)
 
     const scopedJids = scope === 'group' ? selectedJids : []
-    const filterKey = `${from}|${to}|${scope}|${scopedJids.join(',')}|${types.join(',')}`
+    const trimmedQuery = query.trim()
+    const filterKey = `${from}|${to}|${scope}|${scopedJids.join(',')}|${types.join(',')}|${trimmedQuery}`
+
+    useEffect(() => {
+        setQueryInput(query)
+    }, [query])
+
+    useEffect(() => {
+        if (queryInput === query) return
+        const timer = window.setTimeout(() => onQueryChange(queryInput), 250)
+        return () => window.clearTimeout(timer)
+    }, [query, queryInput, onQueryChange])
 
     useEffect(() => {
         return () => {
@@ -509,7 +535,7 @@ export default function AlbumView({
         scrollRestore.current = null
         setLoading(true)
         setError(null)
-        albumJson(albumUrl(from, to, scope, selectedJids, types), controller.signal)
+        albumJson(albumUrl(from, to, scope, selectedJids, types, query), controller.signal)
             .then((data) => {
                 if (currentRequest !== requestId.current) return
                 setItems(data.items)
@@ -525,14 +551,14 @@ export default function AlbumView({
                 if (currentRequest === requestId.current) setLoading(false)
             })
         return () => controller.abort()
-    }, [filterKey, from, to, scope, selectedJids, types])
+    }, [filterKey, from, to, scope, selectedJids, types, query])
 
     async function silentRefresh() {
         if (!active || loading || loadingMore || downloading || silentBusy.current) return
         const gen = ++silentGen.current
         silentBusy.current = true
         try {
-            const data = await albumJson(albumUrl(from, to, scope, selectedJids, types))
+            const data = await albumJson(albumUrl(from, to, scope, selectedJids, types, query))
             if (gen !== silentGen.current) return
             const list = scrollRef.current
             if (list && list.scrollTop > 40) {
@@ -629,7 +655,7 @@ export default function AlbumView({
         setError(null)
         try {
             const data = await albumJson(
-                albumUrl(from, to, scope, selectedJids, types, nextCursor)
+                albumUrl(from, to, scope, selectedJids, types, query, nextCursor)
             )
             setItems((current) => [...current, ...data.items])
             setNextCursor(data.nextCursor)
@@ -647,6 +673,8 @@ export default function AlbumView({
         setError(null)
         try {
             const params = new URLSearchParams({ from, to, types: types.join(',') })
+            const needle = query.trim()
+            if (needle) params.set('q', needle)
             if (scope === 'group') {
                 params.set('groups', selectedJids.join(','))
                 if (selectedJids.length === 1) params.set('group', selectedJids[0])
@@ -691,6 +719,30 @@ export default function AlbumView({
     return (
         <section className="album-panel" aria-busy={loading}>
             <header className="album-toolbar">
+                <label className="album-search">
+                    <ToolbarIcon name="search" />
+                    <input
+                        type="search"
+                        enterKeyHint="search"
+                        placeholder="Search documents…"
+                        value={queryInput}
+                        onChange={(event) => setQueryInput(event.target.value)}
+                        aria-label="Search documents by filename"
+                    />
+                    {queryInput.trim() ? (
+                        <button
+                            type="button"
+                            className="album-search-clear"
+                            onClick={() => {
+                                setQueryInput('')
+                                onQueryChange('')
+                            }}
+                            aria-label="Clear document search"
+                        >
+                            ×
+                        </button>
+                    ) : null}
+                </label>
                 <div className="album-scope">
                     <div className="segmented-control" role="group" aria-label="Album scope">
                         <button
@@ -725,7 +777,11 @@ export default function AlbumView({
                         />
                     )}
                 </div>
-                <div className="media-filters" aria-label="Media type filters">
+                <div
+                    className={`media-filters${trimmedQuery ? ' is-locked' : ''}`}
+                    aria-label="Media type filters"
+                    aria-disabled={Boolean(trimmedQuery)}
+                >
                     <button
                         className={showingAll ? 'active' : ''}
                         onClick={() => {
@@ -822,8 +878,17 @@ export default function AlbumView({
                 ) : (
                     <div className="album-empty">
                         <span>▧</span>
-                        <h3>No media found</h3>
-                        <p>Try another date range, group, or media type.</p>
+                        {trimmedQuery ? (
+                            <>
+                                <h3>No documents matching “{trimmedQuery}”</h3>
+                                <p>Try another name, date range, or group.</p>
+                            </>
+                        ) : (
+                            <>
+                                <h3>No media found</h3>
+                                <p>Try another date range, group, or media type.</p>
+                            </>
+                        )}
                     </div>
                 )}
             </div>

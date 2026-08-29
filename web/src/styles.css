@@ -22,10 +22,15 @@
     box-sizing: border-box;
 }
 
+html {
+    background: #f2f5f1;
+}
+
 body {
     margin: 0;
     min-width: 320px;
     min-height: 100vh;
+    overscroll-behavior: none;
 }
 
 button,
@@ -782,6 +787,64 @@ h3 {
     z-index: 4;
 }
 
+.album-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1 1 200px;
+    max-width: 280px;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid #d9e4df;
+    border-radius: 9px;
+    color: #7a9089;
+    background: white;
+}
+
+.album-search svg {
+    flex-shrink: 0;
+    width: 16px;
+    height: 16px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.album-search input {
+    min-width: 0;
+    flex: 1;
+    border: 0;
+    outline: 0;
+    color: var(--ink);
+    background: transparent;
+    font-size: 0.78rem;
+}
+
+.album-search input[type='search']::-webkit-search-cancel-button {
+    -webkit-appearance: none;
+}
+
+.album-search-clear {
+    flex-shrink: 0;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    color: #7a9089;
+    background: transparent;
+    font-size: 1.05rem;
+    line-height: 1;
+}
+
+.album-search-clear:hover {
+    color: var(--ink);
+    background: #eef4f1;
+}
+
 .album-scope,
 .album-actions {
     display: flex;
@@ -953,6 +1016,11 @@ h3 {
     background: white;
     font-size: 0.58rem;
     text-align: center;
+}
+
+.media-filters.is-locked {
+    opacity: 0.45;
+    pointer-events: none;
 }
 
 .album-error {
@@ -2527,11 +2595,25 @@ button.document-link {
 }
 
 @media (max-width: 720px) {
-    .app-shell {
+    html,
+    body,
+    #root {
+        height: 100%;
+        overflow: hidden;
+        overscroll-behavior: none;
+    }
+
+    .app-shell,
+    .app-shell.is-album {
+        position: fixed;
+        inset: 0;
         height: auto;
-        min-height: 100dvh;
-        overflow-x: hidden;
-        overflow-y: visible;
+        max-height: none;
+        min-height: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
     }
 
     .topbar,
@@ -2543,29 +2625,46 @@ button.document-link {
 
     .topbar {
         height: auto;
-        min-height: 44px;
-        padding: 8px 0;
-        gap: 8px;
+        min-height: 36px;
+        padding: 2px 0;
+        gap: 6px;
+    }
+
+    .brand {
+        gap: 7px;
+    }
+
+    .brand-mark {
+        width: 26px;
+        height: 26px;
+        border-radius: 7px;
+        box-shadow: none;
+    }
+
+    .brand strong {
+        font-size: 0.78rem;
+    }
+
+    .connection-label {
+        display: none;
+    }
+
+    .connection-toggle {
+        padding: 2px;
+        gap: 0;
+    }
+
+    .settings-toggle {
+        width: 32px;
+        height: 32px;
     }
 
     .brand small {
         display: none;
     }
 
-    .pattern-meta > span {
-        display: none;
-    }
-
     .pattern-meta {
-        max-width: 42vw;
-        margin-right: 0;
-    }
-
-    .pattern-meta code {
-        max-width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        display: none;
     }
 
     .filter-bar {
@@ -2573,38 +2672,62 @@ button.document-link {
         flex-wrap: wrap;
         align-items: stretch;
         min-height: 0;
-        gap: 6px;
-        padding: 8px;
+        gap: 4px;
+        margin-top: 4px;
+        padding: 3px;
         max-width: 100%;
         min-width: 0;
         overflow: visible;
+        border-radius: 12px;
     }
 
     .date-cluster {
-        display: flex;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) repeat(4, min-content);
         flex: 1 1 100%;
-        flex-direction: column;
-        align-items: stretch;
-        gap: 6px;
+        align-items: end;
+        gap: 4px;
         min-width: 0;
         width: 100%;
-        padding: 2px 0;
+        padding: 3px 4px;
         overflow: visible;
-        background: transparent;
+        background: #f1f5f2;
     }
 
     .date-control {
+        display: contents;
+    }
+
+    .date-control > svg {
         display: none;
     }
 
-    .presets {
-        display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        flex: none;
+    .date-control label {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
         min-width: 0;
-        margin-left: 0;
+        overflow: hidden;
+        gap: 0;
+    }
+
+    .date-control label span {
+        margin-bottom: 0;
+        font-size: 0.5rem;
+        letter-spacing: 0.04em;
+    }
+
+    .date-control input {
         width: 100%;
-        overflow: visible;
+        min-width: 0;
+        min-height: 32px;
+        padding: 0;
+        font-size: 0.72rem;
+        line-height: 1.2;
+    }
+
+    .presets {
+        display: contents;
     }
 
     .preset-long {
@@ -2616,14 +2739,14 @@ button.document-link {
     }
 
     .presets button {
-        flex: 1 1 0;
-        min-width: 0;
-        min-height: 36px;
+        flex: none;
+        min-width: 32px;
+        min-height: 32px;
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 0 4px;
-        font-size: 0.72rem;
+        padding: 0 7px;
+        font-size: 0.68rem;
     }
 
     .view-switch {
@@ -2634,16 +2757,16 @@ button.document-link {
         min-width: 0;
         max-width: 100%;
         margin-left: 0;
-        gap: 4px;
-        padding: 3px;
+        gap: 3px;
+        padding: 2px;
     }
 
     .view-switch button {
         flex: 1 1 0;
         min-width: 0;
         width: auto;
-        height: 40px;
-        gap: 6px;
+        height: 28px;
+        gap: 5px;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -2651,24 +2774,35 @@ button.document-link {
 
     .view-switch-label {
         display: inline;
-        font-size: 0.72rem;
+        font-size: 0.68rem;
         font-weight: 700;
     }
 
-    .dashboard {
-        height: auto;
+    .dashboard,
+    .album-dashboard {
+        flex: 1 1 0;
         min-height: 0;
-        overflow: visible;
+        height: auto;
+        margin-top: 4px;
+        margin-bottom: 0;
+        overflow: hidden;
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
     }
 
     .messages-pane {
         display: flex;
         flex-direction: column;
+        min-height: 0;
+        height: 100%;
+        overflow: hidden;
     }
 
     .groups-panel {
+        flex: none;
         height: auto;
         max-height: none;
+        overflow: hidden;
         border-right: 0;
         border-bottom: 1px solid var(--line);
     }
@@ -2723,7 +2857,8 @@ button.document-link {
     }
 
     .messages-panel {
-        min-height: min(480px, calc(100dvh - 220px));
+        flex: 1 1 0;
+        min-height: 0;
     }
 
     .messages-heading {
@@ -2763,7 +2898,7 @@ button.document-link {
     }
 
     .message-list {
-        max-height: 700px;
+        max-height: none;
         padding-inline: 14px;
     }
 
@@ -2784,16 +2919,43 @@ button.document-link {
     }
 
     .album-dashboard {
-        height: max(560px, calc(100dvh - 88px));
+        flex: 1 1 0;
+        min-height: 0;
+        height: auto;
+        margin-bottom: 0;
+        overflow: hidden;
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+    }
+
+    .media-pane,
+    .album-panel {
+        min-height: 0;
         overflow: hidden;
     }
 
     .album-toolbar {
         display: grid;
-        grid-template-columns: auto minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto auto;
         align-items: center;
-        gap: 8px;
-        padding: 8px 10px;
+        gap: 6px;
+        padding: 4px 8px;
+        min-height: 0;
+    }
+
+    .album-search {
+        grid-column: 1;
+        grid-row: 1;
+        max-width: none;
+        flex: none;
+        width: auto;
+        height: 32px;
+        padding-inline: 8px;
+        border-radius: 8px;
+    }
+
+    .album-search input {
+        font-size: 16px;
     }
 
     .album-scope {
@@ -2801,13 +2963,13 @@ button.document-link {
     }
 
     .album-scope .segmented-control {
-        grid-column: 1;
+        grid-column: 2;
         grid-row: 1;
     }
 
     .group-picker {
         grid-column: 1 / -1;
-        grid-row: 2;
+        grid-row: 3;
         flex: none;
         min-width: 0;
         width: auto;
@@ -2821,6 +2983,7 @@ button.document-link {
 
     .media-filters {
         grid-column: 1 / -1;
+        grid-row: 2;
         flex: none;
         order: unset;
         width: auto;
@@ -2828,6 +2991,17 @@ button.document-link {
         flex-wrap: nowrap;
         -webkit-overflow-scrolling: touch;
         scrollbar-width: none;
+    }
+
+    .album-toolbar .segmented-control button {
+        width: 30px;
+        height: 28px;
+    }
+
+    .media-filters button {
+        padding: 3px 7px;
+        border-radius: 8px;
+        gap: 4px;
     }
 
     .media-filters::-webkit-scrollbar {

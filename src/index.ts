@@ -1014,6 +1014,10 @@ async function processMessage(
             messageType,
             textContent,
             mediaPath: null,
+            fileName:
+                messageType === 'documentMessage'
+                    ? originalMediaName(content, fileTypes.documentMessage || 'pdf')
+                    : null,
             replyToId,
             quotedMessage,
             albumParentId,

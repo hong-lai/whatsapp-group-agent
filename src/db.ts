@@ -60,6 +60,7 @@ export async function initDb(): Promise<void> {
         await migrateAlbumParents()
         await migrateForwarded()
         await migrateQuotedMessageType()
+        await migrateDocumentFileName()
 
         await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
@@ -182,6 +183,49 @@ async function migrateForwarded(): Promise<void> {
 
 async function migrateQuotedMessageType(): Promise<void> {
     await pool.query(`ALTER TABLE messages DROP COLUMN IF EXISTS quoted_message_type`)
+}
+
+const DOCUMENT_FILE_NAME_BACKFILL_KEY = 'document_file_names_backfilled'
+
+const FILE_NAME_SQL = `COALESCE(
+                NULLIF(BTRIM(m.file_name), ''),
+                regexp_replace(m.media_path, '^.*[\\\\/]', '')
+            )`
+
+const FILE_NAME_SQL_BARE = `COALESCE(
+                NULLIF(BTRIM(file_name), ''),
+                regexp_replace(media_path, '^.*[\\\\/]', '')
+            )`
+
+async function migrateDocumentFileName(): Promise<void> {
+    await pool.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_name TEXT`)
+    if (await getAppSetting(DOCUMENT_FILE_NAME_BACKFILL_KEY)) return
+
+    const result = await pool.query(
+        `UPDATE messages
+         SET file_name = NULLIF(
+                regexp_replace(
+                    regexp_replace(media_path, '^.*[\\\\/]', ''),
+                    '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}_',
+                    ''
+                ),
+                ''
+            )
+         WHERE message_type = 'documentMessage'
+           AND media_path IS NOT NULL
+           AND file_name IS NULL`
+    )
+    await setAppSetting(DOCUMENT_FILE_NAME_BACKFILL_KEY, {
+        count: result.rowCount ?? 0,
+        at: Date.now(),
+    })
+    if (result.rowCount) {
+        log.info({ count: result.rowCount }, 'db.document_file_names_backfilled')
+    }
+}
+
+function likeContainsPattern(query: string): string {
+    return `%${query.replace(/[\\%_]/g, '\\$&')}%`
 }
 
 async function migrateAlbumParents(): Promise<void> {
@@ -752,21 +796,23 @@ export type MessageRow = {
     isEdited: boolean
     isHistory: boolean
     isForwarded: boolean
+    fileName?: string | null
 }
 
 export async function insertMessage(row: MessageRow): Promise<void> {
     await pool.query(
         `INSERT INTO messages (
             message_id, group_jid, sender_jid, message_secret, message_type,
-            text_content, media_path, reply_to_id, quoted_message, album_parent_id,
+            text_content, media_path, file_name, reply_to_id, quoted_message, album_parent_id,
             album_index, album_expected_images, album_expected_videos,
             timestamp, is_edited, is_deleted, is_history, is_forwarded
          ) VALUES (
-            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-            to_timestamp($14), $15, FALSE, $16, $17
+            $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,
+            to_timestamp($15), $16, FALSE, $17, $18
          )
          ON CONFLICT (message_id) DO UPDATE SET
             message_secret = COALESCE(messages.message_secret, EXCLUDED.message_secret),
+            file_name = COALESCE(messages.file_name, EXCLUDED.file_name),
             album_parent_id = COALESCE(EXCLUDED.album_parent_id, messages.album_parent_id),
             album_index = COALESCE(EXCLUDED.album_index, messages.album_index),
             album_expected_images = COALESCE(
@@ -786,6 +832,7 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.messageType,
             row.textContent,
             row.mediaPath,
+            row.fileName ?? null,
             row.replyToId,
             row.quotedMessage,
             row.albumParentId,
@@ -1256,7 +1303,7 @@ async function loadQuotedTargets(messageIds: string[]): Promise<Map<string, Quot
             (media_path IS NOT NULL) AS has_media,
             CASE
                 WHEN media_path IS NULL THEN NULL
-                ELSE regexp_replace(media_path, '^.*[\\\\/]', '')
+                ELSE ${FILE_NAME_SQL_BARE}
             END AS file_name
          FROM messages
          WHERE message_id = ANY($1::text[])`,
@@ -1289,7 +1336,7 @@ async function loadQuotedTargets(messageIds: string[]): Promise<Map<string, Quot
             album_parent_id,
             message_id,
             message_type,
-            regexp_replace(media_path, '^.*[\\\\/]', '') AS file_name
+            ${FILE_NAME_SQL_BARE} AS file_name
          FROM messages
          WHERE album_parent_id = ANY($1::text[])
            AND media_path IS NOT NULL
@@ -1377,7 +1424,7 @@ export async function listDashboardMessages(
             (m.media_path IS NOT NULL) AS has_media,
             CASE
                 WHEN m.media_path IS NULL THEN NULL
-                ELSE regexp_replace(m.media_path, '^.*[\\\\/]', '')
+                ELSE ${FILE_NAME_SQL}
             END AS file_name
          FROM messages m
          LEFT JOIN senders s ON s.jid = m.sender_jid
@@ -1442,7 +1489,7 @@ export async function listDashboardMessages(
                 (m.media_path IS NOT NULL) AS has_media,
                 CASE
                     WHEN m.media_path IS NULL THEN NULL
-                    ELSE regexp_replace(m.media_path, '^.*[\\\\/]', '')
+                    ELSE ${FILE_NAME_SQL}
                 END AS file_name,
                 m.album_parent_id
              FROM messages m
@@ -1577,7 +1624,8 @@ export async function listAlbumMedia(
     messageTypes: string[],
     limit: number,
     groupJids?: string[],
-    cursor?: MessageCursor
+    cursor?: MessageCursor,
+    fileNameQuery?: string
 ): Promise<{ items: AlbumMedia[]; nextCursor: MessageCursor | null }> {
     const allowedJids = await matchingGroupJids()
     const { scopedJids, empty } = resolveAlbumGroupFilter(allowedJids, groupJids)
@@ -1585,6 +1633,7 @@ export async function listAlbumMedia(
         return { items: [], nextCursor: null }
     }
 
+    const namePattern = fileNameQuery ? likeContainsPattern(fileNameQuery) : null
     const result = await pool.query<AlbumMediaRow>(
         `SELECT
             m.message_id,
@@ -1594,7 +1643,7 @@ export async function listAlbumMedia(
             m.message_type,
             m.text_content,
             EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
-            regexp_replace(m.media_path, '^.*[\\\\/]', '') AS file_name
+            ${FILE_NAME_SQL} AS file_name
          FROM messages m
          JOIN groups g ON g.jid = m.group_jid
          LEFT JOIN senders s ON s.jid = m.sender_jid
@@ -1610,6 +1659,7 @@ export async function listAlbumMedia(
                 OR m.timestamp < to_timestamp($6)
                 OR (m.timestamp = to_timestamp($6) AND m.message_id < $7)
            )
+           AND ($9::text IS NULL OR ${FILE_NAME_SQL} ILIKE $9 ESCAPE E'\\\\')
          ORDER BY m.timestamp DESC, m.message_id DESC
          LIMIT $8`,
         [
@@ -1621,6 +1671,7 @@ export async function listAlbumMedia(
             cursor?.timestamp ?? null,
             cursor?.messageId ?? null,
             limit + 1,
+            namePattern,
         ]
     )
 
@@ -1726,7 +1777,7 @@ export async function getAlbumMediaForDownload(
             m.message_type,
             m.text_content,
             EXTRACT(EPOCH FROM m.timestamp)::bigint AS timestamp,
-            regexp_replace(m.media_path, '^.*[\\\\/]', '') AS file_name,
+            ${FILE_NAME_SQL} AS file_name,
             m.media_path
          FROM messages m
          JOIN groups g ON g.jid = m.group_jid
