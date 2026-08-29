@@ -238,7 +238,7 @@ function QuotePreview({ message }: { message: Message }) {
     return (
         <blockquote className="quoted-preview">
             {showThumb && thumbUrl && (
-                <a className="quoted-thumb" href={thumbUrl} target="_blank" rel="noreferrer">
+                <a className="quoted-thumb" href={thumbUrl} target="_blank" rel="nofollow noreferrer noopener">
                     {thumbType === 'videoMessage' || thumbType === 'ptvMessage' ? (
                         <video src={`${thumbUrl}#t=0.001`} muted playsInline preload="metadata" />
                     ) : (
@@ -436,7 +436,7 @@ function LightboxStage({ item }: { item: Message }) {
             <a
                 href={url}
                 target="_blank"
-                rel="noreferrer"
+                rel="nofollow noreferrer noopener"
                 download={item.fileName || undefined}
                 className="download-button"
             >
@@ -544,7 +544,7 @@ function MediaLightbox({
                 <a
                     href={url}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="nofollow noreferrer noopener"
                     download={item.fileName || undefined}
                     className="download-button"
                 >
@@ -764,7 +764,7 @@ function MessageBody({ message, revealed }: { message: Message; revealed: boolea
                             <strong>{card.name}</strong>
                             {card.detail && /^[+\d][\d\s()-]{5,}$/.test(card.detail) ? (
                                 <small>
-                                    <a href={`tel:${card.detail.replace(/[^\d+]/g, '')}`}>{card.detail}</a>
+                                    <a href={`tel:${card.detail.replace(/[^\d+]/g, '')}`} rel="nofollow">{card.detail}</a>
                                 </small>
                             ) : (
                                 <small>{card.detail || 'Contact card'}</small>
@@ -795,7 +795,7 @@ function MessageBody({ message, revealed }: { message: Message; revealed: boolea
         )
         if (!place.mapsUrl) return <div className="share-card">{body}</div>
         return (
-            <a className="share-card" href={place.mapsUrl} target="_blank" rel="noreferrer">
+            <a className="share-card" href={place.mapsUrl} target="_blank" rel="nofollow noreferrer noopener">
                 {body}
             </a>
         )

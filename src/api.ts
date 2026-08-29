@@ -30,6 +30,8 @@ import {
     type MessageCursor,
 } from './db.js'
 
+const ROBOTS_TAG = 'noindex, nofollow, noarchive, nosnippet, noimageindex'
+const ROBOTS_TXT = 'User-agent: *\nDisallow: /\n'
 const HONG_KONG_OFFSET_MS = 8 * 60 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
@@ -219,6 +221,19 @@ function requireAdmin(request: Request, response: Response, next: NextFunction):
 export function createApiApp() {
     const app = express()
     app.disable('x-powered-by')
+
+    app.use((_request, response, next) => {
+        response.setHeader('X-Robots-Tag', ROBOTS_TAG)
+        response.setHeader('Referrer-Policy', 'no-referrer')
+        next()
+    })
+
+    app.get('/robots.txt', (_request, response) => {
+        response
+            .type('text/plain; charset=utf-8')
+            .setHeader('Cache-Control', 'no-cache')
+            .send(ROBOTS_TXT)
+    })
 
     app.get('/api/status', (_request, response) => {
         response.json(getConnectionStatus())

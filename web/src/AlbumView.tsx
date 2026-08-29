@@ -371,7 +371,7 @@ function LightboxPreview({ item }: { item: AlbumItem }) {
             <a
                 href={item.mediaUrl}
                 target="_blank"
-                rel="noreferrer"
+                rel="nofollow noreferrer noopener"
                 download={item.fileName || undefined}
                 className="download-button"
             >
@@ -447,7 +447,7 @@ function MediaTile({
                         <a
                             href={item.mediaUrl}
                             target="_blank"
-                            rel="noreferrer"
+                            rel="nofollow noreferrer noopener"
                             download={item.fileName || undefined}
                         >
                             Download ↗
@@ -976,7 +976,7 @@ export default function AlbumView({
                         <a
                             href={lightbox.mediaUrl}
                             target="_blank"
-                            rel="noreferrer"
+                            rel="nofollow noreferrer noopener"
                             download={lightbox.fileName || undefined}
                             className="download-button"
                         >

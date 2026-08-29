@@ -11,8 +11,18 @@ export default defineConfig({
     },
     server: {
         port: 5173,
+        headers: {
+            'X-Robots-Tag': 'noindex, nofollow, noarchive, nosnippet, noimageindex',
+            'Referrer-Policy': 'no-referrer',
+        },
         proxy: {
             '/api': 'http://localhost:3000',
+        },
+    },
+    preview: {
+        headers: {
+            'X-Robots-Tag': 'noindex, nofollow, noarchive, nosnippet, noimageindex',
+            'Referrer-Policy': 'no-referrer',
         },
     },
 })

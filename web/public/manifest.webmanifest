@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Group Archive",
   "short_name": "Archive",
-  "description": "Browse tracked WhatsApp group messages and media by date.",
+  "description": "Group Archive",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
