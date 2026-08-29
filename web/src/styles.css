@@ -335,7 +335,7 @@ h3 {
 .date-cluster {
     display: flex;
     min-width: 0;
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     align-items: center;
     gap: 8px;
     padding: 4px;
@@ -343,36 +343,203 @@ h3 {
     background: #f1f5f2;
 }
 
-.date-control {
+.date-picker {
+    min-width: 0;
+    flex: 0 1 auto;
+}
+
+.date-picker-toggle {
+    width: auto;
+    min-width: 0;
+    min-height: 40px;
     display: flex;
     align-items: center;
     gap: 9px;
-    padding: 0 7px;
+    padding: 4px 8px 4px 7px;
+    border: 0;
+    border-radius: 9px;
     color: var(--green);
+    background: transparent;
+    text-align: left;
 }
 
-.date-control label span {
+.date-picker-toggle:hover,
+.date-picker-toggle[aria-expanded='true'] {
+    color: var(--green-dark);
+    background: white;
+    box-shadow: 0 3px 10px rgba(28, 60, 50, 0.09);
+}
+
+.date-picker-toggle svg {
+    flex-shrink: 0;
+}
+
+.date-picker-copy {
     display: block;
-    margin-bottom: 2px;
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.date-picker-copy span {
+    display: block;
     color: #7b8d88;
     font-size: 0.54rem;
     font-weight: 700;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
 }
 
-.date-control input {
-    width: 114px;
-    min-width: 0;
-    padding: 2px 0;
-    border: 0;
+.date-picker-copy strong {
+    display: block;
+    overflow: hidden;
     color: var(--ink);
-    background: transparent;
     font-size: 0.74rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.date-picker-chevron {
+    width: 0.9rem;
+    height: 0.9rem;
+    flex-shrink: 0;
+    stroke: #7a9089;
+}
+
+.date-picker-popover {
+    position: fixed;
+    z-index: 24;
+    max-height: calc(100dvh - 16px);
+    overflow: auto;
+    padding: 10px;
+    border: 1px solid #d9e4df;
+    border-radius: 14px;
+    background: white;
+    box-shadow: 0 16px 40px rgba(24, 65, 54, 0.14);
+    animation: menu-in 180ms var(--ease-out);
+}
+
+.date-picker-popover .date-picker-modes {
+    width: 100%;
+}
+
+.date-picker-popover .date-picker-modes button {
+    width: auto;
+    flex: 1 1 0;
+    height: 32px;
+    font-size: 0.72rem;
+}
+
+.date-picker-hint {
+    margin: 8px 2px 6px;
+    color: var(--muted);
+    font-size: 0.68rem;
     font-weight: 600;
 }
 
-.date-arrow {
-    color: #a3b0ac;
+.date-cal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 4px 0 8px;
+}
+
+.date-cal-header p {
+    margin: 0;
+    color: var(--ink);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.date-cal-nav {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    color: var(--green-dark);
+    background: transparent;
+}
+
+.date-cal-nav:hover:not(:disabled) {
+    background: #f1f5f2;
+}
+
+.date-cal-nav:disabled {
+    color: #c3cec9;
+    cursor: default;
+}
+
+.date-cal-nav svg {
+    width: 1.05rem;
+    height: 1.05rem;
+}
+
+.date-cal-weekdays,
+.date-cal-row {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 2px;
+}
+
+.date-cal-weekdays {
+    margin-bottom: 4px;
+}
+
+.date-cal-weekdays span,
+.date-cal-empty {
+    display: grid;
+    place-items: center;
+    min-height: 28px;
+    color: #8a9b95;
+    font-size: 0.62rem;
+    font-weight: 700;
+}
+
+.date-cal-day {
+    min-height: 36px;
+    padding: 0;
+    border: 0;
+    border-radius: 9px;
+    color: var(--ink);
+    background: transparent;
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.date-cal-day:hover:not(:disabled):not(.is-start):not(.is-end) {
+    background: #eef6f2;
+}
+
+.date-cal-day.is-selected:not(.is-start):not(.is-end) {
+    background: var(--mint);
+    border-radius: 0;
+}
+
+.date-cal-day.is-start,
+.date-cal-day.is-end {
+    color: white;
+    background: var(--green);
+}
+
+.date-cal-day.is-start:not(.is-end) {
+    border-radius: 9px 0 0 9px;
+}
+
+.date-cal-day.is-end:not(.is-start) {
+    border-radius: 0 9px 9px 0;
+}
+
+.date-cal-day.is-today:not(.is-start):not(.is-end) {
+    box-shadow: inset 0 0 0 1.5px rgba(22, 134, 111, 0.45);
+}
+
+.date-cal-day:disabled {
+    color: #c3cec9;
+    cursor: default;
 }
 
 .presets {
@@ -2728,9 +2895,9 @@ button.document-link {
 
     .date-cluster {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) repeat(4, min-content);
+        grid-template-columns: minmax(0, 1fr) repeat(4, min-content);
         flex: 1 1 100%;
-        align-items: end;
+        align-items: stretch;
         gap: 4px;
         min-width: 0;
         width: 100%;
@@ -2739,36 +2906,32 @@ button.document-link {
         background: #f1f5f2;
     }
 
-    .date-control {
-        display: contents;
+    .date-picker {
+        min-width: 0;
     }
 
-    .date-control > svg {
+    .date-picker-toggle {
+        width: 100%;
+        min-height: 36px;
+        gap: 6px;
+        padding: 2px 6px 2px 6px;
+    }
+
+    .date-picker-toggle > svg:first-child {
         display: none;
     }
 
-    .date-control label {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        min-width: 0;
-        overflow: hidden;
-        gap: 0;
-    }
-
-    .date-control label span {
-        margin-bottom: 0;
+    .date-picker-copy span {
         font-size: 0.5rem;
-        letter-spacing: 0.04em;
     }
 
-    .date-control input {
-        width: 100%;
-        min-width: 0;
-        min-height: 32px;
-        padding: 0;
+    .date-picker-copy strong {
         font-size: 0.72rem;
         line-height: 1.2;
+    }
+
+    .date-cal-day {
+        min-height: 40px;
     }
 
     .presets {
@@ -2917,10 +3080,6 @@ button.document-link {
         height: 34px;
         border-radius: 10px;
         font-size: 0.7rem;
-    }
-
-    .date-arrow {
-        display: none;
     }
 
     .message-content header strong {
@@ -3124,10 +3283,6 @@ button.document-link {
     }
 
     .pattern-meta {
-        display: none;
-    }
-
-    .date-arrow {
         display: none;
     }
 

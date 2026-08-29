@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
+import DateRangePicker from './DateRangePicker'
 import FilenameSettings from './FilenameSettings'
 import InstallApp from './InstallApp'
 import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
@@ -136,19 +137,13 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 function Icon({
     name,
 }: {
-    name: 'archive' | 'calendar' | 'search' | 'users' | 'message' | 'image' | 'settings'
+    name: 'archive' | 'search' | 'users' | 'message' | 'image' | 'settings'
 }) {
     const paths = {
         archive: (
             <>
                 <path d="M4 7.5h16v12H4z" />
                 <path d="M3 4.5h18v3H3zM9 11h6" />
-            </>
-        ),
-        calendar: (
-            <>
-                <rect x="3" y="5" width="18" height="16" rx="2" />
-                <path d="M16 3v4M8 3v4M3 10h18" />
             </>
         ),
         search: (
@@ -1261,18 +1256,15 @@ export default function App() {
 
             <section className="filter-bar" aria-label="Date filters">
                 <div className="date-cluster">
-                    <div className="date-control">
-                        <Icon name="calendar" />
-                        <label>
-                            <span>From</span>
-                            <input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} />
-                        </label>
-                        <span className="date-arrow">→</span>
-                        <label>
-                            <span>To</span>
-                            <input type="date" value={to} min={from} max={today} onChange={(event) => setTo(event.target.value)} />
-                        </label>
-                    </div>
+                    <DateRangePicker
+                        from={from}
+                        to={to}
+                        max={today}
+                        onChange={(nextFrom, nextTo) => {
+                            setFrom(nextFrom)
+                            setTo(nextTo)
+                        }}
+                    />
                     <div className="presets" aria-label="Date presets">
                         {[1, 2, 7, 30].map((days) => (
                             <button
