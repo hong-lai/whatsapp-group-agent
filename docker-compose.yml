@@ -1,4 +1,5 @@
 # Scan the first-login QR from: docker compose logs -f app
+# Metrics and traces: http://localhost:3001 (Grafana, anonymous). Allow ~30s after first start.
 services:
   postgres:
     image: postgres:16
@@ -63,6 +64,10 @@ services:
       CATCHUP_MAX_PAGES: ${CATCHUP_MAX_PAGES:-3}
       CATCHUP_BACKFILL_MAX_PAGES: ${CATCHUP_BACKFILL_MAX_PAGES:-40}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-lgtm:4318
+      OTEL_SERVICE_NAME: whatsapp-group-agent
+      OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-10000}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-}
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
       - ./downloads:/app/downloads
@@ -72,6 +77,22 @@ services:
     tty: true
     restart: unless-stopped
 
+  # Grafana + Prometheus + Tempo + OTLP collector (CPU/memory, ingest, traces)
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "${GRAFANA_HOST_PORT:-3001}:3000"
+      - "4317:4317"
+      - "4318:4318"
+    environment:
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /otel-lgtm/grafana/conf/provisioning/dashboards/custom/whatsapp-agent.json
+    volumes:
+      - otel_lgtm_data:/data
+      - ./observability/grafana/dashboards/whatsapp-agent.json:/otel-lgtm/grafana/conf/provisioning/dashboards/custom/whatsapp-agent.json:ro
+      - ./observability/grafana/provisioning/dashboards/whatsapp.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/custom.yaml:ro
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
+  otel_lgtm_data:

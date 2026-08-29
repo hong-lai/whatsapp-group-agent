@@ -11,4 +11,4 @@ COPY web ./web
 
 RUN npm run build:web
 
-CMD ["npx", "tsx", "src/index.ts"]
+CMD ["npx", "tsx", "--import", "./src/telemetry.ts", "src/index.ts"]

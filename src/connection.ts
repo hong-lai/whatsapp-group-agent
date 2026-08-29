@@ -1,3 +1,5 @@
+import { recordDisconnect, setConnectionUp } from './observe.js'
+
 const MAX_EVENTS = 80
 
 export type ConnectionState = 'connecting' | 'connected' | 'disconnected'
@@ -39,16 +41,20 @@ function setState(next: ConnectionState): void {
 
 export function noteConnecting(): void {
     setState('connecting')
+    setConnectionUp(false)
 }
 
 export function noteDisconnected(detail?: string): void {
     setState('disconnected')
+    setConnectionUp(false)
+    recordDisconnect(detail?.trim() || 'Connection closed')
     pushEvent('disconnected', detail)
 }
 
 export function noteConnected(): void {
     const wasDown = everConnected && state !== 'connected'
     setState('connected')
+    setConnectionUp(true)
     if (wasDown) pushEvent('reconnected')
     everConnected = true
 }

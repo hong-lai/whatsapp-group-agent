@@ -1,3 +1,4 @@
+import { shutdownTelemetry } from './telemetry.js'
 import makeWASocket, {
     DisconnectReason,
     downloadMediaMessage,
@@ -39,6 +40,12 @@ import {
 } from './filenameFormat.js'
 import { firstAvailableName, hktStamp, safePathSegment, withDeletedSuffix } from './hkt.js'
 import { log } from './log.js'
+import {
+    recordHistorySync,
+    recordMediaDownload,
+    recordMessageIngest,
+    withSpan,
+} from './observe.js'
 import {
     deleteGroupMetadata,
     getGroupMetadata,
@@ -643,23 +650,58 @@ function mediaDestPath(m: WAMessage, meta: MediaStoreMeta, fallbackExt: string):
 async function downloadMediaOnce(
     m: WAMessage,
     sock: WASocket,
-    fileName: string
+    fileName: string,
+    meta?: MediaStoreMeta
 ): Promise<void> {
-    await waitMediaDownload()
-    const stream = (await downloadMediaMessage(
-        messageForMediaDownload(m),
-        'stream',
-        {},
-        {
-            logger,
-            reuploadRequest: sock.updateMediaMessage,
-        }
-    )) as Readable
+    const started = Date.now()
     try {
-        await pipeline(stream, createWriteStream(fileName))
+        await withSpan(
+            'whatsapp.media.download',
+            meta
+                ? {
+                      'whatsapp.message.id': meta.messageId,
+                      'whatsapp.group.jid': meta.groupJid,
+                      'whatsapp.message.type': meta.messageType,
+                      'whatsapp.message.history': meta.isHistory,
+                  }
+                : {},
+            async () => {
+                await waitMediaDownload()
+                const stream = (await downloadMediaMessage(
+                    messageForMediaDownload(m),
+                    'stream',
+                    {},
+                    {
+                        logger,
+                        reuploadRequest: sock.updateMediaMessage,
+                    }
+                )) as Readable
+                try {
+                    await pipeline(stream, createWriteStream(fileName))
+                } catch (err) {
+                    stream.destroy()
+                    removePartialMedia(fileName)
+                    throw err
+                }
+            }
+        )
+        if (meta) {
+            recordMediaDownload({
+                result: 'success',
+                messageType: meta.messageType,
+                isHistory: meta.isHistory,
+                durationMs: Date.now() - started,
+            })
+        }
     } catch (err) {
-        stream.destroy()
-        removePartialMedia(fileName)
+        if (meta) {
+            recordMediaDownload({
+                result: 'error',
+                messageType: meta.messageType,
+                isHistory: meta.isHistory,
+                durationMs: Date.now() - started,
+            })
+        }
         throw err
     }
 }
@@ -670,6 +712,11 @@ function logMediaDownloadFailure(
     attempts: number
 ): void {
     if (meta.isHistory && isTimeoutMediaError(err)) {
+        recordMediaDownload({
+            result: 'unavailable',
+            messageType: meta.messageType,
+            isHistory: meta.isHistory,
+        })
         log.debug(
             {
                 messageId: meta.messageId,
@@ -682,6 +729,11 @@ function logMediaDownloadFailure(
         )
         return
     }
+    recordMediaDownload({
+        result: 'failed',
+        messageType: meta.messageType,
+        isHistory: meta.isHistory,
+    })
     log.warn(
         {
             err,
@@ -727,9 +779,14 @@ async function retryMediaDownload(
             },
             'media.download_retry'
         )
+        recordMediaDownload({
+            result: 'retry',
+            messageType: meta.messageType,
+            isHistory: meta.isHistory,
+        })
         await sleep(delayMs)
         try {
-            await downloadMediaOnce(m, sock, fileName)
+            await downloadMediaOnce(m, sock, fileName, meta)
             const storedPath = await persistMediaPath(meta.messageId, fileName)
             log.info(
                 {
@@ -742,6 +799,11 @@ async function retryMediaDownload(
                 },
                 'media.download_recovered'
             )
+            recordMediaDownload({
+                result: 'recovered',
+                messageType: meta.messageType,
+                isHistory: meta.isHistory,
+            })
             return
         } catch (nextErr) {
             err = nextErr
@@ -760,7 +822,7 @@ async function storeMediaFile(
     if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
     const fileName = mediaDestPath(m, meta, fallbackExt)
     try {
-        await downloadMediaOnce(m, sock, fileName)
+        await downloadMediaOnce(m, sock, fileName, meta)
         return persistMediaPath(meta.messageId, fileName)
     } catch (err) {
         const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
@@ -801,6 +863,20 @@ async function resolveGroupMetadata(
     }
     if (knownNonMatching || !allowFetch) return undefined
     return refreshGroup(sock, jid, 'processMessage')
+}
+
+async function ingestMessage(
+    m: WAMessage,
+    sock: WASocket,
+    isHistory: boolean
+): Promise<'ignored' | 'saved' | 'reaction' | 'error' | 'edited'> {
+    const result = await processMessage(m, sock, isHistory)
+    recordMessageIngest({
+        result,
+        isHistory,
+        messageType: m.message ? getContentType(m.message) || 'unknown' : 'unknown',
+    })
+    return result
 }
 
 async function processMessage(
@@ -1202,6 +1278,17 @@ async function connectToWhatsApp() {
     }
 
     async function ingestEvents(events: Partial<BaileysEventMap>): Promise<void> {
+        await withSpan(
+            'whatsapp.ingest',
+            {
+                'whatsapp.ingest.has_history': Boolean(events['messaging-history.set']),
+                'whatsapp.ingest.has_upsert': Boolean(events['messages.upsert']),
+            },
+            async () => ingestEventBatch(events)
+        )
+    }
+
+    async function ingestEventBatch(events: Partial<BaileysEventMap>): Promise<void> {
         const history = events['messaging-history.set']
         if (history) {
             const { messages, contacts, syncType, lidPnMappings } = history
@@ -1223,7 +1310,7 @@ async function connectToWhatsApp() {
                     const latest = await getLatestGroupMessage(groupJid)
                     latestBefore.set(groupJid, latest?.timestamp)
                 }
-                counts[await processMessage(m, sock, true)] += 1
+                counts[await ingestMessage(m, sock, true)] += 1
             }
             for (const m of messages || []) {
                 const result = await applyIncomingEdit(m, true)
@@ -1231,7 +1318,9 @@ async function connectToWhatsApp() {
             }
             await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
             catchup.noteHistoryChunk(syncType)
-            log.info({ syncType, ms: Date.now() - started, ...counts }, 'history.sync.done')
+            const durationMs = Date.now() - started
+            recordHistorySync({ syncType, durationMs, ...counts })
+            log.info({ syncType, ms: durationMs, ...counts }, 'history.sync.done')
         }
 
         if (events['lid-mapping.update']) {
@@ -1272,7 +1361,7 @@ async function connectToWhatsApp() {
                 }
             }
             for (const m of upsert.messages) {
-                await processMessage(m, sock, isHistory)
+                await ingestMessage(m, sock, isHistory)
             }
             for (const m of upsert.messages) {
                 await applyIncomingEdit(m, isHistory)
@@ -1396,6 +1485,15 @@ async function connectToWhatsApp() {
         }
     })
 }
+
+function flushTelemetryAndExit(): void {
+    void shutdownTelemetry()
+        .catch(() => undefined)
+        .finally(() => process.exit(0))
+}
+
+process.once('SIGINT', flushTelemetryAndExit)
+process.once('SIGTERM', flushTelemetryAndExit)
 
 ;(async () => {
     try {

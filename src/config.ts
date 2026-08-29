@@ -72,6 +72,10 @@ export const config = {
     catchupBackfillMaxPages: envInt('CATCHUP_BACKFILL_MAX_PAGES', 40),
     logLevel: envLogLevel('LOG_LEVEL', 'info'),
     adminPassword: env('ADMIN_PASSWORD', 'laiwaihong'),
+    otelEndpoint: env('OTEL_EXPORTER_OTLP_ENDPOINT', ''),
+    otelServiceName: env('OTEL_SERVICE_NAME', 'whatsapp-group-agent'),
+    otelExportIntervalMs: envInt('OTEL_METRIC_EXPORT_INTERVAL', 10_000),
+    otelDisabled: env('OTEL_SDK_DISABLED', '') === 'true',
 }
 
 export function matchesGroupPattern(name: string | undefined | null): boolean {

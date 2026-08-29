@@ -10,6 +10,7 @@ import { getGroupMetadata } from './cache.js'
 import { config, matchesGroupPattern } from './config.js'
 import { getLatestGroupMessage, getOldestGroupMessage, type LatestGroupMessage } from './db.js'
 import { log } from './log.js'
+import { recordCatchupRequest, setCatchupPending, withSpan } from './observe.js'
 import { settleDelayMs, waitHistoryRequest } from './rateLimit.js'
 
 function isBackfillReason(reason: string): boolean {
@@ -105,6 +106,7 @@ export function createCatchup(sock: WASocket) {
         if (index >= 0) pendingPdoOrder.splice(index, 1)
         backfillFinished.add(groupJid)
         log.info({ groupJid, why }, 'catchup.backfill_complete')
+        setCatchupPending(jobs.size)
     }
 
     function rememberPendingPdo(groupJid: string): void {
@@ -142,6 +144,7 @@ export function createCatchup(sock: WASocket) {
                 allowingRequests = true
                 await enqueueTrackedBackfill()
                 log.info({ pending: jobs.size, reason }, 'catchup.ready')
+                setCatchupPending(jobs.size)
                 void drain()
             })()
         }, waitMs)
@@ -204,41 +207,59 @@ export function createCatchup(sock: WASocket) {
         if (page >= pageLimit(reason)) return 'done'
         if (isBackfillReason(reason) && timestamp <= backfillUntil) return 'done'
 
-        try {
-            const latest = await getLatestGroupMessage(groupJid)
-            const coversAnchor = Boolean(latest && latest.timestamp >= timestamp - 2)
-            if (coversAnchor && !isBackfillReason(reason)) return 'done'
+        return withSpan(
+            'whatsapp.catchup.request',
+            {
+                'whatsapp.group.jid': groupJid,
+                'whatsapp.catchup.reason': reason,
+                'whatsapp.catchup.page': page + 1,
+            },
+            async (span) => {
+                try {
+                    const latest = await getLatestGroupMessage(groupJid)
+                    const coversAnchor = Boolean(latest && latest.timestamp >= timestamp - 2)
+                    if (coversAnchor && !isBackfillReason(reason)) {
+                        recordCatchupRequest({ result: 'skipped', reason })
+                        span.setAttribute('whatsapp.catchup.result', 'skipped')
+                        return 'done'
+                    }
 
-            const waitedMs = await waitHistoryRequest()
-            if (stopped) return 'done'
-            if (!allowingRequests) return 'retry'
+                    const waitedMs = await waitHistoryRequest()
+                    span.setAttribute('whatsapp.catchup.waited_ms', waitedMs)
+                    if (stopped) return 'done'
+                    if (!allowingRequests) return 'retry'
 
-            await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
-            if (isBackfillReason(reason)) {
-                rememberPendingPdo(groupJid)
-                if (reason === 'tracked-backfill') {
-                    pdoAttempts.set(groupJid, (pdoAttempts.get(groupJid) ?? 0) + 1)
+                    await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
+                    if (isBackfillReason(reason)) {
+                        rememberPendingPdo(groupJid)
+                        if (reason === 'tracked-backfill') {
+                            pdoAttempts.set(groupJid, (pdoAttempts.get(groupJid) ?? 0) + 1)
+                        }
+                    } else {
+                        pages.set(groupJid, page + 1)
+                    }
+                    recordCatchupRequest({ result: 'ok', reason })
+                    span.setAttribute('whatsapp.catchup.result', 'ok')
+                    log.info(
+                        {
+                            groupJid,
+                            messageId: key.id,
+                            page: page + 1,
+                            reason,
+                            waitedMs,
+                            backfillUntil,
+                            fromMe: key.fromMe,
+                        },
+                        'catchup.history_requested'
+                    )
+                    return 'done'
+                } catch (err) {
+                    recordCatchupRequest({ result: 'error', reason })
+                    log.warn({ err, groupJid, messageId: key.id, reason }, 'catchup.history_request_failed')
+                    throw err
                 }
-            } else {
-                pages.set(groupJid, page + 1)
             }
-            log.info(
-                {
-                    groupJid,
-                    messageId: key.id,
-                    page: page + 1,
-                    reason,
-                    waitedMs,
-                    backfillUntil,
-                    fromMe: key.fromMe,
-                },
-                'catchup.history_requested'
-            )
-            return 'done'
-        } catch (err) {
-            log.warn({ err, groupJid, messageId: key.id, reason }, 'catchup.history_request_failed')
-            return 'done'
-        }
+        ).catch(() => 'done')
     }
 
     async function drain(): Promise<void> {
@@ -251,9 +272,11 @@ export function createCatchup(sock: WASocket) {
                 const result = await requestFromAnchor(next)
                 if (result === 'retry') break
                 if (jobs.get(next.groupJid) === next) jobs.delete(next.groupJid)
+                setCatchupPending(jobs.size)
             }
         } finally {
             draining = false
+            setCatchupPending(jobs.size)
             if (!stopped && allowingRequests && jobs.size > 0) void drain()
         }
     }
@@ -265,6 +288,7 @@ export function createCatchup(sock: WASocket) {
         const page = pages.get(job.groupJid) ?? 0
         if (page >= pageLimit(job.reason)) return
         jobs.set(job.groupJid, job)
+        setCatchupPending(jobs.size)
         if (allowingRequests) void drain()
     }
 
@@ -387,6 +411,7 @@ export function createCatchup(sock: WASocket) {
             stopped = true
             allowingRequests = false
             jobs.clear()
+            setCatchupPending(0)
             clearSettleTimer()
         },
     }

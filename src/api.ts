@@ -19,6 +19,7 @@ import {
     uniqueArchivePath,
 } from './hkt.js'
 import { log } from './log.js'
+import { recordHttpRequest } from './observe.js'
 import {
     countAlbumMedia,
     getAlbumMediaForDownload,
@@ -210,6 +211,29 @@ function adminPasswordMatches(provided: string | undefined): boolean {
     return timingSafeEqual(expected, actual)
 }
 
+function metricRoute(path: string): string {
+    if (path.startsWith('/api/groups/') && path.includes('/messages')) {
+        return '/api/groups/:jid/messages'
+    }
+    if (path.startsWith('/api/media/')) return '/api/media/:messageId'
+    if (path.startsWith('/api/')) return path
+    if (path === '/' || path === '/index.html') return '/'
+    return '/static'
+}
+
+function requestMetrics(request: Request, response: Response, next: NextFunction): void {
+    const started = Date.now()
+    response.on('finish', () => {
+        recordHttpRequest({
+            method: request.method,
+            route: metricRoute(request.path),
+            status: response.statusCode,
+            durationMs: Date.now() - started,
+        })
+    })
+    next()
+}
+
 function requireAdmin(request: Request, response: Response, next: NextFunction): void {
     if (!adminPasswordMatches(request.get('x-admin-password'))) {
         response.status(401).json({ error: 'Invalid password' })
@@ -221,6 +245,7 @@ function requireAdmin(request: Request, response: Response, next: NextFunction):
 export function createApiApp() {
     const app = express()
     app.disable('x-powered-by')
+    app.use(requestMetrics)
 
     app.use((_request, response, next) => {
         response.setHeader('X-Robots-Tag', ROBOTS_TAG)
