@@ -478,7 +478,7 @@ function MediaLightbox({
 
     return createPortal(
         <div
-            className="lightbox"
+            className={`lightbox${items.length > 1 ? ' has-nav' : ''}`}
             role="dialog"
             aria-modal="true"
             aria-label="Media preview"
@@ -495,33 +495,33 @@ function MediaLightbox({
             >
                 ×
             </button>
-            {items.length > 1 && (
-                <>
-                    <button
-                        className="lightbox-nav prev"
-                        type="button"
-                        aria-label="Previous"
-                        onClick={(event) => {
-                            event.stopPropagation()
-                            onIndexChange((index - 1 + items.length) % items.length)
-                        }}
-                    >
-                        ‹
-                    </button>
-                    <button
-                        className="lightbox-nav next"
-                        type="button"
-                        aria-label="Next"
-                        onClick={(event) => {
-                            event.stopPropagation()
-                            onIndexChange((index + 1) % items.length)
-                        }}
-                    >
-                        ›
-                    </button>
-                </>
-            )}
             <div className="lightbox-media" onClick={(event) => event.stopPropagation()}>
+                {items.length > 1 && (
+                    <>
+                        <button
+                            className="lightbox-nav prev"
+                            type="button"
+                            aria-label="Previous"
+                            onClick={(event) => {
+                                event.stopPropagation()
+                                onIndexChange((index - 1 + items.length) % items.length)
+                            }}
+                        >
+                            ‹
+                        </button>
+                        <button
+                            className="lightbox-nav next"
+                            type="button"
+                            aria-label="Next"
+                            onClick={(event) => {
+                                event.stopPropagation()
+                                onIndexChange((index + 1) % items.length)
+                            }}
+                        >
+                            ›
+                        </button>
+                    </>
+                )}
                 <div className={`lightbox-stage${isPdfFile(item) ? ' is-embed' : ''}`}>
                     <LightboxStage item={item} />
                 </div>
@@ -655,7 +655,7 @@ function ConversationAlbum({
 }) {
     const visible = items.filter((item) => (includeDeleted || !item.isDeleted) && item.hasMedia)
     const preview = visible.slice(0, 4)
-    const extra = visible.length - preview.length
+    const extra = visible.length > 4 ? visible.length - 3 : 0
     const [openIndex, setOpenIndex] = useState<number | null>(null)
 
     if (visible.length === 0) {
@@ -699,7 +699,7 @@ function ConversationAlbum({
                                     loading="lazy"
                                 />
                             )}
-                            {isVideo && (
+                            {isVideo && !showMore && (
                                 <span className="conversation-album-play" aria-hidden="true">
                                     ▶
                                 </span>

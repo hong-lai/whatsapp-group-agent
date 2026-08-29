@@ -847,7 +847,7 @@ export default function AlbumView({
             {lightbox &&
                 createPortal(
                 <div
-                    className="lightbox"
+                    className={`lightbox${displayItems.length > 1 ? ' has-nav' : ''}`}
                     role="dialog"
                     aria-modal="true"
                     aria-label="Media preview"
@@ -864,33 +864,33 @@ export default function AlbumView({
                     >
                         ×
                     </button>
-                    {displayItems.length > 1 && (
-                        <>
-                            <button
-                                className="lightbox-nav prev"
-                                type="button"
-                                aria-label="Previous"
-                                onClick={(event) => {
-                                    event.stopPropagation()
-                                    setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, -1))
-                                }}
-                            >
-                                ‹
-                            </button>
-                            <button
-                                className="lightbox-nav next"
-                                type="button"
-                                aria-label="Next"
-                                onClick={(event) => {
-                                    event.stopPropagation()
-                                    setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, 1))
-                                }}
-                            >
-                                ›
-                            </button>
-                        </>
-                    )}
                     <div className="lightbox-media" onClick={stopTileAction}>
+                        {displayItems.length > 1 && (
+                            <>
+                                <button
+                                    className="lightbox-nav prev"
+                                    type="button"
+                                    aria-label="Previous"
+                                    onClick={(event) => {
+                                        event.stopPropagation()
+                                        setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, -1))
+                                    }}
+                                >
+                                    ‹
+                                </button>
+                                <button
+                                    className="lightbox-nav next"
+                                    type="button"
+                                    aria-label="Next"
+                                    onClick={(event) => {
+                                        event.stopPropagation()
+                                        setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, 1))
+                                    }}
+                                >
+                                    ›
+                                </button>
+                            </>
+                        )}
                         <div
                             className={`lightbox-stage${isPdfFile(lightbox) ? ' is-embed' : ''}`}
                         >

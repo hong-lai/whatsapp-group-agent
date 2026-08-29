@@ -1341,7 +1341,7 @@ h3 {
     width: 38px;
     height: 38px;
     position: absolute;
-    z-index: 2;
+    z-index: 4;
     top: 18px;
     right: 18px;
     border: 1px solid rgba(255, 255, 255, 0.25);
@@ -1370,12 +1370,17 @@ h3 {
     justify-content: center;
     position: absolute;
     inset: 48px 72px;
+    overflow: hidden;
 }
 
 .lightbox-stage.is-embed {
-    inset: 0;
+    inset: 12px 16px;
     align-items: stretch;
     justify-content: stretch;
+}
+
+.lightbox.has-nav .lightbox-stage.is-embed {
+    inset: 16px 72px;
 }
 
 .lightbox-stage img,
@@ -1395,6 +1400,7 @@ h3 {
     height: 100%;
     min-height: 0;
     border: 0;
+    border-radius: 12px;
     background: #fff;
 }
 
@@ -1490,15 +1496,19 @@ h3 {
     display: grid;
     place-items: center;
     position: absolute;
-    z-index: 2;
+    z-index: 3;
     top: 50%;
     transform: translateY(-50%);
     border: 1px solid rgba(255, 255, 255, 0.25);
     border-radius: 50%;
     color: white;
-    background: rgba(255, 255, 255, 0.12);
+    background: rgba(17, 32, 28, 0.72);
     font-size: 1.6rem;
     line-height: 1;
+}
+
+.lightbox-nav:hover {
+    background: rgba(17, 32, 28, 0.88);
 }
 
 .lightbox-nav.prev {
@@ -1506,7 +1516,7 @@ h3 {
 }
 
 .lightbox-nav.next {
-    right: 278px;
+    right: 18px;
 }
 
 .messages-heading {
@@ -2773,10 +2783,6 @@ button.document-link {
         height: 232px;
     }
 
-    .lightbox-nav.next {
-        right: 18px;
-    }
-
     .album-dashboard {
         height: max(560px, calc(100dvh - 88px));
         overflow: hidden;
@@ -2875,7 +2881,11 @@ button.document-link {
     }
 
     .lightbox-stage.is-embed {
-        inset: 0;
+        inset: 56px 12px 12px;
+    }
+
+    .lightbox.has-nav .lightbox-stage.is-embed {
+        inset: 56px 56px 16px;
     }
 
     .lightbox-info {
