@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
 import DateRangePicker from './DateRangePicker'
@@ -372,6 +372,34 @@ function mediaUrl(messageId: string): string {
     return `/api/media/${encodeURIComponent(messageId)}`
 }
 
+function useMediaReady(src: string) {
+    const [readySrc, setReadySrc] = useState<string | null>(null)
+    const markReady = useCallback(() => setReadySrc(src), [src])
+    const bind = useCallback(
+        (element: HTMLImageElement | HTMLVideoElement | null) => {
+            if (!element) return
+            if (element instanceof HTMLImageElement && element.complete && element.naturalWidth > 0) {
+                markReady()
+                return
+            }
+            if (element instanceof HTMLVideoElement && element.readyState >= 2) {
+                markReady()
+            }
+        },
+        [markReady]
+    )
+
+    return {
+        ready: readySrc === src,
+        bind,
+        onReady: markReady,
+    }
+}
+
+function MediaPlaceholder() {
+    return <span className="media-placeholder skeleton" aria-hidden="true" />
+}
+
 function DownloadIcon() {
     return (
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -552,6 +580,51 @@ function MediaLightbox({
     )
 }
 
+function MessageMediaButton({
+    url,
+    kind,
+    alt,
+    label,
+    onOpen,
+}: {
+    url: string
+    kind: 'image' | 'video'
+    alt: string
+    label: string
+    onOpen: () => void
+}) {
+    const src = kind === 'video' ? `${url}#t=0.001` : url
+    const { ready, bind, onReady } = useMediaReady(src)
+
+    return (
+        <button
+            type="button"
+            className={`media-frame${kind === 'video' ? ' is-video' : ''}${ready ? ' is-ready' : ' is-loading'}`}
+            onClick={onOpen}
+            aria-label={label}
+        >
+            {!ready && <MediaPlaceholder />}
+            {kind === 'video' ? (
+                <video
+                    ref={bind}
+                    src={src}
+                    muted
+                    playsInline
+                    preload="metadata"
+                    onLoadedData={onReady}
+                />
+            ) : (
+                <img ref={bind} src={src} alt={alt} loading="lazy" onLoad={onReady} />
+            )}
+            {kind === 'video' && ready && (
+                <span className="conversation-album-play" aria-hidden="true">
+                    ▶
+                </span>
+            )}
+        </button>
+    )
+}
+
 function MediaPreview({ message }: { message: Message }) {
     const [open, setOpen] = useState(false)
     if (!message.hasMedia) return null
@@ -561,14 +634,13 @@ function MediaPreview({ message }: { message: Message }) {
     if (type === 'imageMessage' || type === 'stickerMessage') {
         return (
             <>
-                <button
-                    type="button"
-                    className="media-frame"
-                    onClick={() => setOpen(true)}
-                    aria-label="Open photo"
-                >
-                    <img src={url} alt={message.textContent || 'Shared media'} loading="lazy" />
-                </button>
+                <MessageMediaButton
+                    url={url}
+                    kind="image"
+                    alt={message.textContent || 'Shared media'}
+                    label="Open photo"
+                    onOpen={() => setOpen(true)}
+                />
                 {open && (
                     <MediaLightbox
                         items={[message]}
@@ -583,17 +655,13 @@ function MediaPreview({ message }: { message: Message }) {
     if (isAlbumVideo(message)) {
         return (
             <>
-                <button
-                    type="button"
-                    className="media-frame is-video"
-                    onClick={() => setOpen(true)}
-                    aria-label="Open video"
-                >
-                    <video src={`${url}#t=0.001`} muted playsInline preload="metadata" />
-                    <span className="conversation-album-play" aria-hidden="true">
-                        ▶
-                    </span>
-                </button>
+                <MessageMediaButton
+                    url={url}
+                    kind="video"
+                    alt={message.textContent || 'Shared video'}
+                    label="Open video"
+                    onOpen={() => setOpen(true)}
+                />
                 {open && (
                     <MediaLightbox
                         items={[message]}
@@ -643,6 +711,56 @@ function albumSummary(items: Message[]): string {
     return parts.join(' · ') || 'Album'
 }
 
+function ConversationAlbumTile({
+    item,
+    showMore,
+    onOpen,
+}: {
+    item: Message
+    showMore: number
+    onOpen: () => void
+}) {
+    const isVideo = isAlbumVideo(item)
+    const src = isVideo ? `${mediaUrl(item.messageId)}#t=0.001` : mediaUrl(item.messageId)
+    const { ready, bind, onReady } = useMediaReady(src)
+
+    return (
+        <button
+            className={`conversation-album-tile${isVideo ? ' video' : ''}${ready ? ' is-ready' : ' is-loading'}`}
+            type="button"
+            onClick={onOpen}
+            aria-label={
+                showMore
+                    ? `Open album, ${showMore} more`
+                    : isVideo
+                      ? 'Open video'
+                      : 'Open photo'
+            }
+        >
+            {!ready && <MediaPlaceholder />}
+            {isVideo ? (
+                <video ref={bind} src={src} preload="metadata" muted playsInline onLoadedData={onReady} />
+            ) : (
+                <img
+                    ref={bind}
+                    src={src}
+                    alt={item.textContent || 'Album photo'}
+                    loading="lazy"
+                    onLoad={onReady}
+                />
+            )}
+            {isVideo && !showMore && ready && (
+                <span className="conversation-album-play" aria-hidden="true">
+                    ▶
+                </span>
+            )}
+            {showMore > 0 && (
+                <span className="conversation-album-more">+{showMore}</span>
+            )}
+        </button>
+    )
+}
+
 function ConversationAlbum({
     items,
     includeDeleted = false,
@@ -666,45 +784,14 @@ function ConversationAlbum({
                 aria-label={albumSummary(visible)}
             >
                 {preview.map((item, index) => {
-                    const isVideo = isAlbumVideo(item)
                     const showMore = extra > 0 && index === preview.length - 1
                     return (
-                        <button
-                            className={`conversation-album-tile ${isVideo ? 'video' : ''}`}
+                        <ConversationAlbumTile
                             key={item.messageId}
-                            type="button"
-                            onClick={() => setOpenIndex(index)}
-                            aria-label={
-                                showMore
-                                    ? `Open album, ${extra} more`
-                                    : isVideo
-                                      ? 'Open video'
-                                      : 'Open photo'
-                            }
-                        >
-                            {isVideo ? (
-                                <video
-                                    src={`${mediaUrl(item.messageId)}#t=0.001`}
-                                    preload="metadata"
-                                    muted
-                                    playsInline
-                                />
-                            ) : (
-                                <img
-                                    src={mediaUrl(item.messageId)}
-                                    alt={item.textContent || 'Album photo'}
-                                    loading="lazy"
-                                />
-                            )}
-                            {isVideo && !showMore && (
-                                <span className="conversation-album-play" aria-hidden="true">
-                                    ▶
-                                </span>
-                            )}
-                            {showMore && (
-                                <span className="conversation-album-more">+{extra}</span>
-                            )}
-                        </button>
+                            item={item}
+                            showMore={showMore ? extra : 0}
+                            onOpen={() => setOpenIndex(index)}
+                        />
                     )
                 })}
             </div>
@@ -814,18 +901,20 @@ function MessageCard({ message }: { message: Message }) {
             </span>
             <div className="message-content">
                 <header>
-                    <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
+                    <span className="message-byline">
+                        <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
+                        {message.isForwarded && (!message.isDeleted || revealed) && (
+                            <span className="forwarded-label">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M4 15.5C4 11.4 7.4 8 11.5 8H19" />
+                                    <path d="m15.5 4.5 5 3.5-5 3.5" />
+                                </svg>
+                                Forwarded
+                            </span>
+                        )}
+                    </span>
                     <time>{hkDateTime.format(message.timestamp * 1000)}</time>
                 </header>
-                {message.isForwarded && (!message.isDeleted || revealed) && (
-                    <p className="forwarded-label">
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M15 7h-1.8A5.2 5.2 0 0 0 8 12.2V17" />
-                            <path d="m12 4 4 3-4 3" />
-                        </svg>
-                        Forwarded
-                    </p>
-                )}
                 {(!message.isDeleted || revealed) && <QuotePreview message={message} />}
                 <MessageBody message={message} revealed={revealed} />
                 {canReveal && (
@@ -1365,7 +1454,7 @@ export default function App() {
                         {groupsLoading && groups.length > 0 && (
                             <div className="content-overlay" role="status">
                                 <span className="overlay-spinner" />
-                                Updating
+                                Loading
                             </div>
                         )}
                         {groupsLoading &&
@@ -1438,7 +1527,7 @@ export default function App() {
                                     {messagesLoading && (
                                         <div className="content-overlay" role="status">
                                             <span className="overlay-spinner" />
-                                            Updating
+                                            Loading
                                         </div>
                                     )}
                                     {messages.map((message) => (

@@ -66,6 +66,13 @@ svg {
         padding-top: env(safe-area-inset-top, 0px);
         padding-bottom: env(safe-area-inset-bottom, 0px);
     }
+
+    .lightbox-close {
+        width: 44px;
+        height: 44px;
+        top: calc(12px + env(safe-area-inset-top, 0px));
+        right: calc(12px + env(safe-area-inset-right, 0px));
+    }
 }
 
 .app-shell {
@@ -1584,8 +1591,8 @@ h3 {
     height: 38px;
     position: absolute;
     z-index: 4;
-    top: 18px;
-    right: 18px;
+    top: calc(14px + env(safe-area-inset-top, 0px));
+    right: calc(14px + env(safe-area-inset-right, 0px));
     border: 1px solid rgba(255, 255, 255, 0.25);
     border-radius: 11px;
     color: white;
@@ -1968,6 +1975,14 @@ h3 {
     gap: 12px;
 }
 
+.message-byline {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
 .message-content header strong {
     color: #175f50;
     font-size: 0.78rem;
@@ -1978,23 +1993,28 @@ h3 {
     font-size: 0.62rem;
 }
 
-.forwarded-label {
+.message-content .forwarded-label {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    margin: 6px 0 0;
-    color: #7d8f89;
-    font-size: 0.68rem;
+    gap: 4px;
+    padding: 2px 7px 2px 5px;
+    border: 1px solid #cfe4dc;
+    border-radius: 999px;
+    color: #2c6b5b;
+    background: #e8f4ef;
+    font-size: 0.58rem;
     font-weight: 700;
-    font-style: italic;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
 }
 
 .forwarded-label svg {
-    width: 0.85rem;
-    height: 0.85rem;
+    width: 0.78rem;
+    height: 0.78rem;
     fill: none;
     stroke: currentColor;
-    stroke-width: 1.8;
+    stroke-width: 2;
     stroke-linecap: round;
     stroke-linejoin: round;
 }
@@ -2155,6 +2175,22 @@ blockquote.quoted-preview .quoted-text {
     background: #e8eeeb;
 }
 
+.media-frame.is-loading {
+    width: min(240px, 100%);
+    min-height: 180px;
+    max-height: 260px;
+    aspect-ratio: 3 / 4;
+}
+
+.media-placeholder,
+.media-placeholder.skeleton {
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    display: block;
+    border-radius: inherit;
+}
+
 button.media-frame {
     padding: 0;
     border: 0;
@@ -2171,6 +2207,20 @@ button.media-frame:hover video {
 button.media-frame img,
 button.media-frame video {
     transition: transform 180ms ease;
+}
+
+.media-frame.is-loading img,
+.media-frame.is-loading video {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    opacity: 0;
+}
+
+.media-frame.is-ready img,
+.media-frame.is-ready video {
+    animation: media-in 240ms var(--ease-out);
 }
 
 .conversation-album {
@@ -2226,6 +2276,16 @@ button.media-frame video {
     height: 100%;
     display: block;
     object-fit: cover;
+}
+
+.conversation-album-tile.is-loading img,
+.conversation-album-tile.is-loading video {
+    opacity: 0;
+}
+
+.conversation-album-tile.is-ready img,
+.conversation-album-tile.is-ready video {
+    animation: media-in 240ms var(--ease-out);
 }
 
 .conversation-album-play,
@@ -3089,6 +3149,10 @@ button.document-link {
         white-space: nowrap;
     }
 
+    .message-byline {
+        flex: 1;
+    }
+
     .message-content time {
         flex-shrink: 0;
         white-space: nowrap;
@@ -3254,20 +3318,27 @@ button.document-link {
         padding: 0;
     }
 
+    .lightbox-close {
+        width: 44px;
+        height: 44px;
+        top: calc(10px + env(safe-area-inset-top, 0px));
+        right: calc(10px + env(safe-area-inset-right, 0px));
+    }
+
     .lightbox-stage {
-        inset: 56px 56px 16px;
+        inset: calc(62px + env(safe-area-inset-top, 0px)) 56px 16px;
     }
 
     .lightbox-stage.is-embed {
-        inset: 56px 12px 12px;
+        inset: calc(62px + env(safe-area-inset-top, 0px)) 12px 12px;
     }
 
     .lightbox.has-nav .lightbox-stage.is-embed {
-        inset: 56px 56px 16px;
+        inset: calc(62px + env(safe-area-inset-top, 0px)) 56px 16px;
     }
 
     .lightbox-info {
-        padding: 16px;
+        padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
     }
 
     .lightbox-info button,

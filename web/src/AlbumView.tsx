@@ -840,7 +840,7 @@ export default function AlbumView({
                 {showOverlay && (
                     <div className="content-overlay" role="status">
                         <span className="overlay-spinner" />
-                        Updating
+                        Loading
                     </div>
                 )}
                 {loading && items.length === 0 ? (
