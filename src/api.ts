@@ -425,7 +425,16 @@ export function createApiApp() {
 
     const webDist = fileURLToPath(new URL('../web/dist', import.meta.url))
     if (existsSync(webDist)) {
-        app.use(express.static(webDist, { index: false }))
+        app.use(
+            express.static(webDist, {
+                index: false,
+                setHeaders(response, filePath) {
+                    if (filePath.endsWith(`${sep}sw.js`) || filePath.endsWith('.webmanifest')) {
+                        response.setHeader('Cache-Control', 'no-cache')
+                    }
+                },
+            })
+        )
         app.use((request, response, next) => {
             if (!['GET', 'HEAD'].includes(request.method) || request.path.startsWith('/api/')) {
                 next()

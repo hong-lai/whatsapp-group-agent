@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
 import FilenameSettings from './FilenameSettings'
+import InstallApp from './InstallApp'
 import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
 
 type Group = {
@@ -1239,6 +1240,7 @@ export default function App() {
                             ))}
                         </div>
                     )}
+                    <InstallApp />
                     <button
                         type="button"
                         className="settings-toggle"
