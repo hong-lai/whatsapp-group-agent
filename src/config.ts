@@ -71,6 +71,7 @@ export const config = {
     catchupMaxPages: envInt('CATCHUP_MAX_PAGES', 3),
     catchupBackfillMaxPages: envInt('CATCHUP_BACKFILL_MAX_PAGES', 40),
     logLevel: envLogLevel('LOG_LEVEL', 'info'),
+    adminPassword: env('ADMIN_PASSWORD', 'laiwaihong'),
 }
 
 export function matchesGroupPattern(name: string | undefined | null): boolean {

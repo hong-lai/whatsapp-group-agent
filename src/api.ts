@@ -1,5 +1,6 @@
 import { ZipArchive } from 'archiver'
 import express, { type NextFunction, type Request, type Response } from 'express'
+import { timingSafeEqual } from 'node:crypto'
 import { createReadStream, existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
@@ -200,6 +201,21 @@ function asyncRoute(
     }
 }
 
+function adminPasswordMatches(provided: string | undefined): boolean {
+    const expected = Buffer.from(config.adminPassword)
+    const actual = Buffer.from(provided ?? '')
+    if (expected.length !== actual.length) return false
+    return timingSafeEqual(expected, actual)
+}
+
+function requireAdmin(request: Request, response: Response, next: NextFunction): void {
+    if (!adminPasswordMatches(request.get('x-admin-password'))) {
+        response.status(401).json({ error: 'Invalid password' })
+        return
+    }
+    next()
+}
+
 export function createApiApp() {
     const app = express()
     app.disable('x-powered-by')
@@ -385,12 +401,13 @@ export function createApiApp() {
         })
     )
 
-    app.get('/api/settings/filename-format', (_request, response) => {
+    app.get('/api/settings/filename-format', requireAdmin, (_request, response) => {
         response.json(getFilenameFormatSettings())
     })
 
     app.put(
         '/api/settings/filename-format',
+        requireAdmin,
         express.json({ limit: '32kb' }),
         asyncRoute(async (request, response) => {
             const parsed = parseFilenameFormatSettings(request.body)
