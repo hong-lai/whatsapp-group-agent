@@ -72,6 +72,30 @@ services:
     tty: true
     restart: unless-stopped
 
+  # Stable public URL. Needs a domain in Cloudflare + CLOUDFLARE_TUNNEL_TOKEN.
+  # Origin in the dashboard must be http://app:3000
+  # docker compose --profile tunnel up -d
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - app
+
+  # No domain required. URL is https://….trycloudflare.com and changes on restart.
+  # docker compose --profile quick-tunnel up -d
+  # docker compose logs -f quick-tunnel
+  quick-tunnel:
+    image: cloudflare/cloudflared:latest
+    profiles: ["quick-tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate --url http://app:3000
+    depends_on:
+      - app
+
 volumes:
   postgres_data:
   redis_data:
