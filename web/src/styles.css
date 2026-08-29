@@ -149,6 +149,20 @@ svg {
     font-weight: 600;
 }
 
+.sort-switch {
+    flex-shrink: 0;
+}
+
+.sort-switch button {
+    width: 32px;
+    height: 28px;
+}
+
+.sort-switch svg {
+    width: 1rem;
+    height: 1rem;
+}
+
 .connection-status {
     position: relative;
 }
@@ -2473,6 +2487,10 @@ button.document-link {
     font-weight: 700;
 }
 
+.load-sentinel.is-start {
+    padding: 8px 0 18px;
+}
+
 .load-more,
 .empty-state button {
     display: block;
@@ -2929,6 +2947,11 @@ button.document-link {
     .settings-toggle {
         width: 32px;
         height: 32px;
+    }
+
+    .sort-switch button {
+        width: 30px;
+        height: 28px;
     }
 
     .brand small {

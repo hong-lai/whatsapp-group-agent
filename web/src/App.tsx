@@ -1,10 +1,16 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
 import DateRangePicker from './DateRangePicker'
 import FilenameSettings from './FilenameSettings'
 import InstallApp from './InstallApp'
-import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
+import {
+    mergeFirstPage,
+    useInfiniteScroll,
+    usePinnedScroll,
+    useVisibleInterval,
+    type SortOrder,
+} from './useVisibleInterval'
 
 type Group = {
     jid: string
@@ -90,6 +96,10 @@ function initialAlbumGroups(params: URLSearchParams): string[] {
     return one && params.get('scope') === 'group' ? [one] : []
 }
 
+function initialSortOrder(params: URLSearchParams): SortOrder {
+    return params.get('order') === 'asc' ? 'asc' : 'desc'
+}
+
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
     timeZone: 'Asia/Hong_Kong',
     dateStyle: 'medium',
@@ -137,7 +147,7 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 function Icon({
     name,
 }: {
-    name: 'archive' | 'search' | 'users' | 'message' | 'image' | 'settings'
+    name: 'archive' | 'search' | 'users' | 'message' | 'image' | 'settings' | 'sortAsc' | 'sortDesc'
 }) {
     const paths = {
         archive: (
@@ -175,6 +185,18 @@ function Icon({
             <>
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z" />
+            </>
+        ),
+        sortAsc: (
+            <>
+                <path d="M4 7h9M4 12h6M4 17h3" />
+                <path d="M18 18V6m0 0-3 3m3-3 3 3" />
+            </>
+        ),
+        sortDesc: (
+            <>
+                <path d="M4 7h3M4 12h6M4 17h9" />
+                <path d="M18 6v12m0 0-3-3m3 3 3-3" />
             </>
         ),
     }
@@ -989,6 +1011,7 @@ export default function App() {
         initialMediaCategories(initialParams)
     )
     const [albumQuery, setAlbumQuery] = useState(initialParams.get('q') || '')
+    const [sortOrder, setSortOrder] = useState<SortOrder>(initialSortOrder(initialParams))
     const [search, setSearch] = useState('')
     const [showEmptyGroups, setShowEmptyGroups] = useState(initialParams.get('empty') === '1')
     const [groups, setGroups] = useState<Group[]>([])
@@ -1033,12 +1056,25 @@ export default function App() {
         () => (pattern?.source ? pattern.source.split('|').map((term) => term.trim()).filter(Boolean) : []),
         [pattern]
     )
+    const displayMessages = useMemo(
+        () => (sortOrder === 'asc' ? [...messages].reverse() : messages),
+        [messages, sortOrder]
+    )
+    const messageScrollKey = `${selectedJid ?? ''}|${from}|${to}|${reloadKey}`
+    const { onScroll: onMessageListScroll } = usePinnedScroll(
+        messageListRef,
+        messages,
+        sortOrder,
+        messageScrollKey,
+        scrollRestore
+    )
 
     useEffect(() => {
         const params = new URLSearchParams()
         params.set('from', from)
         params.set('to', to)
         params.set('view', view)
+        params.set('order', sortOrder)
         if (showEmptyGroups) params.set('empty', '1')
         if (selectedJid) params.set('group', selectedJid)
         if (view === 'album') {
@@ -1050,7 +1086,7 @@ export default function App() {
             if (albumQuery.trim()) params.set('q', albumQuery.trim())
         }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
-    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, albumQuery, showEmptyGroups])
+    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, albumQuery, showEmptyGroups, sortOrder])
 
     useEffect(() => {
         if (groupsLoading) return
@@ -1111,13 +1147,6 @@ export default function App() {
         }
     }, [])
 
-    useLayoutEffect(() => {
-        const pending = scrollRestore.current
-        const list = messageListRef.current
-        if (!pending || !list) return
-        list.scrollTop = pending.top + (list.scrollHeight - pending.height)
-        scrollRestore.current = null
-    }, [messages])
 
     useEffect(() => {
         silentGen.current += 1
@@ -1242,7 +1271,7 @@ export default function App() {
                 )
                 if (gen !== silentGen.current) return
                 const list = messageListRef.current
-                if (list && list.scrollTop > 40) {
+                if (sortOrder === 'desc' && list && list.scrollTop > 40) {
                     scrollRestore.current = { top: list.scrollTop, height: list.scrollHeight }
                 } else {
                     scrollRestore.current = null
@@ -1275,13 +1304,18 @@ export default function App() {
             Boolean(selectedJid) &&
             Boolean(nextCursor) &&
             !loadingMore &&
-            !messagesLoading
+            !messagesLoading,
+        sortOrder
     )
 
     async function loadMore() {
         if (!selectedJid || !nextCursor || loadingMore) return
         silentGen.current += 1
         setLoadingMore(true)
+        const list = messageListRef.current
+        if (sortOrder === 'asc' && list) {
+            scrollRestore.current = { top: list.scrollTop, height: list.scrollHeight }
+        }
         try {
             const data = await getJson<MessagesResponse>(
                 `/api/groups/${encodeURIComponent(selectedJid)}/messages?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&cursor=${encodeURIComponent(nextCursor)}`
@@ -1325,6 +1359,28 @@ export default function App() {
                         </div>
                     )}
                     <InstallApp />
+                    <div className="segmented-control sort-switch" role="group" aria-label="Sort order">
+                        <button
+                            type="button"
+                            className={sortOrder === 'asc' ? 'active' : ''}
+                            aria-pressed={sortOrder === 'asc'}
+                            aria-label="Oldest first"
+                            title="Oldest first"
+                            onClick={() => setSortOrder('asc')}
+                        >
+                            <Icon name="sortAsc" />
+                        </button>
+                        <button
+                            type="button"
+                            className={sortOrder === 'desc' ? 'active' : ''}
+                            aria-pressed={sortOrder === 'desc'}
+                            aria-label="Newest first"
+                            title="Newest first"
+                            onClick={() => setSortOrder('desc')}
+                        >
+                            <Icon name="sortDesc" />
+                        </button>
+                    </div>
                     <button
                         type="button"
                         className="settings-toggle"
@@ -1523,6 +1579,7 @@ export default function App() {
                                 <div
                                     className={`message-list ${messagesLoading ? 'is-loading' : ''}`}
                                     ref={messageListRef}
+                                    onScroll={onMessageListScroll}
                                 >
                                     {messagesLoading && (
                                         <div className="content-overlay" role="status">
@@ -1530,10 +1587,15 @@ export default function App() {
                                             Loading
                                         </div>
                                     )}
-                                    {messages.map((message) => (
+                                    {sortOrder === 'asc' && nextCursor && (
+                                        <div className="load-sentinel is-start" ref={olderSentinelRef}>
+                                            {loadingMore ? 'Loading…' : ''}
+                                        </div>
+                                    )}
+                                    {displayMessages.map((message) => (
                                         <MessageCard message={message} key={message.messageId} />
                                     ))}
-                                    {nextCursor && (
+                                    {sortOrder === 'desc' && nextCursor && (
                                         <div className="load-sentinel" ref={olderSentinelRef}>
                                             {loadingMore ? 'Loading…' : ''}
                                         </div>
@@ -1574,6 +1636,7 @@ export default function App() {
                         onTypesChange={setAlbumTypes}
                         query={albumQuery}
                         onQueryChange={setAlbumQuery}
+                        sortOrder={sortOrder}
                         active={view === 'album'}
                         onLiveUpdate={pulseLive}
                     />

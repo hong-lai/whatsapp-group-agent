@@ -1,6 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { mergeFirstPage, useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
+import {
+    mergeFirstPage,
+    useInfiniteScroll,
+    useVisibleInterval,
+    type SortOrder,
+} from './useVisibleInterval'
 
 export type MediaCategory = 'image' | 'video' | 'document' | 'audio' | 'sticker'
 export type AlbumScope = 'all' | 'group'
@@ -43,6 +48,7 @@ type Props = {
     onTypesChange: (types: MediaCategory[]) => void
     query: string
     onQueryChange: (query: string) => void
+    sortOrder: SortOrder
     active: boolean
     onLiveUpdate: () => void
 }
@@ -475,6 +481,7 @@ export default function AlbumView({
     onTypesChange,
     query,
     onQueryChange,
+    sortOrder,
     active,
     onLiveUpdate,
 }: Props) {
@@ -519,6 +526,12 @@ export default function AlbumView({
     }, [])
 
     useLayoutEffect(() => {
+        scrollRestore.current = null
+        const list = scrollRef.current
+        if (list) list.scrollTop = 0
+    }, [filterKey, sortOrder])
+
+    useLayoutEffect(() => {
         const pending = scrollRestore.current
         const list = scrollRef.current
         if (!pending || !list) return
@@ -561,7 +574,7 @@ export default function AlbumView({
             const data = await albumJson(albumUrl(from, to, scope, selectedJids, types, query))
             if (gen !== silentGen.current) return
             const list = scrollRef.current
-            if (list && list.scrollTop > 40) {
+            if (sortOrder === 'desc' && list && list.scrollTop > 40) {
                 scrollRestore.current = { top: list.scrollTop, height: list.scrollHeight }
             } else {
                 scrollRestore.current = null
@@ -596,7 +609,10 @@ export default function AlbumView({
         () => items.filter((item) => selected.has(item.messageId)),
         [items, selected]
     )
-    const groupedItems = useMemo(() => groupAlbumItems(items), [items])
+    const groupedItems = useMemo(
+        () => groupAlbumItems(sortOrder === 'asc' ? [...items].reverse() : items),
+        [items, sortOrder]
+    )
     const displayItems = useMemo(
         () => groupedItems.flatMap((group) => group.items),
         [groupedItems]
@@ -653,6 +669,10 @@ export default function AlbumView({
         silentGen.current += 1
         setLoadingMore(true)
         setError(null)
+        const list = scrollRef.current
+        if (sortOrder === 'asc' && list) {
+            scrollRestore.current = { top: list.scrollTop, height: list.scrollHeight }
+        }
         try {
             const data = await albumJson(
                 albumUrl(from, to, scope, selectedJids, types, query, nextCursor)
