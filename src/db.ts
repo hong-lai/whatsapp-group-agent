@@ -161,6 +161,7 @@ const ALBUM_ASSOCIATION_WINDOW_SECONDS = 30
 const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage'] as const
 const ALBUM_PARENTS_BACKFILL_KEY = 'album_parents_backfilled'
 const ALBUM_BURST_UNLINK_KEY = 'album_burst_unlinked_v1'
+const ALBUM_EXPECTED_ZERO_KEY = 'album_expected_zero_nulled_v1'
 
 type AlbumCandidate = {
     messageId: string
@@ -291,6 +292,54 @@ async function migrateAlbumParents(): Promise<void> {
             log.info({ unlinked }, 'db.album_burst_unlinked')
         }
     }
+
+    if (!(await getAppSetting(ALBUM_EXPECTED_ZERO_KEY))) {
+        const nulled = await pool.query<{
+            message_id: string
+            group_jid: string
+            sender_jid: string | null
+            timestamp: string
+            album_expected_images: number | null
+            album_expected_videos: number | null
+        }>(
+            `UPDATE messages
+             SET album_expected_images = NULLIF(album_expected_images, 0),
+                 album_expected_videos = NULLIF(album_expected_videos, 0)
+             WHERE message_type = 'albumMessage'
+               AND (album_expected_images = 0 OR album_expected_videos = 0)
+             RETURNING
+                message_id,
+                group_jid,
+                sender_jid,
+                EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp,
+                album_expected_images,
+                album_expected_videos`
+        )
+        let attached = 0
+        for (const album of nulled.rows) {
+            if (album.album_expected_images != null || album.album_expected_videos != null) continue
+            if (!Number.isFinite(Number(album.timestamp))) continue
+            attached += await attachNearbyAlbumMedia({
+                parentId: album.message_id,
+                groupJid: album.group_jid,
+                senderJid: album.sender_jid,
+                timestamp: Number(album.timestamp),
+                expectedImages: null,
+                expectedVideos: null,
+            })
+        }
+        await setAppSetting(ALBUM_EXPECTED_ZERO_KEY, {
+            nulled: nulled.rowCount ?? 0,
+            attached,
+            at: Date.now(),
+        })
+        if ((nulled.rowCount ?? 0) > 0 || attached > 0) {
+            log.info(
+                { nulled: nulled.rowCount ?? 0, attached },
+                'db.album_expected_zeros_nulled'
+            )
+        }
+    }
 }
 
 function asEpochSeconds(value: string | number | null | undefined): number {
@@ -327,7 +376,8 @@ function albumBurst(
 }
 
 function expectedKnown(album: Pick<AlbumMeta, 'expectedImages' | 'expectedVideos'>): boolean {
-    return album.expectedImages != null || album.expectedVideos != null
+    return (album.expectedImages != null && album.expectedImages > 0)
+        || (album.expectedVideos != null && album.expectedVideos > 0)
 }
 
 function albumSlotsRemaining(
@@ -816,10 +866,12 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             album_parent_id = COALESCE(EXCLUDED.album_parent_id, messages.album_parent_id),
             album_index = COALESCE(EXCLUDED.album_index, messages.album_index),
             album_expected_images = COALESCE(
-                EXCLUDED.album_expected_images, messages.album_expected_images
+                NULLIF(EXCLUDED.album_expected_images, 0),
+                NULLIF(messages.album_expected_images, 0)
             ),
             album_expected_videos = COALESCE(
-                EXCLUDED.album_expected_videos, messages.album_expected_videos
+                NULLIF(EXCLUDED.album_expected_videos, 0),
+                NULLIF(messages.album_expected_videos, 0)
             ),
             quoted_message = COALESCE(NULLIF(BTRIM(messages.quoted_message), ''), EXCLUDED.quoted_message),
             reply_to_id = COALESCE(messages.reply_to_id, EXCLUDED.reply_to_id),
@@ -844,6 +896,26 @@ export async function insertMessage(row: MessageRow): Promise<void> {
             row.isHistory,
             row.isForwarded,
         ]
+    )
+}
+
+export async function updateAlbumExpected(
+    messageId: string,
+    expectedImages: number | null,
+    expectedVideos: number | null
+): Promise<void> {
+    if (
+        (expectedImages == null || expectedImages <= 0) &&
+        (expectedVideos == null || expectedVideos <= 0)
+    ) {
+        return
+    }
+    await pool.query(
+        `UPDATE messages
+         SET album_expected_images = COALESCE(NULLIF($2, 0), album_expected_images),
+             album_expected_videos = COALESCE(NULLIF($3, 0), album_expected_videos)
+         WHERE message_id = $1 AND message_type = 'albumMessage'`,
+        [messageId, expectedImages, expectedVideos]
     )
 }
 

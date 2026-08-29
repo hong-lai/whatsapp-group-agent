@@ -58,6 +58,7 @@ import {
     resolveAlbumParent,
     nextAlbumIndex,
     clearAlbumLink,
+    updateAlbumExpected,
     updateAlbumLink,
     updateMessageMediaPath,
     upsertGroup,
@@ -435,17 +436,37 @@ function albumAssociationOf(
     return { parentId: null, index: null }
 }
 
-function albumExpectedOf(
-    content: proto.IMessage | null | undefined
-): { images: number | null; videos: number | null } {
-    const album = content?.albumMessage
-    if (!album) return { images: null, videos: null }
-    const images = asAlbumIndex(album.expectedImageCount)
-    const videos = asAlbumIndex(album.expectedVideoCount)
-    return {
-        images: images != null && images >= 0 ? images : null,
-        videos: videos != null && videos >= 0 ? videos : null,
+function albumMessageFields(
+    album: proto.Message.IAlbumMessage | null | undefined
+): Record<string, unknown> | null {
+    if (!album) return null
+    if (typeof (album as proto.Message.AlbumMessage).toJSON === 'function') {
+        return (album as proto.Message.AlbumMessage).toJSON() as Record<string, unknown>
     }
+    return album as Record<string, unknown>
+}
+
+function albumExpectedOf(
+    ...messages: Array<proto.IMessage | null | undefined>
+): { images: number | null; videos: number | null } {
+    for (const message of messages) {
+        for (const layer of messageLayers(message)) {
+            const record = albumMessageFields(layer?.albumMessage)
+            if (!record) continue
+            const images = asAlbumIndex(record.expectedImageCount ?? record.expected_image_count)
+            const videos = asAlbumIndex(record.expectedVideoCount ?? record.expected_video_count)
+            const hasImages = images != null && images > 0
+            const hasVideos = videos != null && videos > 0
+            // History sync often omits these fields. protobufjs then surfaces the
+            // uint32 default 0, which must not be stored as a real slot limit.
+            if (!hasImages && !hasVideos) continue
+            return {
+                images: hasImages ? images : images === 0 ? 0 : null,
+                videos: hasVideos ? videos : videos === 0 ? 0 : null,
+            }
+        }
+    }
+    return { images: null, videos: null }
 }
 
 function contentForIngest(message: proto.IMessage | null | undefined): proto.IMessage | null | undefined {
@@ -878,6 +899,10 @@ async function processMessage(
         } else if (association.parentId || association.index != null) {
             await updateAlbumLink(messageId, association.parentId, association.index)
         }
+        if (messageType === 'albumMessage') {
+            const expected = albumExpectedOf(m.message, content)
+            await updateAlbumExpected(messageId, expected.images, expected.videos)
+        }
         if (isForwarded) await markMessageForwarded(messageId)
         if (alreadyEdited) {
             const editedText = textFromMessage(m.message)
@@ -967,7 +992,7 @@ async function processMessage(
         null
 
     const association = albumAssociationOf(m.message, content)
-    const expected = albumExpectedOf(content)
+    const expected = albumExpectedOf(content, m.message)
     let albumParentId = association.parentId
     let albumIndex = association.index
     if (messageType === 'imageMessage' || messageType === 'videoMessage') {
@@ -1070,6 +1095,12 @@ async function processMessage(
                 hasMedia: Boolean(fileTypes[messageType]),
                 albumParentId,
                 albumIndex,
+                ...(messageType === 'albumMessage'
+                    ? {
+                          albumExpectedImages: expected.images,
+                          albumExpectedVideos: expected.videos,
+                      }
+                    : {}),
                 isHistory,
                 isForwarded,
             },
