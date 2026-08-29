@@ -561,7 +561,7 @@ h3 {
 }
 
 .view-switch {
-    margin-left: 0;
+    margin-left: auto;
     flex-shrink: 0;
 }
 
