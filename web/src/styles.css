@@ -1596,27 +1596,14 @@ h3 {
 
 .lightbox-actions {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
     gap: 8px;
     margin-top: 16px;
 }
 
-.lightbox-actions .download-button,
-.lightbox-actions .lightbox-add-inline {
-    width: auto;
-    flex: 1 1 120px;
+.lightbox-actions .download-button {
+    width: 100%;
     margin-top: 0;
-}
-
-.lightbox-add-inline {
-    min-height: 40px;
-    padding: 0 12px;
-    border: 1px solid rgba(255, 255, 255, 0.24);
-    border-radius: 9px;
-    color: white;
-    background: rgba(255, 255, 255, 0.12);
-    font-size: 0.78rem;
-    font-weight: 700;
 }
 
 .lightbox-file .download-button {
@@ -1668,35 +1655,6 @@ h3 {
     background: rgba(255, 255, 255, 0.18);
 }
 
-.lightbox-add {
-    min-width: 64px;
-    height: 38px;
-    position: absolute;
-    z-index: 4;
-    top: calc(14px + env(safe-area-inset-top, 0px));
-    left: calc(14px + env(safe-area-inset-left, 0px));
-    padding: 0 12px;
-    border: 1px solid rgba(255, 255, 255, 0.25);
-    border-radius: 11px;
-    color: white;
-    background: rgba(255, 255, 255, 0.1);
-    font-size: 0.78rem;
-    font-weight: 700;
-    transition: background-color 160ms var(--ease-out), color 160ms var(--ease-out),
-        border-color 160ms var(--ease-out);
-}
-
-.lightbox-add:hover,
-.lightbox-add-inline:hover {
-    background: rgba(255, 255, 255, 0.18);
-}
-
-.lightbox-add.is-added,
-.lightbox-add-inline.is-added {
-    border-color: #8ed4c2;
-    color: #0d3b32;
-    background: #b8eadc;
-}
 
 .lightbox-media {
     position: relative;
@@ -1818,7 +1776,7 @@ h3 {
     line-height: 1.5;
 }
 
-.lightbox-info button:not(.download-button):not(.lightbox-add-inline),
+.lightbox-info button:not(.download-button),
 .lightbox-info a:not(.download-button) {
     display: inline-block;
     margin-top: 24px;
@@ -3721,14 +3679,6 @@ button.document-link {
         height: 44px;
         top: calc(10px + env(safe-area-inset-top, 0px));
         right: calc(10px + env(safe-area-inset-right, 0px));
-    }
-
-    .lightbox-add {
-        height: 44px;
-        top: calc(10px + env(safe-area-inset-top, 0px));
-        left: calc(10px + env(safe-area-inset-left, 0px));
-        padding: 0 14px;
-        font-size: 0.82rem;
     }
 
     .lightbox-nav {

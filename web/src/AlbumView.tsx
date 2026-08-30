@@ -982,16 +982,6 @@ export default function AlbumView({
                     >
                         ×
                     </button>
-                    <button
-                        type="button"
-                        className={`lightbox-add${selected.has(lightbox.messageId) ? ' is-added' : ''}`}
-                        onClick={(event) => {
-                            event.stopPropagation()
-                            toggleSelected(lightbox.messageId)
-                        }}
-                    >
-                        {selected.has(lightbox.messageId) ? 'Added' : 'Add'}
-                    </button>
                     <div
                         className="lightbox-media"
                         onClick={stopTileAction}
@@ -1053,9 +1043,18 @@ export default function AlbumView({
                         <div className="lightbox-actions">
                             <button
                                 type="button"
-                                className={`lightbox-add-inline${selected.has(lightbox.messageId) ? ' is-added' : ''}`}
+                                className="download-button"
                                 onClick={() => toggleSelected(lightbox.messageId)}
                             >
+                                {selected.has(lightbox.messageId) ? (
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="m6 12 4 4 8-8" />
+                                    </svg>
+                                ) : (
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M12 5v14M5 12h14" />
+                                    </svg>
+                                )}
                                 {selected.has(lightbox.messageId) ? 'Added' : 'Add'}
                             </button>
                             <a
