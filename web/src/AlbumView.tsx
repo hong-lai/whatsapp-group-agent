@@ -738,18 +738,6 @@ export default function AlbumView({
     const allVisibleSelected =
         items.length > 0 && items.every((item) => selected.has(item.messageId))
     const showOverlay = loading && items.length > 0
-    const typingQuery = queryInput.trim()
-    const searching = Boolean(typingQuery) && (loading || typingQuery !== trimmedQuery)
-    const matchCount = items.length
-    const searchStatus = !typingQuery
-        ? null
-        : searching
-          ? 'Searching…'
-          : matchCount === 0
-            ? `No documents matching “${trimmedQuery}”`
-            : nextCursor
-              ? `${matchCount}+ matching files`
-              : `${matchCount} matching ${matchCount === 1 ? 'file' : 'files'}`
 
     function documentSearch(extraClass = '') {
         return (
@@ -784,11 +772,6 @@ export default function AlbumView({
         <section className="album-panel" aria-busy={loading}>
             <div className="album-search-dock mobile-only">
                 {documentSearch()}
-                {searchStatus && (
-                    <p className={`album-search-status${searching ? ' is-pending' : ''}`} aria-live="polite">
-                        {searchStatus}
-                    </p>
-                )}
             </div>
             <header className="album-toolbar desktop-only">
                 {documentSearch()}
