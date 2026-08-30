@@ -51,11 +51,16 @@ type Props = {
     sortOrder: SortOrder
     active: boolean
     onLiveUpdate: () => void
+    onCountsChange?: (counts: Record<MediaCategory, number>) => void
 }
 
 export const allMediaCategories: MediaCategory[] = ['image', 'video', 'document', 'audio', 'sticker']
 
-const categoryOptions: Array<{
+export function isAllTypes(types: MediaCategory[]): boolean {
+    return types.length === allMediaCategories.length
+}
+
+export const categoryOptions: Array<{
     id: MediaCategory
     label: string
     icon: 'image' | 'video' | 'document' | 'audio' | 'sticker'
@@ -67,7 +72,7 @@ const categoryOptions: Array<{
     { id: 'sticker', label: 'Stickers', icon: 'sticker' },
 ]
 
-const emptyCounts: Record<MediaCategory, number> = {
+export const emptyCounts: Record<MediaCategory, number> = {
     image: 0,
     video: 0,
     document: 0,
@@ -99,10 +104,6 @@ function albumUrl(
     }
     if (cursor) params.set('cursor', cursor)
     return `/api/album?${params}`
-}
-
-function isAllTypes(types: MediaCategory[]): boolean {
-    return types.length === allMediaCategories.length
 }
 
 async function albumJson(url: string, signal?: AbortSignal): Promise<AlbumResponse> {
@@ -166,11 +167,7 @@ function GroupPicker({
     const rootRef = useRef<HTMLDivElement>(null)
     const selected = groups.filter((group) => selectedJids.includes(group.jid))
     const label =
-        selected.length === 0
-            ? 'Select groups'
-            : selected.length === 1
-              ? selected[0].name
-              : `${selected[0].name} +${selected.length - 1}`
+        selected.length === 0 ? 'Select groups' : selected.map((group) => group.name).join(' · ')
 
     useEffect(() => {
         if (!open) return undefined
@@ -229,7 +226,7 @@ function GroupPicker({
     )
 }
 
-function ToolbarIcon({
+export function ToolbarIcon({
     name,
 }: {
     name:
@@ -484,6 +481,7 @@ export default function AlbumView({
     sortOrder,
     active,
     onLiveUpdate,
+    onCountsChange,
 }: Props) {
     const [items, setItems] = useState<AlbumItem[]>([])
     const [counts, setCounts] = useState<Record<MediaCategory, number>>(emptyCounts)
@@ -501,9 +499,14 @@ export default function AlbumView({
     const scrollRef = useRef<HTMLDivElement>(null)
     const scrollRestore = useRef<{ top: number; height: number } | null>(null)
     const nextCursorRef = useRef<string | null>(null)
+    const swipe = useRef<{ x: number; y: number } | null>(null)
     nextCursorRef.current = nextCursor
     const showingAll = isAllTypes(types)
     const totalCount = Object.values(counts).reduce((sum, count) => sum + count, 0)
+
+    useEffect(() => {
+        onCountsChange?.(counts)
+    }, [counts, onCountsChange])
 
     const scopedJids = scope === 'group' ? selectedJids : []
     const trimmedQuery = query.trim()
@@ -735,34 +738,60 @@ export default function AlbumView({
     const allVisibleSelected =
         items.length > 0 && items.every((item) => selected.has(item.messageId))
     const showOverlay = loading && items.length > 0
+    const typingQuery = queryInput.trim()
+    const searching = Boolean(typingQuery) && (loading || typingQuery !== trimmedQuery)
+    const matchCount = items.length
+    const searchStatus = !typingQuery
+        ? null
+        : searching
+          ? 'Searching…'
+          : matchCount === 0
+            ? `No documents matching “${trimmedQuery}”`
+            : nextCursor
+              ? `${matchCount}+ matching files`
+              : `${matchCount} matching ${matchCount === 1 ? 'file' : 'files'}`
+
+    function documentSearch(extraClass = '') {
+        return (
+            <label className={`album-search${extraClass ? ` ${extraClass}` : ''}`}>
+                <ToolbarIcon name="search" />
+                <input
+                    type="search"
+                    enterKeyHint="search"
+                    placeholder="Search documents…"
+                    value={queryInput}
+                    onChange={(event) => setQueryInput(event.target.value)}
+                    aria-label="Search documents by filename"
+                />
+                {queryInput.trim() ? (
+                    <button
+                        type="button"
+                        className="album-search-clear"
+                        onClick={() => {
+                            setQueryInput('')
+                            onQueryChange('')
+                        }}
+                        aria-label="Clear document search"
+                    >
+                        ×
+                    </button>
+                ) : null}
+            </label>
+        )
+    }
 
     return (
         <section className="album-panel" aria-busy={loading}>
-            <header className="album-toolbar">
-                <label className="album-search">
-                    <ToolbarIcon name="search" />
-                    <input
-                        type="search"
-                        enterKeyHint="search"
-                        placeholder="Search documents…"
-                        value={queryInput}
-                        onChange={(event) => setQueryInput(event.target.value)}
-                        aria-label="Search documents by filename"
-                    />
-                    {queryInput.trim() ? (
-                        <button
-                            type="button"
-                            className="album-search-clear"
-                            onClick={() => {
-                                setQueryInput('')
-                                onQueryChange('')
-                            }}
-                            aria-label="Clear document search"
-                        >
-                            ×
-                        </button>
-                    ) : null}
-                </label>
+            <div className="album-search-dock mobile-only">
+                {documentSearch()}
+                {searchStatus && (
+                    <p className={`album-search-status${searching ? ' is-pending' : ''}`} aria-live="polite">
+                        {searchStatus}
+                    </p>
+                )}
+            </div>
+            <header className="album-toolbar desktop-only">
+                {documentSearch()}
                 <div className="album-scope">
                     <div className="segmented-control" role="group" aria-label="Album scope">
                         <button
@@ -797,11 +826,7 @@ export default function AlbumView({
                         />
                     )}
                 </div>
-                <div
-                    className={`media-filters${trimmedQuery ? ' is-locked' : ''}`}
-                    aria-label="Media type filters"
-                    aria-disabled={Boolean(trimmedQuery)}
-                >
+                <div className="media-filters" aria-label="Media type filters">
                     <button
                         className={showingAll ? 'active' : ''}
                         onClick={() => {
@@ -830,7 +855,7 @@ export default function AlbumView({
                             </button>
                         ))}
                 </div>
-                <div className="album-actions">
+                <div className="album-actions desktop-only">
                     <div className="segmented-control" role="group" aria-label="Selection">
                         <button
                             type="button"
@@ -873,9 +898,7 @@ export default function AlbumView({
                     <>
                         {groupedItems.map((group) => (
                             <section className="album-group" key={group.jid}>
-                                {!(scope === 'group' && selectedJids.length === 1) && (
-                                    <h3 className="album-group-title">{group.name}</h3>
-                                )}
+                                <h3 className="album-group-title">{group.name}</h3>
                                 <div className="album-grid">
                                     {group.items.map((item) => (
                                         <MediaTile
@@ -922,6 +945,16 @@ export default function AlbumView({
                             <small>across loaded pages</small>
                         )}
                     </div>
+                    <button
+                        type="button"
+                        onClick={selectAllVisible}
+                        disabled={items.length === 0 || allVisibleSelected}
+                    >
+                        Select all
+                    </button>
+                    <button type="button" onClick={() => setSelected(new Set())}>
+                        Clear
+                    </button>
                     <button className="download-button" onClick={downloadZip} disabled={downloading}>
                         <DownloadIcon />
                         {downloading ? 'Preparing ZIP…' : 'Download ZIP'}
@@ -949,7 +982,31 @@ export default function AlbumView({
                     >
                         ×
                     </button>
-                    <div className="lightbox-media" onClick={stopTileAction}>
+                    <button
+                        type="button"
+                        className={`lightbox-add${selected.has(lightbox.messageId) ? ' is-added' : ''}`}
+                        onClick={(event) => {
+                            event.stopPropagation()
+                            toggleSelected(lightbox.messageId)
+                        }}
+                    >
+                        {selected.has(lightbox.messageId) ? 'Added' : 'Add'}
+                    </button>
+                    <div
+                        className="lightbox-media"
+                        onClick={stopTileAction}
+                        onTouchStart={(event) => {
+                            swipe.current = { x: event.touches[0].clientX, y: event.touches[0].clientY }
+                        }}
+                        onTouchEnd={(event) => {
+                            if (!swipe.current || displayItems.length < 2) return
+                            const dx = event.changedTouches[0].clientX - swipe.current.x
+                            const dy = event.changedTouches[0].clientY - swipe.current.y
+                            swipe.current = null
+                            if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.4) return
+                            setLightboxId(stepAlbumItem(lightbox.messageId, displayItems, dx < 0 ? 1 : -1))
+                        }}
+                    >
                         {displayItems.length > 1 && (
                             <>
                                 <button
@@ -993,16 +1050,25 @@ export default function AlbumView({
                         )}
                         {lightbox.textContent && <p className="lightbox-copy">{lightbox.textContent}</p>}
                         {lightbox.fileName && <span className="lightbox-meta">{lightbox.fileName}</span>}
-                        <a
-                            href={lightbox.mediaUrl}
-                            target="_blank"
-                            rel="nofollow noreferrer noopener"
-                            download={lightbox.fileName || undefined}
-                            className="download-button"
-                        >
-                            <DownloadIcon />
-                            Download
-                        </a>
+                        <div className="lightbox-actions">
+                            <button
+                                type="button"
+                                className={`lightbox-add-inline${selected.has(lightbox.messageId) ? ' is-added' : ''}`}
+                                onClick={() => toggleSelected(lightbox.messageId)}
+                            >
+                                {selected.has(lightbox.messageId) ? 'Added' : 'Add'}
+                            </button>
+                            <a
+                                href={lightbox.mediaUrl}
+                                target="_blank"
+                                rel="nofollow noreferrer noopener"
+                                download={lightbox.fileName || undefined}
+                                className="download-button"
+                            >
+                                <DownloadIcon />
+                                Download
+                            </a>
+                        </div>
                     </div>
                 </div>,
                 document.body

@@ -20,7 +20,7 @@ function isIos(): boolean {
     )
 }
 
-export default function InstallApp() {
+export default function InstallApp({ variant = 'icon' }: { variant?: 'icon' | 'item' }) {
     const [deferred, setDeferred] = useState<BeforeInstallPromptEvent | null>(null)
     const [installed, setInstalled] = useState(isStandalone)
     const [helpOpen, setHelpOpen] = useState(false)
@@ -60,16 +60,20 @@ export default function InstallApp() {
         <>
             <button
                 type="button"
-                className="settings-toggle"
+                className={variant === 'item' ? 'overflow-item' : 'settings-toggle'}
                 aria-label="Install app"
                 title="Install app"
                 onClick={() => void install()}
             >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M12 3v12" />
-                    <path d="m8 11 4 4 4-4" />
-                    <path d="M5 21h14" />
-                </svg>
+                {variant === 'item' ? (
+                    'Install app'
+                ) : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M12 3v12" />
+                        <path d="m8 11 4 4 4-4" />
+                        <path d="M5 21h14" />
+                    </svg>
+                )}
             </button>
             {helpOpen && (
                 <div className="settings-overlay" role="presentation" onClick={() => setHelpOpen(false)}>

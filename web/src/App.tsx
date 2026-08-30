@@ -1,8 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import AlbumView, { allMediaCategories, type AlbumScope, type MediaCategory } from './AlbumView'
+import AlbumView, {
+    allMediaCategories,
+    emptyCounts,
+    isAllTypes,
+    type AlbumScope,
+    type MediaCategory,
+} from './AlbumView'
 import DateRangePicker from './DateRangePicker'
+import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
+import FilterSheet from './FilterSheet'
 import InstallApp from './InstallApp'
 import {
     mergeFirstPage,
@@ -147,7 +155,18 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
 function Icon({
     name,
 }: {
-    name: 'archive' | 'search' | 'users' | 'message' | 'image' | 'settings' | 'sortAsc' | 'sortDesc'
+    name:
+        | 'archive'
+        | 'search'
+        | 'users'
+        | 'message'
+        | 'image'
+        | 'settings'
+        | 'sortAsc'
+        | 'sortDesc'
+        | 'menu'
+        | 'filter'
+        | 'more'
 }) {
     const paths = {
         archive: (
@@ -197,6 +216,15 @@ function Icon({
             <>
                 <path d="M4 7h3M4 12h6M4 17h9" />
                 <path d="M18 6v12m0 0-3-3m3 3 3-3" />
+            </>
+        ),
+        menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+        filter: <path d="M4 5h16l-6.2 7.6V19l-3.6 2v-8.4L4 5z" />,
+        more: (
+            <>
+                <circle cx="6" cy="12" r="1.3" />
+                <circle cx="12" cy="12" r="1.3" />
+                <circle cx="18" cy="12" r="1.3" />
             </>
         ),
     }
@@ -520,8 +548,15 @@ function MediaLightbox({
         return () => window.removeEventListener('keydown', onKey)
     }, [index, items.length, onClose, onIndexChange])
 
+    const swipe = useRef<{ x: number; y: number } | null>(null)
+
     if (!item) return null
     const url = mediaUrl(item.messageId)
+
+    function step(delta: number) {
+        if (items.length < 2) return
+        onIndexChange((index + delta + items.length) % items.length)
+    }
 
     return createPortal(
         <div
@@ -542,7 +577,21 @@ function MediaLightbox({
             >
                 ×
             </button>
-            <div className="lightbox-media" onClick={(event) => event.stopPropagation()}>
+            <div
+                className="lightbox-media"
+                onClick={(event) => event.stopPropagation()}
+                onTouchStart={(event) => {
+                    swipe.current = { x: event.touches[0].clientX, y: event.touches[0].clientY }
+                }}
+                onTouchEnd={(event) => {
+                    if (!swipe.current || items.length < 2) return
+                    const dx = event.changedTouches[0].clientX - swipe.current.x
+                    const dy = event.changedTouches[0].clientY - swipe.current.y
+                    swipe.current = null
+                    if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.4) return
+                    step(dx < 0 ? 1 : -1)
+                }}
+            >
                 {items.length > 1 && (
                     <>
                         <button
@@ -551,7 +600,7 @@ function MediaLightbox({
                             aria-label="Previous"
                             onClick={(event) => {
                                 event.stopPropagation()
-                                onIndexChange((index - 1 + items.length) % items.length)
+                                step(-1)
                             }}
                         >
                             ‹
@@ -562,7 +611,7 @@ function MediaLightbox({
                             aria-label="Next"
                             onClick={(event) => {
                                 event.stopPropagation()
-                                onIndexChange((index + 1) % items.length)
+                                step(1)
                             }}
                         >
                             ›
@@ -1028,6 +1077,11 @@ export default function App() {
     const [connectionEvents, setConnectionEvents] = useState<AgentConnectionEvent[]>([])
     const [linkDown, setLinkDown] = useState(typeof navigator !== 'undefined' && !navigator.onLine)
     const [settingsOpen, setSettingsOpen] = useState(false)
+    const [drawerOpen, setDrawerOpen] = useState(false)
+    const [filterOpen, setFilterOpen] = useState(false)
+    const [overflowOpen, setOverflowOpen] = useState(false)
+    const [albumCounts, setAlbumCounts] = useState(emptyCounts)
+    const overflowRef = useRef<HTMLDivElement>(null)
     const groupsRequestId = useRef(0)
     const messagesRequestId = useRef(0)
     const silentGen = useRef(0)
@@ -1060,6 +1114,23 @@ export default function App() {
         () => (sortOrder === 'asc' ? [...messages].reverse() : messages),
         [messages, sortOrder]
     )
+    const dateIsDefault = from === today && to === today
+    const typesAreDefault = isAllTypes(albumTypes)
+    const activeFilterCount = [
+        !dateIsDefault,
+        sortOrder === 'asc',
+        view === 'album' && !typesAreDefault,
+        view === 'album' && albumScope === 'group',
+    ].filter(Boolean).length
+    const headerTitle =
+        view === 'album'
+            ? albumScope === 'group' && albumGroupJids.length
+                ? albumGroupJids
+                      .map((jid) => groups.find((group) => group.jid === jid)?.name)
+                      .filter(Boolean)
+                      .join(' · ') || 'Selected groups'
+                : 'All media'
+            : selectedGroup?.name || 'Groups'
     const messageScrollKey = `${selectedJid ?? ''}|${from}|${to}|${reloadKey}`
     const { onScroll: onMessageListScroll } = usePinnedScroll(
         messageListRef,
@@ -1146,6 +1217,34 @@ export default function App() {
             if (pulseTimer.current) clearTimeout(pulseTimer.current)
         }
     }, [])
+
+    useEffect(() => {
+        const media = window.matchMedia('(min-width: 960px)')
+        const onChange = () => {
+            if (!media.matches) return
+            setDrawerOpen(false)
+            setFilterOpen(false)
+            setOverflowOpen(false)
+        }
+        media.addEventListener('change', onChange)
+        return () => media.removeEventListener('change', onChange)
+    }, [])
+
+    useEffect(() => {
+        if (!overflowOpen) return undefined
+        const onPointer = (event: MouseEvent) => {
+            if (!overflowRef.current?.contains(event.target as Node)) setOverflowOpen(false)
+        }
+        const onKey = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setOverflowOpen(false)
+        }
+        window.addEventListener('mousedown', onPointer)
+        window.addEventListener('keydown', onKey)
+        return () => {
+            window.removeEventListener('mousedown', onPointer)
+            window.removeEventListener('keydown', onKey)
+        }
+    }, [overflowOpen])
 
 
     useEffect(() => {
@@ -1334,10 +1433,164 @@ export default function App() {
         setFrom(addDays(today, -(days - 1)))
     }
 
+    function dateChipLabel(): string {
+        if (from === to) return from === today ? 'Today' : from
+        const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1
+        if (to === today && days === 2) return '2d'
+        if (to === today && days === 7) return '7d'
+        if (to === today && days === 30) return '30d'
+        return `${from} – ${to}`
+    }
+
+    function pickGroup(jid: string) {
+        if (view === 'album') {
+            if (albumScope === 'all') {
+                setAlbumScope('group')
+                setAlbumGroupJids([jid])
+                setDrawerOpen(false)
+                return
+            }
+            setAlbumGroupJids((current) =>
+                current.includes(jid) ? current.filter((item) => item !== jid) : [...current, jid]
+            )
+            return
+        }
+        setSelectedJid(jid)
+        setDrawerOpen(false)
+    }
+
+    function renderGroupsPanel(inDrawer = false) {
+        const multi = view === 'album' && albumScope === 'group'
+        return (
+            <>
+                {view === 'album' && (
+                    <div className="scope-switch" role="group" aria-label="Album scope">
+                        <button
+                            type="button"
+                            className={albumScope === 'all' ? 'active' : ''}
+                            onClick={() => setAlbumScope('all')}
+                        >
+                            All groups
+                        </button>
+                        <button
+                            type="button"
+                            className={albumScope === 'group' ? 'active' : ''}
+                            onClick={() => {
+                                setAlbumScope('group')
+                                if (albumGroupJids.length === 0 && selectedJid) {
+                                    setAlbumGroupJids([selectedJid])
+                                }
+                            }}
+                        >
+                            Selected
+                        </button>
+                    </div>
+                )}
+                <div className={`panel-heading${inDrawer ? ' is-drawer' : ''}`}>
+                    {inDrawer ? null : (
+                        <div>
+                            <h2>Groups</h2>
+                        </div>
+                    )}
+                    <div className="panel-heading-actions">
+                        <button
+                            type="button"
+                            className={`empty-groups-toggle ${showEmptyGroups ? 'active' : ''}`}
+                            aria-pressed={showEmptyGroups}
+                            title={
+                                showEmptyGroups
+                                    ? 'Hide groups with no messages in this range'
+                                    : 'Show groups with no messages in this range'
+                            }
+                            onClick={() => setShowEmptyGroups((current) => !current)}
+                        >
+                            {showEmptyGroups ? 'Hide empty' : 'Show empty'}
+                        </button>
+                        <span className="count-pill">{filteredGroups.length}</span>
+                    </div>
+                </div>
+                <label className="search-box">
+                    <Icon name="search" />
+                    <input
+                        type="search"
+                        placeholder="Search groups"
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
+                    />
+                </label>
+                <div className={`group-list ${groupsLoading && groups.length > 0 ? 'is-loading' : ''}`}>
+                    {groupsLoading && groups.length > 0 && (
+                        <div className="content-overlay" role="status">
+                            <span className="overlay-spinner" />
+                            Loading
+                        </div>
+                    )}
+                    {groupsLoading &&
+                        groups.length === 0 &&
+                        [1, 2, 3].map((item) => <div className="group-item skeleton-group skeleton" key={item} />)}
+                    {filteredGroups.map((group) => {
+                        const selected =
+                            view === 'album'
+                                ? multi && albumGroupJids.includes(group.jid)
+                                : group.jid === selectedJid
+                        return (
+                            <button
+                                className={`group-item ${selected ? 'selected' : ''}`}
+                                key={group.jid}
+                                onClick={() => pickGroup(group.jid)}
+                            >
+                                <span className="group-avatar">{initials(group.name)}</span>
+                                <span className="group-copy">
+                                    <span className="group-title-row">
+                                        <strong>{group.name}</strong>
+                                        {!group.tracked && <span className="inactive-dot" title="Inactive group" />}
+                                    </span>
+                                    <span className="group-preview">
+                                        {group.latestText ||
+                                            (group.messageCount ? 'Media message' : 'No messages in range')}
+                                    </span>
+                                    <span className="group-meta">
+                                        <span>{group.messageCount} messages</span>
+                                        <span>{group.senderCount} senders</span>
+                                    </span>
+                                </span>
+                                <span className="group-date">
+                                    {group.latestTimestamp
+                                        ? shortHkDate.format(group.latestTimestamp * 1000)
+                                        : '—'}
+                                </span>
+                            </button>
+                        )
+                    })}
+                    {!groupsLoading && filteredGroups.length === 0 && (
+                        <div className="empty-small">
+                            {search.trim()
+                                ? 'No matching groups for this search.'
+                                : groups.length === 0
+                                  ? 'No groups match the configured name pattern.'
+                                  : 'No groups have messages in this date range.'}
+                        </div>
+                    )}
+                </div>
+            </>
+        )
+    }
+
     return (
         <div className={`app-shell${view === 'album' ? ' is-album' : ''}`}>
             <header className="topbar">
-                <div className="brand">
+                <button
+                    type="button"
+                    className="icon-btn mobile-only"
+                    aria-label="Open groups"
+                    onClick={() => {
+                        setOverflowOpen(false)
+                        setDrawerOpen(true)
+                    }}
+                >
+                    <Icon name="menu" />
+                </button>
+                <div className="brand desktop-only">
                     <span className="brand-mark">
                         <Icon name="archive" />
                     </span>
@@ -1346,10 +1599,33 @@ export default function App() {
                         <small>WhatsApp message dashboard</small>
                     </span>
                 </div>
+                <button
+                    type="button"
+                    className="header-title mobile-only"
+                    onClick={() => {
+                        setOverflowOpen(false)
+                        setDrawerOpen(true)
+                    }}
+                >
+                    <strong
+                        className={
+                            view === 'album' && albumScope === 'group' && albumGroupJids.length > 1
+                                ? 'is-multi'
+                                : undefined
+                        }
+                    >
+                        {headerTitle}
+                    </strong>
+                    {view === 'messages' && selectedGroup && (
+                        <small>
+                            {selectedGroup.messageCount} messages · {selectedGroup.senderCount} senders
+                        </small>
+                    )}
+                </button>
                 <div className="topbar-status">
                     {pattern && (
                         <div
-                            className="pattern-meta"
+                            className="pattern-meta desktop-only"
                             title={`GROUP_PATTERN /${pattern.source}/${pattern.flags}`}
                         >
                             <span>Matching</span>
@@ -1358,48 +1634,159 @@ export default function App() {
                             ))}
                         </div>
                     )}
-                    <InstallApp />
-                    <div className="segmented-control sort-switch" role="group" aria-label="Sort order">
+                    <div className="desktop-only topbar-desktop-actions">
+                        <InstallApp />
+                        <div className="segmented-control sort-switch" role="group" aria-label="Sort order">
+                            <button
+                                type="button"
+                                className={sortOrder === 'asc' ? 'active' : ''}
+                                aria-pressed={sortOrder === 'asc'}
+                                aria-label="Oldest first"
+                                title="Oldest first"
+                                onClick={() => setSortOrder('asc')}
+                            >
+                                <Icon name="sortAsc" />
+                            </button>
+                            <button
+                                type="button"
+                                className={sortOrder === 'desc' ? 'active' : ''}
+                                aria-pressed={sortOrder === 'desc'}
+                                aria-label="Newest first"
+                                title="Newest first"
+                                onClick={() => setSortOrder('desc')}
+                            >
+                                <Icon name="sortDesc" />
+                            </button>
+                        </div>
                         <button
                             type="button"
-                            className={sortOrder === 'asc' ? 'active' : ''}
-                            aria-pressed={sortOrder === 'asc'}
-                            aria-label="Oldest first"
-                            title="Oldest first"
-                            onClick={() => setSortOrder('asc')}
+                            className="settings-toggle"
+                            aria-label="Filename format settings"
+                            title="Filename format"
+                            onClick={() => setSettingsOpen(true)}
                         >
-                            <Icon name="sortAsc" />
+                            <Icon name="settings" />
                         </button>
-                        <button
-                            type="button"
-                            className={sortOrder === 'desc' ? 'active' : ''}
-                            aria-pressed={sortOrder === 'desc'}
-                            aria-label="Newest first"
-                            title="Newest first"
-                            onClick={() => setSortOrder('desc')}
-                        >
-                            <Icon name="sortDesc" />
-                        </button>
+                        <ConnectionStatus
+                            state={connectionState}
+                            events={connectionEvents}
+                            live={connectionState === 'connected' && livePulse}
+                            unreachable={linkDown}
+                        />
                     </div>
                     <button
                         type="button"
-                        className="settings-toggle"
-                        aria-label="Filename format settings"
-                        title="Filename format"
-                        onClick={() => setSettingsOpen(true)}
+                        className={`icon-btn header-filter mobile-only${activeFilterCount ? ' has-badge' : ''}`}
+                        aria-label={activeFilterCount ? `Filters, ${activeFilterCount} active` : 'Filters'}
+                        onClick={() => {
+                            setOverflowOpen(false)
+                            setFilterOpen(true)
+                        }}
                     >
-                        <Icon name="settings" />
+                        <Icon name="filter" />
+                        {activeFilterCount > 0 && <span className="filter-badge">{activeFilterCount}</span>}
                     </button>
-                    <ConnectionStatus
-                        state={connectionState}
-                        events={connectionEvents}
-                        live={connectionState === 'connected' && livePulse}
-                        unreachable={linkDown}
-                    />
+                    <div className="overflow-menu mobile-only" ref={overflowRef}>
+                        <button
+                            type="button"
+                            className="icon-btn"
+                            aria-label="More"
+                            aria-expanded={overflowOpen}
+                            aria-haspopup="menu"
+                            onClick={() => setOverflowOpen((current) => !current)}
+                        >
+                            <Icon name="more" />
+                        </button>
+                        {overflowOpen && (
+                            <div className="overflow-panel" role="menu">
+                                <button
+                                    type="button"
+                                    className="overflow-item"
+                                    role="menuitem"
+                                    onClick={() => {
+                                        setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')
+                                        setOverflowOpen(false)
+                                    }}
+                                >
+                                    {sortOrder === 'asc' ? 'Newest first' : 'Oldest first'}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="overflow-item"
+                                    role="menuitem"
+                                    onClick={() => {
+                                        setOverflowOpen(false)
+                                        setSettingsOpen(true)
+                                    }}
+                                >
+                                    Filename settings
+                                </button>
+                                <InstallApp variant="item" />
+                                <ConnectionStatus
+                                    state={connectionState}
+                                    events={connectionEvents}
+                                    live={connectionState === 'connected' && livePulse}
+                                    unreachable={linkDown}
+                                />
+                            </div>
+                        )}
+                    </div>
                 </div>
             </header>
 
-            <section className="filter-bar" aria-label="Date filters">
+            {activeFilterCount > 0 && (
+                <div className="filter-chips mobile-only" aria-label="Active filters">
+                    {!dateIsDefault && (
+                        <button type="button" className="filter-chip" onClick={() => applyPreset(1)}>
+                            {dateChipLabel()}
+                            <span aria-hidden="true">×</span>
+                        </button>
+                    )}
+                    {sortOrder === 'asc' && (
+                        <button type="button" className="filter-chip" onClick={() => setSortOrder('desc')}>
+                            Oldest first
+                            <span aria-hidden="true">×</span>
+                        </button>
+                    )}
+                    {view === 'album' && !typesAreDefault &&
+                        albumTypes.map((type) => (
+                            <button
+                                key={type}
+                                type="button"
+                                className="filter-chip"
+                                onClick={() => {
+                                    const next = albumTypes.filter((item) => item !== type)
+                                    setAlbumTypes(next.length ? next : [...allMediaCategories])
+                                }}
+                            >
+                                {type === 'document' ? 'Docs' : type[0].toUpperCase() + type.slice(1)}
+                                <span aria-hidden="true">×</span>
+                            </button>
+                        ))}
+                    {view === 'album' &&
+                        albumScope === 'group' &&
+                        albumGroupJids.map((jid) => {
+                            const name = groups.find((group) => group.jid === jid)?.name || 'Group'
+                            return (
+                                <button
+                                    type="button"
+                                    className="filter-chip"
+                                    key={jid}
+                                    onClick={() => {
+                                        const next = albumGroupJids.filter((item) => item !== jid)
+                                        setAlbumGroupJids(next)
+                                        if (next.length === 0) setAlbumScope('all')
+                                    }}
+                                >
+                                    {name}
+                                    <span aria-hidden="true">×</span>
+                                </button>
+                            )
+                        })}
+                </div>
+            )}
+
+            <section className="filter-bar desktop-only" aria-label="Date filters">
                 <div className="date-cluster">
                     <DateRangePicker
                         from={from}
@@ -1474,91 +1861,12 @@ export default function App() {
                     className={`view-pane messages-pane ${view === 'messages' ? 'is-active' : ''}`}
                     aria-hidden={view !== 'messages'}
                 >
-                    <aside className="groups-panel">
-                    <div className="panel-heading">
-                        <div>
-                            <h2>Groups</h2>
-                        </div>
-                        <div className="panel-heading-actions">
-                            <button
-                                type="button"
-                                className={`empty-groups-toggle ${showEmptyGroups ? 'active' : ''}`}
-                                aria-pressed={showEmptyGroups}
-                                title={
-                                    showEmptyGroups
-                                        ? 'Hide groups with no messages in this range'
-                                        : 'Show groups with no messages in this range'
-                                }
-                                onClick={() => setShowEmptyGroups((current) => !current)}
-                            >
-                                {showEmptyGroups ? 'Hide empty' : 'Show empty'}
-                            </button>
-                            <span className="count-pill">{filteredGroups.length}</span>
-                        </div>
-                    </div>
-                    <label className="search-box">
-                        <Icon name="search" />
-                        <input
-                            type="search"
-                            placeholder="Search groups"
-                            value={search}
-                            onChange={(event) => setSearch(event.target.value)}
-                        />
-                    </label>
-
-                    <div className={`group-list ${groupsLoading && groups.length > 0 ? 'is-loading' : ''}`}>
-                        {groupsLoading && groups.length > 0 && (
-                            <div className="content-overlay" role="status">
-                                <span className="overlay-spinner" />
-                                Loading
-                            </div>
-                        )}
-                        {groupsLoading &&
-                            groups.length === 0 &&
-                            [1, 2, 3].map((item) => <div className="group-item skeleton-group skeleton" key={item} />)}
-                        {filteredGroups.map((group) => (
-                                <button
-                                    className={`group-item ${group.jid === selectedJid ? 'selected' : ''}`}
-                                    key={group.jid}
-                                    onClick={() => setSelectedJid(group.jid)}
-                                >
-                                    <span className="group-avatar">{initials(group.name)}</span>
-                                    <span className="group-copy">
-                                        <span className="group-title-row">
-                                            <strong>{group.name}</strong>
-                                            {!group.tracked && <span className="inactive-dot" title="Inactive group" />}
-                                        </span>
-                                        <span className="group-preview">
-                                            {group.latestText || (group.messageCount ? 'Media message' : 'No messages in range')}
-                                        </span>
-                                        <span className="group-meta">
-                                            <span>{group.messageCount} messages</span>
-                                            <span>{group.senderCount} senders</span>
-                                        </span>
-                                    </span>
-                                    <span className="group-date">
-                                        {group.latestTimestamp
-                                            ? shortHkDate.format(group.latestTimestamp * 1000)
-                                            : '—'}
-                                    </span>
-                                </button>
-                            ))}
-                        {!groupsLoading && filteredGroups.length === 0 && (
-                            <div className="empty-small">
-                                {search.trim()
-                                    ? 'No matching groups for this search.'
-                                    : groups.length === 0
-                                      ? 'No groups match the configured name pattern.'
-                                      : 'No groups have messages in this date range.'}
-                            </div>
-                        )}
-                    </div>
-                </aside>
+                    <aside className="groups-panel desktop-only">{renderGroupsPanel()}</aside>
 
                 <section className="messages-panel">
                     {selectedGroup ? (
                         <>
-                            <header className="messages-heading">
+                            <header className="messages-heading desktop-only">
                                 <span className="group-avatar large">{initials(selectedGroup.name)}</span>
                                 <div>
                                     <div className="title-with-status">
@@ -1639,9 +1947,69 @@ export default function App() {
                         sortOrder={sortOrder}
                         active={view === 'album'}
                         onLiveUpdate={pulseLive}
+                        onCountsChange={setAlbumCounts}
                     />
                 </div>
             </main>
+            <nav className="bottom-nav mobile-only" aria-label="Views">
+                <button
+                    type="button"
+                    className={view === 'messages' ? 'active' : ''}
+                    aria-pressed={view === 'messages'}
+                    onClick={() => setView('messages')}
+                >
+                    <Icon name="message" />
+                    Chat
+                </button>
+                <button
+                    type="button"
+                    className={view === 'album' ? 'active' : ''}
+                    aria-pressed={view === 'album'}
+                    onClick={() => setView('album')}
+                >
+                    <Icon name="image" />
+                    Media
+                </button>
+            </nav>
+            <Drawer
+                open={drawerOpen}
+                onClose={() => setDrawerOpen(false)}
+                title={view === 'album' ? 'Media groups' : 'Groups'}
+            >
+                {renderGroupsPanel(true)}
+            </Drawer>
+            <FilterSheet
+                open={filterOpen}
+                onClose={() => setFilterOpen(false)}
+                from={from}
+                to={to}
+                today={today}
+                onRangeChange={(nextFrom, nextTo) => {
+                    setFrom(nextFrom)
+                    setTo(nextTo)
+                }}
+                onPreset={applyPreset}
+                sortOrder={sortOrder}
+                onSortChange={setSortOrder}
+                view={view}
+                types={albumTypes}
+                onTypesChange={setAlbumTypes}
+                counts={albumCounts}
+                scope={albumScope}
+                selectedGroupNames={albumGroupJids
+                    .map((jid) => groups.find((group) => group.jid === jid)?.name)
+                    .filter((name): name is string => Boolean(name))}
+                onOpenGroups={() => {
+                    setFilterOpen(false)
+                    if (albumScope !== 'group') {
+                        setAlbumScope('group')
+                        if (albumGroupJids.length === 0 && selectedJid) {
+                            setAlbumGroupJids([selectedJid])
+                        }
+                    }
+                    setDrawerOpen(true)
+                }}
+            />
             <FilenameSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
         </div>
     )
