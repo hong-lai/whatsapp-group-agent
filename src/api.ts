@@ -416,9 +416,13 @@ export function createApiApp() {
         })
     )
 
-    app.get('/api/settings/filename-format', requireAdmin, (_request, response) => {
-        response.json(getFilenameFormatSettings())
-    })
+    app.get(
+        '/api/settings/filename-format',
+        requireAdmin,
+        asyncRoute(async (_request, response) => {
+            response.json(await getFilenameFormatSettings())
+        })
+    )
 
     app.put(
         '/api/settings/filename-format',

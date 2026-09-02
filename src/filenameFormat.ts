@@ -1,3 +1,7 @@
+import {
+    getFilenameFormatCache,
+    setFilenameFormatCache,
+} from './cache.js'
 import { getAppSetting, setAppSetting } from './db.js'
 import {
     fileStem,
@@ -72,10 +76,16 @@ export function defaultFilenameFormatSettings(): FilenameFormatSettings {
     }
 }
 
-let cached = defaultFilenameFormatSettings()
-
-export function getFilenameFormatSettings(): FilenameFormatSettings {
-    return cached
+export async function getFilenameFormatSettings(): Promise<FilenameFormatSettings> {
+    const cached = await getFilenameFormatCache<FilenameFormatSettings>()
+    if (cached) {
+        try {
+            return parseFilenameFormatSettings(cached)
+        } catch {
+            // fall through to defaults
+        }
+    }
+    return defaultFilenameFormatSettings()
 }
 
 export function filenameTypeForMessage(messageType: string): FilenameMediaType | undefined {
@@ -226,13 +236,15 @@ export function parseFilenameFormatSettings(raw: unknown): FilenameFormatSetting
 }
 
 export async function loadFilenameFormatSettings(): Promise<FilenameFormatSettings> {
+    let settings: FilenameFormatSettings
     try {
-        cached = parseFilenameFormatSettings(await getAppSetting(FILENAME_FORMAT_KEY))
+        settings = parseFilenameFormatSettings(await getAppSetting(FILENAME_FORMAT_KEY))
     } catch (err) {
-        cached = defaultFilenameFormatSettings()
+        settings = defaultFilenameFormatSettings()
         log.warn({ err }, 'settings.filename_format_invalid')
     }
-    return cached
+    await setFilenameFormatCache(settings)
+    return settings
 }
 
 export async function saveFilenameFormatSettings(
@@ -240,6 +252,6 @@ export async function saveFilenameFormatSettings(
 ): Promise<FilenameFormatSettings> {
     const parsed = parseFilenameFormatSettings(settings)
     await setAppSetting(FILENAME_FORMAT_KEY, parsed)
-    cached = parsed
-    return cached
+    await setFilenameFormatCache(parsed)
+    return parsed
 }

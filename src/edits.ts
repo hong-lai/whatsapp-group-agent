@@ -8,6 +8,12 @@ import {
     type WAMessageKey,
 } from '@whiskeysockets/baileys'
 import {
+    deletePendingEdits,
+    getPendingEdits,
+    setPendingEdits,
+    type CachedPendingEdit,
+} from './cache.js'
+import {
     fillMessageSecretIfMissing,
     getMessageEditTarget,
     markMessageEdited,
@@ -28,9 +34,39 @@ type PendingEdit = {
     }
 }
 
-const pendingEdits = new Map<string, PendingEdit[]>()
-
 export type EditResult = 'not-edit' | 'applied' | 'pending' | 'failed'
+
+function encodePendingEdit(edit: PendingEdit): CachedPendingEdit {
+    const cached: CachedPendingEdit = {
+        groupJid: edit.groupJid,
+        isHistory: edit.isHistory,
+    }
+    if (edit.text != null) cached.text = edit.text
+    if (edit.encrypted) {
+        cached.encrypted = {
+            encPayload: Array.from(edit.encrypted.encPayload),
+            encIv: Array.from(edit.encrypted.encIv),
+            senders: edit.encrypted.senders,
+        }
+    }
+    return cached
+}
+
+function decodePendingEdit(edit: CachedPendingEdit): PendingEdit {
+    const pending: PendingEdit = {
+        groupJid: edit.groupJid,
+        isHistory: edit.isHistory,
+    }
+    if (edit.text != null) pending.text = edit.text
+    if (edit.encrypted) {
+        pending.encrypted = {
+            encPayload: Uint8Array.from(edit.encrypted.encPayload),
+            encIv: Uint8Array.from(edit.encrypted.encIv),
+            senders: edit.encrypted.senders,
+        }
+    }
+    return pending
+}
 
 export function encodeMessageSecret(bytes: Uint8Array | number[] | Buffer): string {
     return JSON.stringify(Array.from(bytes))
@@ -166,7 +202,7 @@ async function persistEdit(
 ): Promise<EditResult> {
     const updated = await markMessageEdited(targetId, text)
     if (!updated) {
-        queuePending(targetId, { ...meta, text })
+        await queuePending(targetId, { ...meta, text })
         log.warn({ targetMessageId: targetId, groupJid: meta.groupJid }, 'message.edit_target_missing')
         return 'pending'
     }
@@ -177,10 +213,10 @@ async function persistEdit(
     return 'applied'
 }
 
-function queuePending(targetId: string, edit: PendingEdit): void {
-    const current = pendingEdits.get(targetId) ?? []
-    current.push(edit)
-    pendingEdits.set(targetId, current)
+async function queuePending(targetId: string, edit: PendingEdit): Promise<void> {
+    const current = await getPendingEdits(targetId)
+    current.push(encodePendingEdit(edit))
+    await setPendingEdits(targetId, current)
 }
 
 async function decryptAndApply(
@@ -209,12 +245,13 @@ async function decryptAndApply(
 }
 
 export async function flushPendingEdits(messageId: string): Promise<void> {
-    const queued = pendingEdits.get(messageId)
-    if (!queued?.length) return
-    pendingEdits.delete(messageId)
+    const cached = await getPendingEdits(messageId)
+    if (!cached.length) return
+    await deletePendingEdits(messageId)
+    const queued = cached.map(decodePendingEdit)
     const target = await getMessageEditTarget(messageId)
     if (!target) {
-        pendingEdits.set(messageId, queued)
+        await setPendingEdits(messageId, cached)
         return
     }
     for (const edit of queued) {
@@ -224,7 +261,7 @@ export async function flushPendingEdits(messageId: string): Promise<void> {
         }
         if (!edit.encrypted) continue
         if (!target.messageSecret) {
-            queuePending(messageId, edit)
+            await queuePending(messageId, edit)
             continue
         }
         await decryptAndApply(messageId, edit.encrypted, target.messageSecret, edit)
@@ -255,7 +292,7 @@ export async function applyIncomingEdit(message: WAMessage, isHistory: boolean):
         const senders = senderCandidates(message, target?.senderJid)
         const pending = { encPayload, encIv, senders }
         if (!target?.messageSecret) {
-            queuePending(targetId, { ...meta, encrypted: pending })
+            await queuePending(targetId, { ...meta, encrypted: pending })
             log.warn({ targetMessageId: targetId, groupJid }, 'message.edit_secret_missing')
             return 'pending'
         }

@@ -40,9 +40,22 @@ import {
 import { firstAvailableName, hktStamp, safePathSegment, withDeletedSuffix } from './hkt.js'
 import { log } from './log.js'
 import {
+    addSkippedGroup,
+    clearParticipatingMeta,
+    clearSkippedGroups,
     deleteGroupMetadata,
+    deleteParticipatingMeta,
     getGroupMetadata,
+    getParticipatingMeta,
+    getSenderDisplayNames,
+    isSkippedGroup,
+    listParticipatingMeta,
+    removeSkippedGroup,
+    resolveLinkedJids,
     setGroupMetadata,
+    setLidPnMapping,
+    setParticipatingMeta,
+    setSenderDisplayNames,
 } from './cache.js'
 import {
     getLatestGroupMessage,
@@ -134,12 +147,6 @@ function originalMediaName(
     return `${name}.${fromMime || fallbackExt}`
 }
 
-const skippedGroupJids = new Set<string>()
-const participatingMeta = new Map<string, GroupMetadata>()
-const senderDisplayNames = new Map<string, string>()
-const lidToPn = new Map<string, string>()
-const pnToLid = new Map<string, string>()
-
 type NamedContact = Pick<Contact, 'id' | 'lid' | 'phoneNumber' | 'name' | 'notify' | 'verifiedName'>
 
 function isPersonJid(jid: string | undefined | null): jid is string {
@@ -163,38 +170,31 @@ function contactDisplayName(contact: Partial<NamedContact>): string {
     )
 }
 
-function cacheSenderName(jid: string | undefined | null, name: string): void {
-    if (!jid || !name) return
-    senderDisplayNames.set(jidNormalizedUser(jid), name)
-}
-
-function linkedJids(...jids: Array<string | undefined | null>): string[] {
-    const out: string[] = []
+async function linkedJids(...jids: Array<string | undefined | null>): Promise<string[]> {
+    const keys: string[] = []
     const seen = new Set<string>()
     for (const jid of jids) {
         if (!isPersonJid(jid)) continue
         const key = jidNormalizedUser(jid)
-        const extras = [key, lidToPn.get(key), pnToLid.get(key)]
-        for (const extra of extras) {
-            if (!extra || seen.has(extra)) continue
-            seen.add(extra)
-            out.push(extra)
-        }
+        if (seen.has(key)) continue
+        seen.add(key)
+        keys.push(key)
     }
-    return out
+    return resolveLinkedJids(keys)
 }
 
-function noteLidMapping(pn: string, lid: string): [string, string] {
+async function noteLidMapping(pn: string, lid: string): Promise<[string, string]> {
     const pnJid = jidNormalizedUser(pn)
     const lidJid = jidNormalizedUser(lid)
-    lidToPn.set(lidJid, pnJid)
-    pnToLid.set(pnJid, lidJid)
+    await setLidPnMapping(lidJid, pnJid)
     return [pnJid, lidJid]
 }
 
-function cachedSenderName(...jids: Array<string | undefined | null>): string {
-    for (const jid of linkedJids(...jids)) {
-        const name = senderDisplayNames.get(jid)
+async function cachedSenderName(...jids: Array<string | undefined | null>): Promise<string> {
+    const linked = await linkedJids(...jids)
+    const names = await getSenderDisplayNames(linked)
+    for (const jid of linked) {
+        const name = names.get(jid)
         if (name) return name
     }
     return ''
@@ -238,15 +238,19 @@ async function rememberContacts(contacts: Array<Partial<NamedContact>> | undefin
                 : contact.id?.includes('@lid')
                   ? contact.id
                   : undefined
-        if (pn && lid) noteLidMapping(pn, lid)
-        const ids = linkedJids(contact.id, contact.lid, contact.phoneNumber).filter(isPersonJid)
+        if (pn && lid) await noteLidMapping(pn, lid)
+        const ids = (await linkedJids(contact.id, contact.lid, contact.phoneNumber)).filter(
+            isPersonJid
+        )
         if (ids.length === 0) continue
+        const nameEntries: Array<{ jid: string; name: string }> = []
         for (const jid of ids) {
             if (seen.has(jid)) continue
             seen.add(jid)
-            cacheSenderName(jid, name)
+            nameEntries.push({ jid, name })
             rows.push({ jid, displayName: name })
         }
+        await setSenderDisplayNames(nameEntries)
     }
     await upsertSenders(rows)
 }
@@ -257,16 +261,18 @@ async function rememberLidMappings(mappings: LIDMapping[] | undefined): Promise<
     const seen = new Set<string>()
     for (const mapping of mappings) {
         if (!mapping.pn || !mapping.lid) continue
-        const [pnJid, lidJid] = noteLidMapping(mapping.pn, mapping.lid)
+        const [pnJid, lidJid] = await noteLidMapping(mapping.pn, mapping.lid)
         if (!isPersonJid(pnJid) || !isPersonJid(lidJid)) continue
-        const name = cachedSenderName(pnJid, lidJid)
+        const name = await cachedSenderName(pnJid, lidJid)
         if (!name) continue
+        const nameEntries: Array<{ jid: string; name: string }> = []
         for (const jid of [pnJid, lidJid]) {
             if (seen.has(jid)) continue
             seen.add(jid)
-            cacheSenderName(jid, name)
+            nameEntries.push({ jid, name })
             rows.push({ jid, displayName: name })
         }
+        await setSenderDisplayNames(nameEntries)
     }
     await upsertSenders(rows)
 }
@@ -280,7 +286,7 @@ async function rememberMessageSender(
     altSender: string | undefined,
     senderName: string
 ): Promise<void> {
-    const jids = linkedJids(senderId, altSender).filter(isPersonJid)
+    const jids = (await linkedJids(senderId, altSender)).filter(isPersonJid)
     if (jids.length === 0) return
     await upsertSenders(jids.map((jid) => ({ jid, displayName: senderName })))
 }
@@ -304,17 +310,17 @@ function ownJid(sock: WASocket): string | undefined {
 }
 
 async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
-    participatingMeta.set(metadata.id, metadata)
+    await setParticipatingMeta(metadata.id, metadata)
     const name = metadata.subject
     const tracked = matchesGroupPattern(name)
     await upsertGroup(metadata.id, name || metadata.id, tracked)
     await rememberContacts(metadata.participants)
     if (tracked) {
-        skippedGroupJids.delete(metadata.id)
+        await removeSkippedGroup(metadata.id)
         await setGroupMetadata(metadata.id, metadata)
         return true
     }
-    skippedGroupJids.add(metadata.id)
+    await addSkippedGroup(metadata.id)
     await deleteGroupMetadata(metadata.id)
     return false
 }
@@ -322,11 +328,11 @@ async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
 async function forgetGroup(jid: string, reason: string): Promise<void> {
     const rateLimited = reason.includes('rate-overlimit')
     if (rateLimited) {
-        skippedGroupJids.add(jid)
+        await addSkippedGroup(jid)
         log.warn({ groupJid: jid, reason }, 'group.metadata_rate_limited')
         return
     }
-    participatingMeta.delete(jid)
+    await deleteParticipatingMeta(jid)
     await markGroupDeleted(jid)
     await deleteGroupMetadata(jid)
     log.info({ groupJid: jid, reason }, 'group.forgotten')
@@ -347,7 +353,7 @@ async function refreshGroup(
         return metadata
     } catch (err) {
         if (isRateOverlimit(err)) {
-            skippedGroupJids.add(jid)
+            await addSkippedGroup(jid)
             log.warn({ err, groupJid: jid, source }, 'group.metadata_rate_limited')
             return undefined
         }
@@ -631,7 +637,11 @@ function removePartialMedia(fileName: string): void {
     }
 }
 
-function mediaDestPath(m: WAMessage, meta: MediaStoreMeta, fallbackExt: string): string {
+async function mediaDestPath(
+    m: WAMessage,
+    meta: MediaStoreMeta,
+    fallbackExt: string
+): Promise<string> {
     const { date: hktDate } = hktStamp(meta.timestamp)
     const safeFolderName = safePathSegment(meta.groupName, meta.groupJid)
     const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
@@ -643,9 +653,8 @@ function mediaDestPath(m: WAMessage, meta: MediaStoreMeta, fallbackExt: string):
         fallbackExt
     )
     const filenameType = filenameTypeForMessage(meta.messageType)
-    const typePattern = filenameType
-        ? getFilenameFormatSettings()[filenameType]
-        : getFilenameFormatSettings().images
+    const settings = await getFilenameFormatSettings()
+    const typePattern = filenameType ? settings[filenameType] : settings.images
     return uniqueMediaPath(
         folderPath,
         buildMediaFilename(typePattern, {
@@ -779,7 +788,7 @@ async function storeMediaFile(
     const fallbackExt = fileTypes[meta.messageType]
     if (!fallbackExt) return null
     if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
-    const fileName = mediaDestPath(m, meta, fallbackExt)
+    const fileName = await mediaDestPath(m, meta, fallbackExt)
     try {
         await downloadMediaOnce(m, sock, fileName)
         return persistMediaPath(meta.messageId, fileName)
@@ -809,15 +818,15 @@ async function resolveGroupMetadata(
     allowFetch: boolean
 ): Promise<GroupMetadata | undefined> {
     const cached = await getGroupMetadata(jid)
-    const participating = participatingMeta.get(jid)
-    const knownNonMatching = skippedGroupJids.has(jid)
+    const participating = await getParticipatingMeta(jid)
+    const knownNonMatching = await isSkippedGroup(jid)
     if (cached) return cached
     if (participating) {
         if (matchesGroupPattern(participating.subject)) {
             await persistMatchingGroup(participating)
             return participating
         }
-        skippedGroupJids.add(jid)
+        await addSkippedGroup(jid)
         return undefined
     }
     if (knownNonMatching || !allowFetch) return undefined
@@ -854,15 +863,17 @@ async function processMessage(
         ? jidNormalizedUser(m.key.participantAlt)
         : undefined
     const senderName =
-        cachedSenderName(senderId, altSender, m.key.fromMe ? me?.lid : undefined) ||
+        (await cachedSenderName(senderId, altSender, m.key.fromMe ? me?.lid : undefined)) ||
         usableDisplayName(m.pushName) ||
         (m.key.fromMe ? usableDisplayName(me?.name) : '') ||
         nameFromGroup(groupMetadata, senderId, altSender) ||
         ''
     if (senderName) {
-        for (const personJid of linkedJids(senderId, altSender)) {
-            cacheSenderName(personJid, senderName)
-        }
+        const nameEntries = (await linkedJids(senderId, altSender)).map((personJid) => ({
+            jid: personJid,
+            name: senderName,
+        }))
+        await setSenderDisplayNames(nameEntries)
     }
     const timestamp = unixSeconds(m.messageTimestamp)
     if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
@@ -1022,13 +1033,15 @@ async function processMessage(
         const mentioned = mentionedJidsOf(content)
         if (mentioned.length > 0) {
             await upsertSenders(
-                mentioned.map((personJid) => ({
-                    jid: personJid,
-                    displayName:
-                        cachedSenderName(personJid) ||
-                        nameFromGroup(groupMetadata, personJid) ||
-                        '',
-                }))
+                await Promise.all(
+                    mentioned.map(async (personJid) => ({
+                        jid: personJid,
+                        displayName:
+                            (await cachedSenderName(personJid)) ||
+                            nameFromGroup(groupMetadata, personJid) ||
+                            '',
+                    }))
+                )
             )
         }
         await insertMessage({
@@ -1204,17 +1217,17 @@ async function connectToWhatsApp() {
     }
 
     async function cacheParticipatingGroups(): Promise<void> {
-        skippedGroupJids.clear()
-        participatingMeta.clear()
+        await clearSkippedGroups()
+        await clearParticipatingMeta()
         const response = await sock.groupFetchAllParticipating()
         let cached = 0
         const trackedJids: string[] = []
         for (const key in response) {
             const metadata = response[key]
             if (!metadata) continue
-            participatingMeta.set(metadata.id, metadata)
+            await setParticipatingMeta(metadata.id, metadata)
         }
-        for (const metadata of participatingMeta.values()) {
+        for (const metadata of await listParticipatingMeta()) {
             if (await persistMatchingGroup(metadata)) {
                 cached += 1
                 trackedJids.push(metadata.id)
@@ -1348,7 +1361,7 @@ async function connectToWhatsApp() {
         for (const event of events['groups.update'] || []) {
             if (!event?.id) continue
             const previous =
-                (await getGroupMetadata(event.id)) ?? participatingMeta.get(event.id)
+                (await getGroupMetadata(event.id)) ?? (await getParticipatingMeta(event.id))
             if (previous) {
                 const merged = mergeDefined(previous, event as Partial<GroupMetadata>)
                 if (event.subject && event.subject !== previous.subject) {
@@ -1369,7 +1382,7 @@ async function connectToWhatsApp() {
                 await refreshGroup(sock, event.id, 'groups.update-matched')
                 continue
             }
-            skippedGroupJids.add(event.id)
+            await addSkippedGroup(event.id)
         }
 
         const participants = events['group-participants.update']
