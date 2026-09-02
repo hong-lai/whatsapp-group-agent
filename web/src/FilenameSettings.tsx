@@ -12,9 +12,9 @@ export type FilenameMediaType = (typeof FILENAME_MEDIA_TYPES)[number]
 
 export const FILENAME_TOKENS = [
     'datetime',
-    'messageId',
     'filename',
     'groupName',
+    'messageId',
     'mediaIndex',
     'senderName',
 ] as const
@@ -47,16 +47,16 @@ const TOKEN_LABELS: Record<FilenameToken, string> = {
 
 const SAMPLE = {
     datetime: '2026-08-25_15-19-52',
-    messageId: '3EB0SAMPLEID',
-    groupName: 'hello_text_123',
-    senderName: 'Alex',
+    messageId: '3A734EE1B9B3EDCE4FC4',
+    groupName: 'Happy Family Chat',
+    senderName: 'Hong Lai',
     mediaIndex: null as number | null,
 }
 
 const SAMPLE_FILENAME: Record<FilenameMediaType, string> = {
     images: '',
     videos: '',
-    documents: 'report.pdf',
+    documents: 'cat_food_report.pdf',
     stickers: '',
     audios: '',
 }
@@ -132,9 +132,9 @@ function previewFilename(type: FilenameMediaType, pattern: FilenameTypePattern):
         if (!selected.has(token)) continue
         let value: string | null = null
         if (token === 'datetime') value = SAMPLE.datetime
-        else if (token === 'messageId') value = SAMPLE.messageId
         else if (token === 'filename') value = fileStem(SAMPLE_FILENAME[type]) || null
         else if (token === 'groupName') value = extractGroupNameToken(SAMPLE.groupName, pattern.groupNameRegex)
+        else if (token === 'messageId') value = SAMPLE.messageId
         else if (token === 'mediaIndex')
             value = SAMPLE.mediaIndex == null ? null : String(SAMPLE.mediaIndex + 1)
         else if (token === 'senderName') value = sanitize(SAMPLE.senderName) || null

@@ -650,9 +650,9 @@ function mediaDestPath(m: WAMessage, meta: MediaStoreMeta, fallbackExt: string):
         folderPath,
         buildMediaFilename(typePattern, {
             timestamp: meta.timestamp,
-            messageId: meta.messageId,
             originalName,
             groupName: meta.groupName,
+            messageId: meta.messageId,
             mediaIndex: meta.albumIndex,
             senderName: meta.senderName,
             mediaPath: `media.${fallbackExt}`,

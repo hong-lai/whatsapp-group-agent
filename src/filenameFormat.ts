@@ -24,9 +24,9 @@ export type FilenameMediaType = (typeof FILENAME_MEDIA_TYPES)[number]
 
 export const FILENAME_TOKENS = [
     'datetime',
-    'messageId',
     'filename',
     'groupName',
+    'messageId',
     'mediaIndex',
     'senderName',
 ] as const

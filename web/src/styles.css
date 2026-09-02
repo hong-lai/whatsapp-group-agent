@@ -1249,7 +1249,7 @@ h3 {
     flex: 1;
     overflow-y: auto;
     overscroll-behavior: contain;
-    padding: 12px 14px 84px;
+    padding: 0 14px 84px;
     scrollbar-color: #cbd9d4 transparent;
     scrollbar-width: thin;
 }
