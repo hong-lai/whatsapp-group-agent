@@ -1,5 +1,6 @@
 import { Pool } from 'pg'
 import { config, matchesGroupPattern } from './config.js'
+import { hktStamp } from './hkt.js'
 import { log } from './log.js'
 
 export const pool = new Pool({ connectionString: config.databaseUrl })
@@ -61,6 +62,7 @@ export async function initDb(): Promise<void> {
         await migrateForwarded()
         await migrateQuotedMessageType()
         await migrateDocumentFileName()
+        await migrateWorkflowTables()
 
         await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
@@ -223,6 +225,63 @@ async function migrateDocumentFileName(): Promise<void> {
     if (result.rowCount) {
         log.info({ count: result.rowCount }, 'db.document_file_names_backfilled')
     }
+}
+
+async function migrateWorkflowTables(): Promise<void> {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS workflow_runs (
+            id BIGSERIAL PRIMARY KEY,
+            workflow_name TEXT NOT NULL,
+            message_id TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+            event TEXT NOT NULL,
+            status TEXT NOT NULL,
+            detail TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS workflow_runs_message_idx
+            ON workflow_runs (message_id, workflow_name, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS daily_site_reports (
+            id BIGSERIAL PRIMARY KEY,
+            message_id TEXT NOT NULL UNIQUE REFERENCES messages(message_id) ON DELETE CASCADE,
+            group_jid TEXT NOT NULL REFERENCES groups(jid),
+            report_date DATE,
+            po_number TEXT,
+            ref_numbers TEXT[] NOT NULL DEFAULT '{}',
+            contractor TEXT,
+            project_name TEXT,
+            rss TEXT,
+            workers TEXT[] NOT NULL DEFAULT '{}',
+            num_workers INTEGER,
+            actual_num_workers INTEGER,
+            valid_num_workers BOOLEAN,
+            work_scopes TEXT[] NOT NULL DEFAULT '{}',
+            trench_length DOUBLE PRECISION NOT NULL DEFAULT 0,
+            coring_length DOUBLE PRECISION NOT NULL DEFAULT 0,
+            cable_pulling_length DOUBLE PRECISION NOT NULL DEFAULT 0,
+            conduit_laying_length DOUBLE PRECISION NOT NULL DEFAULT 0,
+            trial_pit_count INTEGER NOT NULL DEFAULT 0,
+            remarks TEXT,
+            source_text TEXT,
+            is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+
+        CREATE INDEX IF NOT EXISTS daily_site_reports_date_po_idx
+            ON daily_site_reports (report_date, po_number)
+            WHERE is_deleted = FALSE;
+
+        CREATE INDEX IF NOT EXISTS daily_site_reports_group_date_id_idx
+            ON daily_site_reports (group_jid, report_date DESC, id DESC)
+            WHERE is_deleted = FALSE;
+
+        CREATE INDEX IF NOT EXISTS daily_site_reports_created_id_idx
+            ON daily_site_reports (created_at DESC, id DESC)
+            WHERE is_deleted = FALSE;
+    `)
 }
 
 function likeContainsPattern(query: string): string {
@@ -1280,6 +1339,8 @@ export type DashboardMessage = {
     fileName: string | null
     reactions: MessageReaction[]
     albumItems: DashboardMessage[]
+    siteReportExtracted: boolean
+    siteReportFailed: boolean
 }
 
 type DashboardMessageRow = {
@@ -1301,6 +1362,8 @@ type DashboardMessageRow = {
     is_forwarded: boolean
     has_media: boolean
     file_name: string | null
+    site_report_extracted: boolean
+    site_report_workflow_status: string | null
 }
 
 const MENTION_RE = /@(\d{8,})/g
@@ -1465,6 +1528,9 @@ function toDashboardMessage(
         fileName: row.file_name,
         reactions,
         albumItems,
+        siteReportExtracted: row.site_report_extracted,
+        siteReportFailed:
+            !row.site_report_extracted && row.site_report_workflow_status === 'error',
     }
 }
 
@@ -1497,7 +1563,21 @@ export async function listDashboardMessages(
             CASE
                 WHEN m.media_path IS NULL THEN NULL
                 ELSE ${FILE_NAME_SQL}
-            END AS file_name
+            END AS file_name,
+            EXISTS (
+                SELECT 1
+                FROM daily_site_reports dsr
+                WHERE dsr.message_id = m.message_id
+                  AND dsr.is_deleted = FALSE
+            ) AS site_report_extracted,
+            (
+                SELECT wr.status
+                FROM workflow_runs wr
+                WHERE wr.message_id = m.message_id
+                  AND wr.workflow_name = 'daily_site_report'
+                ORDER BY wr.created_at DESC, wr.id DESC
+                LIMIT 1
+            ) AS site_report_workflow_status
          FROM messages m
          LEFT JOIN senders s ON s.jid = m.sender_jid
          WHERE m.group_jid = $1
@@ -1563,7 +1643,21 @@ export async function listDashboardMessages(
                     WHEN m.media_path IS NULL THEN NULL
                     ELSE ${FILE_NAME_SQL}
                 END AS file_name,
-                m.album_parent_id
+                m.album_parent_id,
+                EXISTS (
+                    SELECT 1
+                    FROM daily_site_reports dsr
+                    WHERE dsr.message_id = m.message_id
+                      AND dsr.is_deleted = FALSE
+                ) AS site_report_extracted,
+                (
+                    SELECT wr.status
+                    FROM workflow_runs wr
+                    WHERE wr.message_id = m.message_id
+                      AND wr.workflow_name = 'daily_site_report'
+                    ORDER BY wr.created_at DESC, wr.id DESC
+                    LIMIT 1
+                ) AS site_report_workflow_status
              FROM messages m
              LEFT JOIN senders s ON s.jid = m.sender_jid
              WHERE m.album_parent_id = ANY($1::text[])
@@ -1878,4 +1972,380 @@ export async function getAlbumMediaForDownload(
         fileName: row.file_name,
         mediaPath: row.media_path,
     }))
+}
+
+export type DailySiteReportDateField = 'report' | 'created'
+
+export type DailySiteReportIssueCode = 'missing_fields' | 'date_mismatch' | 'workers_over'
+
+export type DailySiteReportIssue = {
+    code: DailySiteReportIssueCode
+    label: string
+}
+
+export type DailySiteReportCursor = {
+    dateField: DailySiteReportDateField
+    reportDate: string | null
+    createdAt: string | null
+    id: number
+}
+
+export type DailySiteReport = {
+    id: number
+    messageId: string
+    groupJid: string
+    groupName: string
+    reportDate: string | null
+    createdDate: string
+    poNumber: string | null
+    refNumbers: string[]
+    contractor: string | null
+    projectName: string | null
+    rss: string | null
+    workers: string[]
+    numWorkers: number | null
+    actualNumWorkers: number | null
+    validNumWorkers: boolean | null
+    workScopes: string[]
+    trenchLength: number
+    coringLength: number
+    cablePullingLength: number
+    conduitLayingLength: number
+    trialPitCount: number
+    remarks: string | null
+    sourceText: string | null
+    messageTimestamp: number | null
+    messageDate: string | null
+    messageIsEdited: boolean
+    messageIsDeleted: boolean
+    createdAt: string
+    updatedAt: string
+    issues: DailySiteReportIssue[]
+    isValid: boolean
+}
+
+const DAILY_SITE_REPORT_ISSUE_LABELS: Record<DailySiteReportIssueCode, string> = {
+    missing_fields: '資料缺失',
+    date_mismatch: '日期與訊息不符',
+    workers_over: '開工人數超出',
+}
+
+function hktDateFromDate(value: Date): string {
+    return hktStamp(Math.floor(value.getTime() / 1000)).date
+}
+
+function computeDailySiteReportIssues(input: {
+    reportDate: string | null
+    poNumber: string | null
+    refNumbers: string[]
+    contractor: string | null
+    projectName: string | null
+    rss: string | null
+    workers: string[]
+    numWorkers: number | null
+    workScopes: string[]
+    messageDate: string | null
+}): DailySiteReportIssue[] {
+    const issues: DailySiteReportIssueCode[] = []
+    const missing =
+        !input.reportDate?.trim() ||
+        !input.poNumber?.trim() ||
+        !input.contractor?.trim() ||
+        !input.projectName?.trim() ||
+        !input.rss?.trim() ||
+        input.refNumbers.length === 0 ||
+        input.workers.length === 0 ||
+        input.workScopes.length === 0 ||
+        input.numWorkers == null
+
+    if (missing) issues.push('missing_fields')
+    if (
+        input.reportDate &&
+        input.messageDate &&
+        input.reportDate !== input.messageDate
+    ) {
+        issues.push('date_mismatch')
+    }
+    if (input.numWorkers != null && input.numWorkers > input.workers.length + 1) {
+        issues.push('workers_over')
+    }
+
+    return issues.map((code) => ({ code, label: DAILY_SITE_REPORT_ISSUE_LABELS[code] }))
+}
+
+type DailySiteReportRow = {
+    id: number
+    message_id: string
+    group_jid: string
+    group_name: string
+    report_date: string | null
+    po_number: string | null
+    ref_numbers: string[]
+    contractor: string | null
+    project_name: string | null
+    rss: string | null
+    workers: string[]
+    num_workers: number | null
+    actual_num_workers: number | null
+    valid_num_workers: boolean | null
+    work_scopes: string[]
+    trench_length: number
+    coring_length: number
+    cable_pulling_length: number
+    conduit_laying_length: number
+    trial_pit_count: number
+    remarks: string | null
+    source_text: string | null
+    created_at: Date
+    updated_at: Date
+    message_timestamp: string | null
+    message_is_edited: boolean
+    message_is_deleted: boolean
+}
+
+function mapDailySiteReportRow(row: DailySiteReportRow): DailySiteReport {
+    const messageTimestamp =
+        row.message_timestamp == null ? null : Number(row.message_timestamp)
+    const messageDate =
+        messageTimestamp == null ? null : hktStamp(messageTimestamp).date
+    const issues = computeDailySiteReportIssues({
+        reportDate: row.report_date,
+        poNumber: row.po_number,
+        refNumbers: row.ref_numbers ?? [],
+        contractor: row.contractor,
+        projectName: row.project_name,
+        rss: row.rss,
+        workers: row.workers ?? [],
+        numWorkers: row.num_workers,
+        workScopes: row.work_scopes ?? [],
+        messageDate,
+    })
+
+    return {
+        id: row.id,
+        messageId: row.message_id,
+        groupJid: row.group_jid,
+        groupName: row.group_name,
+        reportDate: row.report_date,
+        createdDate: hktDateFromDate(row.created_at),
+        poNumber: row.po_number,
+        refNumbers: row.ref_numbers ?? [],
+        contractor: row.contractor,
+        projectName: row.project_name,
+        rss: row.rss,
+        workers: row.workers ?? [],
+        numWorkers: row.num_workers,
+        actualNumWorkers: row.actual_num_workers,
+        validNumWorkers: row.valid_num_workers,
+        workScopes: row.work_scopes ?? [],
+        trenchLength: row.trench_length,
+        coringLength: row.coring_length,
+        cablePullingLength: row.cable_pulling_length,
+        conduitLayingLength: row.conduit_laying_length,
+        trialPitCount: row.trial_pit_count,
+        remarks: row.remarks,
+        sourceText: row.source_text,
+        messageTimestamp,
+        messageDate,
+        messageIsEdited: row.message_is_edited,
+        messageIsDeleted: row.message_is_deleted,
+        createdAt: row.created_at.toISOString(),
+        updatedAt: row.updated_at.toISOString(),
+        issues,
+        isValid: issues.length === 0,
+    }
+}
+
+const DAILY_SITE_REPORT_SELECT = `
+            r.id,
+            r.message_id,
+            r.group_jid,
+            g.name AS group_name,
+            r.report_date::text,
+            r.po_number,
+            r.ref_numbers,
+            r.contractor,
+            r.project_name,
+            r.rss,
+            r.workers,
+            r.num_workers,
+            r.actual_num_workers,
+            r.valid_num_workers,
+            r.work_scopes,
+            r.trench_length,
+            r.coring_length,
+            r.cable_pulling_length,
+            r.conduit_laying_length,
+            r.trial_pit_count,
+            r.remarks,
+            r.source_text,
+            r.created_at,
+            r.updated_at,
+            EXTRACT(EPOCH FROM m.timestamp)::bigint AS message_timestamp,
+            COALESCE(m.is_edited, FALSE) AS message_is_edited,
+            COALESCE(m.is_deleted, FALSE) AS message_is_deleted`
+
+function dailySiteReportSearchSql(query: string | undefined, paramIndex: number): {
+    sql: string
+    params: string[]
+} {
+    if (!query?.trim()) return { sql: '', params: [] }
+    const pattern = likeContainsPattern(query.trim())
+    return {
+        sql: ` AND (
+            r.po_number ILIKE $${paramIndex}
+            OR r.contractor ILIKE $${paramIndex}
+            OR r.project_name ILIKE $${paramIndex}
+            OR r.rss ILIKE $${paramIndex}
+            OR EXISTS (
+                SELECT 1 FROM unnest(r.ref_numbers) AS ref_value
+                WHERE ref_value ILIKE $${paramIndex}
+            )
+            OR EXISTS (
+                SELECT 1 FROM unnest(r.workers) AS worker_value
+                WHERE worker_value ILIKE $${paramIndex}
+            )
+        )`,
+        params: [pattern],
+    }
+}
+
+async function dailySiteReportGroupFilter(groupJid?: string): Promise<string[]> {
+    if (groupJid) {
+        if (!(await groupMatchesPattern(groupJid))) return []
+        return [groupJid]
+    }
+    return matchingGroupJids()
+}
+
+export async function listDailySiteReports(options: {
+    fromDate: string
+    toDate: string
+    dateField?: DailySiteReportDateField
+    groupJid?: string
+    query?: string
+    limit: number
+    cursor?: DailySiteReportCursor
+}): Promise<{ reports: DailySiteReport[]; nextCursor: DailySiteReportCursor | null; total: number }> {
+    const groupJids = await dailySiteReportGroupFilter(options.groupJid)
+    if (groupJids.length === 0) {
+        return { reports: [], nextCursor: null, total: 0 }
+    }
+
+    const dateField = options.dateField ?? 'report'
+    const dateFilterSql =
+        dateField === 'created'
+            ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date >= $1::date
+               AND (r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date <= $2::date`
+            : `r.report_date >= $1::date AND r.report_date <= $2::date`
+    const orderSql =
+        dateField === 'created'
+            ? 'r.created_at DESC NULLS LAST, r.id DESC'
+            : 'r.report_date DESC NULLS LAST, r.id DESC'
+
+    const search = dailySiteReportSearchSql(options.query, 4)
+    const cursor = options.cursor
+    let cursorSql = ''
+    const baseParams: Array<string | number | string[] | null> = [
+        options.fromDate,
+        options.toDate,
+        groupJids,
+        ...search.params,
+    ]
+
+    const params = [...baseParams]
+    if (cursor) {
+        if (dateField === 'created') {
+            const tsParam = params.length + 1
+            const idParam = params.length + 2
+            cursorSql = ` AND (
+                r.created_at < $${tsParam}::timestamptz
+                OR (r.created_at = $${tsParam}::timestamptz AND r.id < $${idParam})
+            )`
+            params.push(cursor.createdAt, cursor.id)
+        } else {
+            const dateParam = params.length + 1
+            const idParam = params.length + 2
+            cursorSql = ` AND (
+                r.report_date < $${dateParam}::date
+                OR (r.report_date IS NOT DISTINCT FROM $${dateParam}::date AND r.id < $${idParam})
+            )`
+            params.push(cursor.reportDate, cursor.id)
+        }
+    }
+
+    const limitParam = params.length + 1
+    const reportSelect = DAILY_SITE_REPORT_SELECT
+    const whereSql = `r.is_deleted = FALSE
+           AND ${dateFilterSql}
+           AND r.group_jid = ANY($3::text[])
+           ${search.sql}`
+
+    const [countResult, result] = await Promise.all([
+        pool.query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count
+             FROM daily_site_reports r
+             WHERE ${whereSql}`,
+            baseParams
+        ),
+        pool.query<DailySiteReportRow>(
+            `SELECT
+                ${reportSelect}
+             FROM daily_site_reports r
+             JOIN groups g ON g.jid = r.group_jid
+             LEFT JOIN messages m ON m.message_id = r.message_id
+             WHERE ${whereSql}
+               ${cursorSql}
+             ORDER BY ${orderSql}
+             LIMIT $${limitParam}`,
+            [...params, options.limit + 1]
+        ),
+    ])
+
+    const hasMore = result.rows.length > options.limit
+    const pageRows = hasMore ? result.rows.slice(0, options.limit) : result.rows
+    const last = pageRows.at(-1)
+
+    return {
+        reports: pageRows.map(mapDailySiteReportRow),
+        nextCursor:
+            hasMore && last
+                ? {
+                      dateField,
+                      reportDate: last.report_date,
+                      createdAt: last.created_at.toISOString(),
+                      id: last.id,
+                  }
+                : null,
+        total: Number(countResult.rows[0]?.count ?? 0),
+    }
+}
+
+export async function listDailySiteReportsForExport(options: {
+    fromDate: string
+    toDate: string
+    dateField?: DailySiteReportDateField
+    groupJid?: string
+    query?: string
+    maxRows: number
+}): Promise<DailySiteReport[]> {
+    const page = await listDailySiteReports({
+        ...options,
+        limit: options.maxRows,
+    })
+    return page.reports
+}
+
+export async function deleteDailySiteReport(
+    id: number
+): Promise<{ groupJid: string; reportDate: string | null } | null> {
+    const result = await pool.query<{ group_jid: string; report_date: string | null }>(
+        `DELETE FROM daily_site_reports
+         WHERE id = $1
+         RETURNING group_jid, report_date::text`,
+        [id]
+    )
+    const row = result.rows[0]
+    if (!row) return null
+    return { groupJid: row.group_jid, reportDate: row.report_date }
 }

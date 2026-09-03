@@ -72,6 +72,10 @@ export const config = {
     catchupBackfillMaxPages: envInt('CATCHUP_BACKFILL_MAX_PAGES', 40),
     logLevel: envLogLevel('LOG_LEVEL', 'info'),
     adminPassword: env('ADMIN_PASSWORD', 'laiwaihong'),
+    /** Enqueue message events for external Python workflow workers (BullMQ). */
+    workflowsEnabled: env('WORKFLOWS_ENABLED', 'false') === 'true',
+    /** When false, history/catch-up messages are not enqueued (avoids LLM floods). */
+    workflowsProcessHistory: env('WORKFLOWS_PROCESS_HISTORY', 'false') === 'true',
 }
 
 export function matchesGroupPattern(name: string | undefined | null): boolean {

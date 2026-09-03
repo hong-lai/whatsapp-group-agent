@@ -7,6 +7,7 @@ import AlbumView, {
     type AlbumScope,
     type MediaCategory,
 } from './AlbumView'
+import DailySiteReportView from './DailySiteReportView'
 import DateRangePicker from './DateRangePicker'
 import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
@@ -58,6 +59,8 @@ type Message = {
     fileName: string | null
     reactions: Reaction[]
     albumItems?: Message[]
+    siteReportExtracted: boolean
+    siteReportFailed: boolean
 }
 
 type GroupsResponse = {
@@ -167,6 +170,7 @@ function Icon({
         | 'menu'
         | 'filter'
         | 'more'
+        | 'report'
 }) {
     const paths = {
         archive: (
@@ -225,6 +229,12 @@ function Icon({
                 <circle cx="6" cy="12" r="1.3" />
                 <circle cx="12" cy="12" r="1.3" />
                 <circle cx="18" cy="12" r="1.3" />
+            </>
+        ),
+        report: (
+            <>
+                <path d="M7 4h10v16H7z" />
+                <path d="M9 8h6M9 12h6M9 16h4" />
             </>
         ),
     }
@@ -961,9 +971,18 @@ function MessageBody({ message, revealed }: { message: Message; revealed: boolea
     )
 }
 
-function MessageCard({ message }: { message: Message }) {
+function MessageCard({
+    message,
+    onOpenReports,
+}: {
+    message: Message
+    onOpenReports?: () => void
+}) {
     const [revealed, setRevealed] = useState(false)
     const canReveal = message.isDeleted && hasStoredContent(message)
+    const showSiteReportBadge =
+        (!message.isDeleted || revealed) &&
+        (message.siteReportExtracted || message.siteReportFailed)
 
     return (
         <article className={`message-card ${message.isDeleted ? 'deleted' : ''} ${revealed ? 'revealed' : ''}`}>
@@ -982,6 +1001,30 @@ function MessageCard({ message }: { message: Message }) {
                                 </svg>
                                 Forwarded
                             </span>
+                        )}
+                        {showSiteReportBadge && (
+                            <button
+                                type="button"
+                                className={`site-report-label${message.siteReportFailed ? ' is-failed' : ''}`}
+                                title={
+                                    message.siteReportExtracted
+                                        ? 'Daily site report extracted — open Reports'
+                                        : 'Site report workflow failed'
+                                }
+                                onClick={() => onOpenReports?.()}
+                            >
+                                {message.siteReportExtracted ? (
+                                    <>
+                                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                                            <path d="M7 4h10v16H7z" />
+                                            <path d="M9 8h6M9 12h4" />
+                                        </svg>
+                                        工地報告
+                                    </>
+                                ) : (
+                                    '分析失敗'
+                                )}
+                            </button>
                         )}
                     </span>
                     <time>{hkDateTime.format(message.timestamp * 1000)}</time>
@@ -1047,8 +1090,12 @@ export default function App() {
     const [from, setFrom] = useState(initialParams.get('from') || today)
     const [to, setTo] = useState(initialParams.get('to') || today)
     const [selectedJid, setSelectedJid] = useState<string | null>(initialParams.get('group'))
-    const [view, setView] = useState<'messages' | 'album'>(
-        initialParams.get('view') === 'album' ? 'album' : 'messages'
+    const [view, setView] = useState<'messages' | 'album' | 'reports'>(
+        initialParams.get('view') === 'album'
+            ? 'album'
+            : initialParams.get('view') === 'reports'
+              ? 'reports'
+              : 'messages'
     )
     const [albumScope, setAlbumScope] = useState<AlbumScope>(
         initialParams.get('scope') === 'group' ? 'group' : 'all'
@@ -1060,6 +1107,15 @@ export default function App() {
         initialMediaCategories(initialParams)
     )
     const [albumQuery, setAlbumQuery] = useState(initialParams.get('q') || '')
+    const [reportsQuery, setReportsQuery] = useState(initialParams.get('rq') || '')
+    const [reportsDateField, setReportsDateField] = useState<'report' | 'created'>(
+        initialParams.get('dateField') === 'created' ? 'created' : 'report'
+    )
+    const [reportsGroupsCollapsed, setReportsGroupsCollapsed] = useState(
+        () =>
+            typeof localStorage !== 'undefined' &&
+            localStorage.getItem('reportsGroupsCollapsed') === '1'
+    )
     const [sortOrder, setSortOrder] = useState<SortOrder>(initialSortOrder(initialParams))
     const [search, setSearch] = useState('')
     const [showEmptyGroups, setShowEmptyGroups] = useState(initialParams.get('empty') === '1')
@@ -1130,7 +1186,9 @@ export default function App() {
                       .filter(Boolean)
                       .join(' · ') || 'Selected groups'
                 : 'All media'
-            : selectedGroup?.name || 'Groups'
+            : view === 'reports'
+              ? selectedGroup?.name || 'Site reports'
+              : selectedGroup?.name || 'Groups'
     const messageScrollKey = `${selectedJid ?? ''}|${from}|${to}|${reloadKey}`
     const { onScroll: onMessageListScroll } = usePinnedScroll(
         messageListRef,
@@ -1156,14 +1214,23 @@ export default function App() {
             }
             if (albumQuery.trim()) params.set('q', albumQuery.trim())
         }
+        if (view === 'reports') {
+            if (reportsQuery.trim()) params.set('rq', reportsQuery.trim())
+            if (reportsDateField === 'created') params.set('dateField', 'created')
+        }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
-    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, albumQuery, showEmptyGroups, sortOrder])
+    }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, albumQuery, reportsQuery, reportsDateField, showEmptyGroups, sortOrder])
 
     useEffect(() => {
-        if (groupsLoading) return
+        if (typeof localStorage === 'undefined') return
+        localStorage.setItem('reportsGroupsCollapsed', reportsGroupsCollapsed ? '1' : '0')
+    }, [reportsGroupsCollapsed])
+
+    useEffect(() => {
+        if (groupsLoading || view === 'reports') return
         if (selectedJid && rangedGroups.some((group) => group.jid === selectedJid)) return
         setSelectedJid(rangedGroups[0]?.jid ?? null)
-    }, [groupsLoading, rangedGroups, selectedJid])
+    }, [groupsLoading, rangedGroups, selectedJid, view])
 
     function pulseLive() {
         const now = Date.now()
@@ -1268,7 +1335,12 @@ export default function App() {
                 if (data.pattern?.source) setPattern(data.pattern)
                 setSelectedJid((current) => {
                     if (current && data.groups.some((group) => group.jid === current)) return current
-                    return data.groups.find((group) => group.messageCount > 0)?.jid || data.groups[0]?.jid || null
+                    if (view === 'reports') return current
+                    return (
+                        data.groups.find((group) => group.messageCount > 0)?.jid ||
+                        data.groups[0]?.jid ||
+                        null
+                    )
                 })
             })
             .catch((reason: unknown) => {
@@ -1283,7 +1355,7 @@ export default function App() {
                 if (requestId === groupsRequestId.current) setGroupsLoading(false)
             })
         return () => controller.abort()
-    }, [from, to, invalidRange, reloadKey])
+    }, [from, to, invalidRange, reloadKey, view])
 
     useEffect(() => {
         silentGen.current += 1
@@ -1348,6 +1420,7 @@ export default function App() {
             setGroups(groupsData.groups)
             if (groupsData.pattern?.source) setPattern(groupsData.pattern)
             setSelectedJid((current) => {
+                if (currentView === 'reports') return current
                 if (!current) {
                     return (
                         groupsData.groups.find((group) => group.messageCount > 0)?.jid ||
@@ -1463,6 +1536,68 @@ export default function App() {
         const multi = view === 'album' && albumScope === 'group'
         return (
             <>
+                {view === 'reports' && (
+                    <>
+                        {!inDrawer ? (
+                            <div className="groups-panel-top desktop-only">
+                                <button
+                                    type="button"
+                                    className={`all-groups-card ${!selectedJid ? 'selected' : ''}`}
+                                    onClick={() => {
+                                        setSelectedJid(null)
+                                        setDrawerOpen(false)
+                                    }}
+                                >
+                                    <span className="all-groups-card-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24">
+                                            <path d="M12 3 3 8v8l9 5 9-5V8l-9-5Z" />
+                                            <path d="M12 12 3 7" />
+                                            <path d="m12 12 9-5" />
+                                            <path d="M12 12v9" />
+                                        </svg>
+                                    </span>
+                                    <span className="all-groups-card-copy">
+                                        <strong>All groups</strong>
+                                        <span>Every extracted report in range</span>
+                                    </span>
+                                </button>
+                                <button
+                                    type="button"
+                                    className="groups-panel-toggle groups-panel-toggle--collapse"
+                                    onClick={() => setReportsGroupsCollapsed(true)}
+                                    title="Hide groups"
+                                    aria-label="Hide groups"
+                                >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="m15 6-6 6 6 6" />
+                                    </svg>
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                className={`all-groups-card ${!selectedJid ? 'selected' : ''}`}
+                                onClick={() => {
+                                    setSelectedJid(null)
+                                    setDrawerOpen(false)
+                                }}
+                            >
+                                <span className="all-groups-card-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24">
+                                        <path d="M12 3 3 8v8l9 5 9-5V8l-9-5Z" />
+                                        <path d="M12 12 3 7" />
+                                        <path d="m12 12 9-5" />
+                                        <path d="M12 12v9" />
+                                    </svg>
+                                </span>
+                                <span className="all-groups-card-copy">
+                                    <strong>All groups</strong>
+                                    <span>Every extracted report in range</span>
+                                </span>
+                            </button>
+                        )}
+                    </>
+                )}
                 {view === 'album' && (
                     <div className="scope-switch" role="group" aria-label="Album scope">
                         <button
@@ -1488,7 +1623,7 @@ export default function App() {
                 )}
                 <div className={`panel-heading${inDrawer ? ' is-drawer' : ''}`}>
                     {inDrawer ? null : (
-                        <div>
+                        <div className="panel-heading-title">
                             <h2>Groups</h2>
                         </div>
                     )}
@@ -1532,7 +1667,9 @@ export default function App() {
                         const selected =
                             view === 'album'
                                 ? multi && albumGroupJids.includes(group.jid)
-                                : group.jid === selectedJid
+                                : view === 'reports'
+                                  ? group.jid === selectedJid
+                                  : group.jid === selectedJid
                         return (
                             <button
                                 className={`group-item ${selected ? 'selected' : ''}`}
@@ -1577,7 +1714,7 @@ export default function App() {
     }
 
     return (
-        <div className={`app-shell${view === 'album' ? ' is-album' : ''}`}>
+        <div className={`app-shell${view === 'album' ? ' is-album' : ''}${view === 'reports' ? ' is-reports' : ''}`}>
             <header className="topbar">
                 <button
                     type="button"
@@ -1842,6 +1979,17 @@ export default function App() {
                         <Icon name="image" />
                         <span className="view-switch-label">Media</span>
                     </button>
+                    <button
+                        type="button"
+                        className={view === 'reports' ? 'active' : ''}
+                        aria-label="Site reports"
+                        aria-pressed={view === 'reports'}
+                        title="Site reports"
+                        onClick={() => setView('reports')}
+                    >
+                        <Icon name="report" />
+                        <span className="view-switch-label">Reports</span>
+                    </button>
                 </div>
                 {invalidRange && <p className="inline-error">Choose a valid date range.</p>}
             </section>
@@ -1854,7 +2002,7 @@ export default function App() {
             )}
 
             <main
-                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}`}
+                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}${view === 'reports' ? ' reports-dashboard' : ''}`}
                 aria-busy={groupsLoading || messagesLoading}
             >
                 <div
@@ -1901,7 +2049,11 @@ export default function App() {
                                         </div>
                                     )}
                                     {displayMessages.map((message) => (
-                                        <MessageCard message={message} key={message.messageId} />
+                                        <MessageCard
+                                            message={message}
+                                            key={message.messageId}
+                                            onOpenReports={() => setView('reports')}
+                                        />
                                     ))}
                                     {sortOrder === 'desc' && nextCursor && (
                                         <div className="load-sentinel" ref={olderSentinelRef}>
@@ -1950,6 +2102,30 @@ export default function App() {
                         onCountsChange={setAlbumCounts}
                     />
                 </div>
+                <div
+                    className={`view-pane reports-pane ${view === 'reports' ? 'is-active' : ''}${reportsGroupsCollapsed ? ' groups-collapsed' : ''}`}
+                    aria-hidden={view !== 'reports'}
+                >
+                    <aside
+                        className={`groups-panel desktop-only${reportsGroupsCollapsed ? ' is-collapsed' : ''}`}
+                    >
+                        {renderGroupsPanel()}
+                    </aside>
+                    <DailySiteReportView
+                        from={from}
+                        to={to}
+                        groupJid={selectedJid}
+                        groupName={selectedGroup?.name ?? null}
+                        query={reportsQuery}
+                        onQueryChange={setReportsQuery}
+                        dateField={reportsDateField}
+                        onDateFieldChange={setReportsDateField}
+                        active={view === 'reports'}
+                        onLiveUpdate={pulseLive}
+                        groupsCollapsed={reportsGroupsCollapsed}
+                        onOpenGroups={() => setReportsGroupsCollapsed(false)}
+                    />
+                </div>
             </main>
             <nav className="bottom-nav mobile-only" aria-label="Views">
                 <button
@@ -1970,11 +2146,22 @@ export default function App() {
                     <Icon name="image" />
                     Media
                 </button>
+                <button
+                    type="button"
+                    className={view === 'reports' ? 'active' : ''}
+                    aria-pressed={view === 'reports'}
+                    onClick={() => setView('reports')}
+                >
+                    <Icon name="report" />
+                    Reports
+                </button>
             </nav>
             <Drawer
                 open={drawerOpen}
                 onClose={() => setDrawerOpen(false)}
-                title={view === 'album' ? 'Media groups' : 'Groups'}
+                title={
+                    view === 'album' ? 'Media groups' : view === 'reports' ? 'Report groups' : 'Groups'
+                }
             >
                 {renderGroupsPanel(true)}
             </Drawer>

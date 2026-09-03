@@ -27,6 +27,11 @@ import {
     listAlbumMedia,
     listDashboardGroups,
     listDashboardMessages,
+    listDailySiteReports,
+    listDailySiteReportsForExport,
+    deleteDailySiteReport,
+    type DailySiteReportCursor,
+    type DailySiteReportDateField,
     type MessageCursor,
 } from './db.js'
 
@@ -118,6 +123,46 @@ function decodeCursor(value: unknown): MessageCursor | undefined {
         throw new Error('Invalid cursor')
     }
 }
+
+function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
+    if (typeof value !== 'string' || !value) return undefined
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<DailySiteReportCursor>
+        if (typeof parsed.id !== 'number' || !Number.isSafeInteger(parsed.id)) {
+            throw new Error('Invalid cursor')
+        }
+        const dateField: DailySiteReportDateField = parsed.dateField === 'created' ? 'created' : 'report'
+        if (dateField === 'created' && typeof parsed.createdAt !== 'string') {
+            throw new Error('Invalid cursor')
+        }
+        if (
+            dateField === 'report' &&
+            parsed.reportDate !== null &&
+            parsed.reportDate !== undefined &&
+            typeof parsed.reportDate !== 'string'
+        ) {
+            throw new Error('Invalid cursor')
+        }
+        return {
+            dateField,
+            reportDate: parsed.reportDate ?? null,
+            createdAt: parsed.createdAt ?? null,
+            id: parsed.id,
+        }
+    } catch {
+        throw new Error('Invalid cursor')
+    }
+}
+
+function parseReportDateField(value: unknown): DailySiteReportDateField {
+    return value === 'created' ? 'created' : 'report'
+}
+
+function encodeReportCursor(cursor: DailySiteReportCursor | null): string | null {
+    return cursor ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : null
+}
+
+import { buildDailySiteReportsCsv } from './reportsCsv.js'
 
 function parseLimit(value: unknown): number {
     if (typeof value !== 'string') return config.dashboardPageSize
@@ -322,6 +367,89 @@ export function createApiApp() {
                 })),
                 nextCursor: encodeCursor(page.nextCursor),
             })
+        })
+    )
+
+    app.get(
+        '/api/daily-site-reports',
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const groupJid =
+                typeof request.query.group === 'string' && request.query.group
+                    ? request.query.group
+                    : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(request.query.q)
+            const dateField = parseReportDateField(request.query.dateField)
+            const cursor = decodeReportCursor(request.query.cursor)
+            const limit = parseLimit(request.query.limit)
+            const page = await listDailySiteReports({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                limit,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+                ...(cursor ? { cursor } : {}),
+            })
+            response.json({
+                range: { from: range.from, to: range.to },
+                dateField,
+                total: page.total,
+                reports: page.reports,
+                nextCursor: encodeReportCursor(page.nextCursor),
+            })
+        })
+    )
+
+    app.get(
+        '/api/daily-site-reports/export.csv',
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const groupJid =
+                typeof request.query.group === 'string' && request.query.group
+                    ? request.query.group
+                    : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(request.query.q)
+            const dateField = parseReportDateField(request.query.dateField)
+            const reports = await listDailySiteReportsForExport({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                maxRows: 5000,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+            })
+
+            const filename = `daily_site_reports_${range.from}_to_${range.to}.csv`
+            response
+                .status(200)
+                .type('text/csv; charset=utf-8')
+                .setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+                .setHeader('Cache-Control', 'no-store')
+                .send(buildDailySiteReportsCsv(reports))
+        })
+    )
+
+    app.delete(
+        '/api/daily-site-reports/:id',
+        requireAdmin,
+        asyncRoute(async (request, response) => {
+            const id = Number.parseInt(String(request.params.id), 10)
+            if (!Number.isSafeInteger(id) || id < 1) {
+                throw new Error('Invalid report id')
+            }
+            const deleted = await deleteDailySiteReport(id)
+            if (!deleted) {
+                response.status(404).json({ error: 'Report not found' })
+                return
+            }
+            response.json({ ok: true })
         })
     )
 

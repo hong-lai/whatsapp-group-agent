@@ -21,7 +21,7 @@ type Props = {
     onPreset: (days: number) => void
     sortOrder: SortOrder
     onSortChange: (order: SortOrder) => void
-    view: 'messages' | 'album'
+    view: 'messages' | 'album' | 'reports'
     types: MediaCategory[]
     onTypesChange: (types: MediaCategory[]) => void
     counts: Record<MediaCategory, number>
