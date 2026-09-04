@@ -109,14 +109,20 @@ function optionalPromptOverride(value: unknown, maxChars = 50_000): string | nul
     return value
 }
 const MEDIA_TYPES = {
-    image: 'imageMessage',
-    video: 'videoMessage',
-    document: 'documentMessage',
-    audio: 'audioMessage',
-    sticker: 'stickerMessage',
+    image: ['imageMessage'],
+    video: ['videoMessage', 'ptvMessage'],
+    document: ['documentMessage'],
+    audio: ['audioMessage'],
+    sticker: ['stickerMessage'],
 } as const
 type MediaCategory = keyof typeof MEDIA_TYPES
 const ALL_MEDIA_CATEGORIES = Object.keys(MEDIA_TYPES) as MediaCategory[]
+
+function mediaCategoryForType(messageType: string): MediaCategory | undefined {
+    return ALL_MEDIA_CATEGORIES.find((category) =>
+        (MEDIA_TYPES[category] as readonly string[]).includes(messageType)
+    )
+}
 
 type DateRange = {
     from: string
@@ -282,8 +288,8 @@ function parseFileNameQuery(value: unknown): string | undefined {
 }
 
 function albumMessageTypes(categories: MediaCategory[], fileNameQuery?: string): string[] {
-    if (fileNameQuery) return [MEDIA_TYPES.document]
-    return categories.map((category) => MEDIA_TYPES[category])
+    if (fileNameQuery) return [...MEDIA_TYPES.document]
+    return categories.flatMap((category) => MEDIA_TYPES[category])
 }
 
 function parseOptionalGroups(query: Request['query']): string[] | undefined {
@@ -445,9 +451,7 @@ export function createApiApp() {
                 counts,
                 items: page.items.map((item) => ({
                     ...item,
-                    category: ALL_MEDIA_CATEGORIES.find(
-                        (category) => MEDIA_TYPES[category] === item.messageType
-                    ),
+                    category: mediaCategoryForType(item.messageType),
                     mediaUrl: `/api/media/${encodeURIComponent(item.messageId)}`,
                 })),
                 nextCursor: encodeCursor(page.nextCursor),

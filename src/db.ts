@@ -1891,6 +1891,7 @@ export async function countAlbumMedia(
             CASE m.message_type
                 WHEN 'imageMessage' THEN 'image'
                 WHEN 'videoMessage' THEN 'video'
+                WHEN 'ptvMessage' THEN 'video'
                 WHEN 'documentMessage' THEN 'document'
                 WHEN 'audioMessage' THEN 'audio'
                 WHEN 'stickerMessage' THEN 'sticker'
@@ -1910,7 +1911,14 @@ export async function countAlbumMedia(
             toTimestamp,
             allowedJids,
             scopedJids,
-            ['imageMessage', 'videoMessage', 'documentMessage', 'audioMessage', 'stickerMessage'],
+            [
+                'imageMessage',
+                'videoMessage',
+                'ptvMessage',
+                'documentMessage',
+                'audioMessage',
+                'stickerMessage',
+            ],
         ]
     )
 

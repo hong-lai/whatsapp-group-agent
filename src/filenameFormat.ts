@@ -57,6 +57,7 @@ export type FilenameContext = {
 const MESSAGE_TYPE_TO_FILENAME_TYPE: Record<string, FilenameMediaType> = {
     imageMessage: 'images',
     videoMessage: 'videos',
+    ptvMessage: 'videos',
     documentMessage: 'documents',
     stickerMessage: 'stickers',
     audioMessage: 'audios',

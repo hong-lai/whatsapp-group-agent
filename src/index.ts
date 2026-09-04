@@ -95,6 +95,7 @@ import { enqueueMessageEvent } from './queue/index.js'
 const fileTypes: Record<string, string> = {
     imageMessage: 'jpeg',
     videoMessage: 'mp4',
+    ptvMessage: 'mp4',
     stickerMessage: 'webp',
     documentMessage: 'pdf',
     audioMessage: 'ogg',
@@ -130,6 +131,7 @@ function originalMediaName(
         content?.documentMessage ||
         content?.imageMessage ||
         content?.videoMessage ||
+        content?.ptvMessage ||
         content?.audioMessage ||
         content?.stickerMessage
     if (!media) return null
@@ -490,7 +492,7 @@ function isLivePhotoMotionVideo(
     content: proto.IMessage | null | undefined
 ): boolean {
     if (raw?.imageMessage) return false
-    const video = content?.videoMessage || raw?.videoMessage
+    const video = content?.videoMessage || content?.ptvMessage || raw?.videoMessage || raw?.ptvMessage
     if (!video) return false
     const association =
         raw?.messageContextInfo?.messageAssociation?.associationType ??
@@ -514,6 +516,7 @@ function contextInfoOf(content: proto.IMessage | null | undefined): proto.IConte
         content.extendedTextMessage?.contextInfo ||
         content.imageMessage?.contextInfo ||
         content.videoMessage?.contextInfo ||
+        content.ptvMessage?.contextInfo ||
         content.documentMessage?.contextInfo ||
         content.audioMessage?.contextInfo ||
         content.stickerMessage?.contextInfo ||

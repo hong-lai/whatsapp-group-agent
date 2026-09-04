@@ -129,6 +129,7 @@ export function textFromMessage(message: proto.IMessage | null | undefined): str
         content.extendedTextMessage?.text ||
         content.imageMessage?.caption ||
         content.videoMessage?.caption ||
+        content.ptvMessage?.caption ||
         content.documentMessage?.caption ||
         textFromContact(content.contactMessage) ||
         (contacts.length ? contacts.join('\n\n') : content.contactsArrayMessage?.displayName?.trim()) ||
