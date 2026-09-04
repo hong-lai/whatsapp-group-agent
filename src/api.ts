@@ -30,6 +30,7 @@ import {
     listDailySiteReports,
     listDailySiteReportsForExport,
     listDailySiteReportMessageIds,
+    listDailySiteReportMetricsSeries,
     deleteDailySiteReport,
     defaultDailySiteReportSort,
     isDailySiteReportSortBy,
@@ -533,6 +534,34 @@ export function createApiApp() {
                 .setHeader('Content-Disposition', `attachment; filename="${filename}"`)
                 .setHeader('Cache-Control', 'no-store')
                 .send(buildDailySiteReportsCsv(reports))
+        })
+    )
+
+    app.get(
+        '/api/daily-site-reports/metrics-series',
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const groupJid =
+                typeof request.query.group === 'string' && request.query.group
+                    ? request.query.group
+                    : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(request.query.q)
+            const dateField = parseReportDateField(request.query.dateField)
+            const points = await listDailySiteReportMetricsSeries({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+            })
+            response.json({
+                range: { from: range.from, to: range.to },
+                dateField,
+                points,
+            })
         })
     )
 

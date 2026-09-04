@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Drawer from './Drawer'
+import ReportMetricsCharts from './ReportMetricsCharts'
 import { useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
 
 export type DailySiteReportIssue = {
@@ -1738,6 +1739,7 @@ export default function DailySiteReportView({
     const [error, setError] = useState<string | null>(null)
     const [selected, setSelected] = useState<DailySiteReport | null>(null)
     const [bulkRerunOpen, setBulkRerunOpen] = useState(false)
+    const [viewMode, setViewMode] = useState<'table' | 'charts'>('table')
     const [reloadKey, setReloadKey] = useState(0)
     const [visibleColumns, setVisibleColumns] = useState(readVisibleReportColumns)
     const [sort, setSort] = useState<ReportSortState>(() => readReportSort(dateField))
@@ -1872,7 +1874,7 @@ export default function DailySiteReportView({
         () => {
             void loadMore()
         },
-        active && Boolean(nextCursor) && !loadingMore && !loading,
+        active && viewMode === 'table' && Boolean(nextCursor) && !loadingMore && !loading,
         'desc'
     )
 
@@ -1938,6 +1940,26 @@ export default function DailySiteReportView({
                             </div>
                         </div>
                         <div className="reports-toolbar">
+                            <div className="reports-view-tabs" role="tablist" aria-label="Reports view">
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    className={viewMode === 'table' ? 'active' : ''}
+                                    aria-selected={viewMode === 'table'}
+                                    onClick={() => setViewMode('table')}
+                                >
+                                    Table
+                                </button>
+                                <button
+                                    type="button"
+                                    role="tab"
+                                    className={viewMode === 'charts' ? 'active' : ''}
+                                    aria-selected={viewMode === 'charts'}
+                                    onClick={() => setViewMode('charts')}
+                                >
+                                    Charts
+                                </button>
+                            </div>
                             <div className="reports-date-filter" role="group" aria-label="日期篩選">
                                 <button
                                     type="button"
@@ -1956,10 +1978,12 @@ export default function DailySiteReportView({
                                     建立日期
                                 </button>
                             </div>
-                            <ReportColumnPicker
-                                visibleColumns={visibleColumns}
-                                onChange={setVisibleColumns}
-                            />
+                            {viewMode === 'table' && (
+                                <ReportColumnPicker
+                                    visibleColumns={visibleColumns}
+                                    onChange={setVisibleColumns}
+                                />
+                            )}
                             <label className="search-box reports-search">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
                                     <circle cx="11" cy="11" r="7" />
@@ -1987,10 +2011,20 @@ export default function DailySiteReportView({
             )}
 
             <div
-                className={`reports-table-wrap${loading ? ' is-loading' : ''}`}
+                className={`reports-table-wrap${loading ? ' is-loading' : ''}${viewMode === 'charts' ? ' is-charts' : ''}`}
                 ref={scrollRef}
             >
-                {loading && reports.length === 0 ? (
+                {viewMode === 'charts' ? (
+                    <ReportMetricsCharts
+                        from={from}
+                        to={to}
+                        groupJid={groupJid}
+                        query={query}
+                        dateField={dateField}
+                        active={active}
+                        reloadKey={reloadKey}
+                    />
+                ) : loading && reports.length === 0 ? (
                     <div className="reports-skeleton" aria-label="Loading reports">
                         {[1, 2, 3, 4].map((row) => (
                             <div
@@ -2056,13 +2090,13 @@ export default function DailySiteReportView({
                         </p>
                     </div>
                 )}
-                {loading && reports.length > 0 && (
+                {viewMode === 'table' && loading && reports.length > 0 && (
                     <div className="content-overlay" role="status">
                         <span className="overlay-spinner" />
                         Loading
                     </div>
                 )}
-                {nextCursor && (
+                {viewMode === 'table' && nextCursor && (
                     <div className="load-sentinel reports-sentinel" ref={sentinelRef}>
                         {loadingMore ? 'Loading…' : ''}
                     </div>
