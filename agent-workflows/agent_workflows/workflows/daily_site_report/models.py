@@ -52,7 +52,11 @@ class DailySiteReport(BaseModel):
         )
     )
     num_workers: int = Field(
-        description="The total number of workers (includes 1 RSS) present on-site."
+        description=(
+            "Integer headcount from the 開工人數 label only. "
+            "Transcribe the labeled number after removing units such as 人/名. "
+            "Independent of the workers list and rss; do not count names or adjust the value."
+        )
     )
     work_scopes: List[str] = Field(
         description="The specific tasks or scopes of work performed (e.g., 挖掘, 清場)."
