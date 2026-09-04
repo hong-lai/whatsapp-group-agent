@@ -59,6 +59,8 @@ type Message = {
     fileName: string | null
     reactions: Reaction[]
     albumItems?: Message[]
+    albumExpectedImages?: number | null
+    albumExpectedVideos?: number | null
     siteReportExtracted: boolean
     siteReportFailed: boolean
 }
@@ -433,31 +435,45 @@ function mediaUrl(messageId: string): string {
 }
 
 function useMediaReady(src: string) {
-    const [readySrc, setReadySrc] = useState<string | null>(null)
-    const markReady = useCallback(() => setReadySrc(src), [src])
+    const [state, setState] = useState<{ src: string; status: 'loading' | 'ready' | 'error' }>({
+        src,
+        status: 'loading',
+    })
+    const status = state.src === src ? state.status : 'loading'
+    const markReady = useCallback(() => setState({ src, status: 'ready' }), [src])
+    const markError = useCallback(() => setState({ src, status: 'error' }), [src])
     const bind = useCallback(
         (element: HTMLImageElement | HTMLVideoElement | null) => {
             if (!element) return
-            if (element instanceof HTMLImageElement && element.complete && element.naturalWidth > 0) {
-                markReady()
+            if (element instanceof HTMLImageElement) {
+                if (element.complete && element.naturalWidth > 0) markReady()
+                else if (element.complete) markError()
                 return
             }
-            if (element instanceof HTMLVideoElement && element.readyState >= 2) {
-                markReady()
-            }
+            if (element.readyState >= 2) markReady()
         },
-        [markReady]
+        [markError, markReady]
     )
 
     return {
-        ready: readySrc === src,
+        ready: status === 'ready',
+        failed: status === 'error',
         bind,
         onReady: markReady,
+        onError: markError,
     }
 }
 
 function MediaPlaceholder() {
     return <span className="media-placeholder skeleton" aria-hidden="true" />
+}
+
+function MediaMissing() {
+    return (
+        <span className="media-missing" role="img" aria-label="Media not found">
+            NOT FOUND
+        </span>
+    )
 }
 
 function DownloadIcon() {
@@ -675,32 +691,50 @@ function MessageMediaButton({
     onOpen: () => void
 }) {
     const src = kind === 'video' ? `${url}#t=0.001` : url
-    const { ready, bind, onReady } = useMediaReady(src)
+    const { ready, failed, bind, onReady, onError } = useMediaReady(src)
 
     return (
         <button
             type="button"
-            className={`media-frame${kind === 'video' ? ' is-video' : ''}${ready ? ' is-ready' : ' is-loading'}`}
-            onClick={onOpen}
-            aria-label={label}
+            className={`media-frame${kind === 'video' ? ' is-video' : ''}${
+                failed ? ' is-missing' : ready ? ' is-ready' : ' is-loading'
+            }`}
+            onClick={failed ? undefined : onOpen}
+            aria-label={failed ? 'Media not found' : label}
+            disabled={failed}
         >
-            {!ready && <MediaPlaceholder />}
-            {kind === 'video' ? (
-                <video
-                    ref={bind}
-                    src={src}
-                    muted
-                    playsInline
-                    preload="metadata"
-                    onLoadedData={onReady}
-                />
+            {failed ? (
+                <MediaMissing />
             ) : (
-                <img ref={bind} src={src} alt={alt} loading="lazy" onLoad={onReady} />
-            )}
-            {kind === 'video' && ready && (
-                <span className="conversation-album-play" aria-hidden="true">
-                    ▶
-                </span>
+                <>
+                    {!ready && <MediaPlaceholder />}
+                    {kind === 'video' ? (
+                        <video
+                            ref={bind}
+                            src={src}
+                            muted
+                            playsInline
+                            preload="metadata"
+                            onLoadedData={onReady}
+                            onError={onError}
+                        />
+                    ) : (
+                        <img
+                            ref={bind}
+                            src={src}
+                            alt={alt}
+                            loading="lazy"
+                            decoding="async"
+                            onLoad={onReady}
+                            onError={onError}
+                        />
+                    )}
+                    {kind === 'video' && ready && (
+                        <span className="conversation-album-play" aria-hidden="true">
+                            ▶
+                        </span>
+                    )}
+                </>
             )}
         </button>
     )
@@ -792,6 +826,16 @@ function albumSummary(items: Message[]): string {
     return parts.join(' · ') || 'Album'
 }
 
+function albumExpectedSummary(
+    images: number | null | undefined,
+    videos: number | null | undefined
+): string | null {
+    const parts = []
+    if (images != null && images > 0) parts.push(`${images} photo${images === 1 ? '' : 's'}`)
+    if (videos != null && videos > 0) parts.push(`${videos} video${videos === 1 ? '' : 's'}`)
+    return parts.length ? parts.join(' · ') : null
+}
+
 function ConversationAlbumTile({
     item,
     showMore,
@@ -803,40 +847,61 @@ function ConversationAlbumTile({
 }) {
     const isVideo = isAlbumVideo(item)
     const src = isVideo ? `${mediaUrl(item.messageId)}#t=0.001` : mediaUrl(item.messageId)
-    const { ready, bind, onReady } = useMediaReady(src)
+    const { ready, failed, bind, onReady, onError } = useMediaReady(src)
 
     return (
         <button
-            className={`conversation-album-tile${isVideo ? ' video' : ''}${ready ? ' is-ready' : ' is-loading'}`}
+            className={`conversation-album-tile${isVideo ? ' video' : ''}${
+                failed ? ' is-missing' : ready ? ' is-ready' : ' is-loading'
+            }`}
             type="button"
             onClick={onOpen}
             aria-label={
-                showMore
-                    ? `Open album, ${showMore} more`
-                    : isVideo
-                      ? 'Open video'
-                      : 'Open photo'
+                failed
+                    ? 'Media not found'
+                    : showMore
+                      ? `Open album, ${showMore} more`
+                      : isVideo
+                        ? 'Open video'
+                        : 'Open photo'
             }
+            disabled={failed}
         >
-            {!ready && <MediaPlaceholder />}
-            {isVideo ? (
-                <video ref={bind} src={src} preload="metadata" muted playsInline onLoadedData={onReady} />
+            {failed ? (
+                <MediaMissing />
             ) : (
-                <img
-                    ref={bind}
-                    src={src}
-                    alt={item.textContent || 'Album photo'}
-                    loading="lazy"
-                    onLoad={onReady}
-                />
-            )}
-            {isVideo && !showMore && ready && (
-                <span className="conversation-album-play" aria-hidden="true">
-                    ▶
-                </span>
-            )}
-            {showMore > 0 && (
-                <span className="conversation-album-more">+{showMore}</span>
+                <>
+                    {!ready && <MediaPlaceholder />}
+                    {isVideo ? (
+                        <video
+                            ref={bind}
+                            src={src}
+                            preload="metadata"
+                            muted
+                            playsInline
+                            onLoadedData={onReady}
+                            onError={onError}
+                        />
+                    ) : (
+                        <img
+                            ref={bind}
+                            src={src}
+                            alt={item.textContent || 'Album photo'}
+                            loading="lazy"
+                            decoding="async"
+                            onLoad={onReady}
+                            onError={onError}
+                        />
+                    )}
+                    {isVideo && !showMore && ready && (
+                        <span className="conversation-album-play" aria-hidden="true">
+                            ▶
+                        </span>
+                    )}
+                    {showMore > 0 && (
+                        <span className="conversation-album-more">+{showMore}</span>
+                    )}
+                </>
             )}
         </button>
     )
@@ -845,9 +910,13 @@ function ConversationAlbumTile({
 function ConversationAlbum({
     items,
     includeDeleted = false,
+    expectedImages = null,
+    expectedVideos = null,
 }: {
     items: Message[]
     includeDeleted?: boolean
+    expectedImages?: number | null
+    expectedVideos?: number | null
 }) {
     const visible = items.filter((item) => (includeDeleted || !item.isDeleted) && item.hasMedia)
     const preview = visible.slice(0, 4)
@@ -855,7 +924,8 @@ function ConversationAlbum({
     const [openIndex, setOpenIndex] = useState<number | null>(null)
 
     if (visible.length === 0) {
-        return <p className="album-pending">Grouped photos or videos</p>
+        const expected = albumExpectedSummary(expectedImages, expectedVideos)
+        return <p className="album-pending">{expected || 'Grouped photos or videos'}</p>
     }
 
     return (
@@ -908,7 +978,12 @@ function MessageBody({ message, revealed }: { message: Message; revealed: boolea
         return (
             <>
                 {caption && <p>{caption}</p>}
-                <ConversationAlbum items={albumItems} includeDeleted={revealed} />
+                <ConversationAlbum
+                    items={albumItems}
+                    includeDeleted={revealed}
+                    expectedImages={message.albumExpectedImages}
+                    expectedVideos={message.albumExpectedVideos}
+                />
             </>
         )
     }
@@ -983,6 +1058,9 @@ function MessageCard({
     const showSiteReportBadge =
         (!message.isDeleted || revealed) &&
         (message.siteReportExtracted || message.siteReportFailed)
+    // Album captions live on child media; WhatsApp edits those children, not the album shell.
+    const showEdited =
+        message.isEdited || (message.albumItems ?? []).some((item) => item.isEdited)
 
     return (
         <article className={`message-card ${message.isDeleted ? 'deleted' : ''} ${revealed ? 'revealed' : ''}`}>
@@ -1000,6 +1078,11 @@ function MessageCard({
                                     <path d="m15.5 4.5 5 3.5-5 3.5" />
                                 </svg>
                                 Forwarded
+                            </span>
+                        )}
+                        {showEdited && (!message.isDeleted || revealed) && (
+                            <span className="edited-label" title="This message was edited">
+                                Edited
                             </span>
                         )}
                         {showSiteReportBadge && (
@@ -1030,16 +1113,18 @@ function MessageCard({
                     <time>{hkDateTime.format(message.timestamp * 1000)}</time>
                 </header>
                 {(!message.isDeleted || revealed) && <QuotePreview message={message} />}
-                <MessageBody message={message} revealed={revealed} />
-                {canReveal && (
-                    <button
-                        type="button"
-                        className="reveal-original"
-                        onClick={() => setRevealed((current) => !current)}
-                    >
-                        {revealed ? 'Hide original' : 'Reveal original'}
-                    </button>
-                )}
+                <div className="message-body-stack">
+                    <MessageBody message={message} revealed={revealed} />
+                    {canReveal && (
+                        <button
+                            type="button"
+                            className="reveal-original"
+                            onClick={() => setRevealed((current) => !current)}
+                        >
+                            {revealed ? 'Hide original' : 'Reveal original'}
+                        </button>
+                    )}
+                </div>
                 {(!message.isDeleted || revealed) && (
                     <ReactionRow reactions={message.reactions ?? []} />
                 )}

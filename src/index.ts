@@ -70,7 +70,6 @@ import {
     attachNearbyAlbumMedia,
     resolveAlbumParent,
     nextAlbumIndex,
-    clearAlbumLink,
     updateAlbumExpected,
     updateAlbumLink,
     updateMessageMediaPath,
@@ -99,6 +98,14 @@ const fileTypes: Record<string, string> = {
     stickerMessage: 'webp',
     documentMessage: 'pdf',
     audioMessage: 'ogg',
+}
+
+function isAlbumMediaType(messageType: string): boolean {
+    return (
+        messageType === 'imageMessage' ||
+        messageType === 'videoMessage' ||
+        messageType === 'ptvMessage'
+    )
 }
 
 const mimeExtensions: Record<string, string> = {
@@ -418,27 +425,48 @@ function messageLayers(
     return layers
 }
 
+function associationTypeOf(value: unknown): number | null {
+    if (value == null) return null
+    if (typeof value === 'object' && value !== null && 'toNumber' in value) {
+        try {
+            return Number((value as { toNumber: () => number }).toNumber())
+        } catch {
+            return null
+        }
+    }
+    const n = Number(value)
+    return Number.isFinite(n) ? n : null
+}
+
 function albumAssociationOf(
     ...messages: Array<proto.IMessage | null | undefined>
 ): { parentId: string | null; index: number | null } {
     for (const message of messages) {
         for (const layer of messageLayers(message)) {
-            const association = layer?.messageContextInfo?.messageAssociation as
-                | (proto.IMessageAssociation & { message_index?: unknown })
+            const raw = layer?.messageContextInfo?.messageAssociation as
+                | (proto.IMessageAssociation & {
+                      message_index?: unknown
+                      parent_message_key?: { id?: string | null } | null
+                      association_type?: unknown
+                  })
                 | null
                 | undefined
-            const parentId = association?.parentMessageKey?.id
+            if (!raw) continue
+            const parentId = raw.parentMessageKey?.id || raw.parent_message_key?.id || null
             if (!parentId) continue
-            const type = association?.associationType
+            const type = associationTypeOf(raw.associationType ?? raw.association_type)
+            // Native album children carry MEDIA_ALBUM. Some payloads omit the enum
+            // (undefined) or leave UNKNOWN while still setting parentMessageKey.
             if (
-                type !== undefined &&
+                type != null &&
+                type !== proto.MessageAssociation.AssociationType.UNKNOWN &&
                 type !== proto.MessageAssociation.AssociationType.MEDIA_ALBUM
             ) {
                 continue
             }
             return {
                 parentId,
-                index: asAlbumIndex(association.messageIndex ?? association.message_index),
+                index: asAlbumIndex(raw.messageIndex ?? raw.message_index),
             }
         }
     }
@@ -921,26 +949,43 @@ async function processMessage(
     if (messageId && (await hasMessage(messageId))) {
         await rememberMessageSecret(messageId, messageSecret)
         const association = albumAssociationOf(m.message, content)
-        if (messageType === 'imageMessage' || messageType === 'videoMessage') {
+        if (association.parentId) {
+            // Native WhatsApp MEDIA_ALBUM association — trust parentMessageKey as-is.
+            await updateAlbumLink(messageId, association.parentId, association.index)
+        } else if (isAlbumMediaType(messageType) && isHistory) {
+            // History sync often strips messageAssociation; fall back to nearby attach.
             const albumParentId = await resolveAlbumParent({
                 groupJid: jid,
                 senderJid: senderId || null,
                 timestamp,
                 messageType,
-                explicitParentId: association.parentId,
+                explicitParentId: null,
                 isHistory,
             })
             if (albumParentId) {
-                await updateAlbumLink(messageId, albumParentId, association.index)
-            } else {
-                await clearAlbumLink(messageId)
+                await updateAlbumLink(messageId, albumParentId, null)
             }
-        } else if (association.parentId || association.index != null) {
-            await updateAlbumLink(messageId, association.parentId, association.index)
         }
         if (messageType === 'albumMessage') {
             const expected = albumExpectedOf(m.message, content)
             await updateAlbumExpected(messageId, expected.images, expected.videos)
+            if (isHistory) {
+                try {
+                    await attachNearbyAlbumMedia({
+                        parentId: messageId,
+                        groupJid: jid,
+                        senderJid: senderId || null,
+                        timestamp,
+                        expectedImages: expected.images,
+                        expectedVideos: expected.videos,
+                    })
+                } catch (err) {
+                    log.warn(
+                        { err, messageId, groupJid: jid, senderJid: senderId },
+                        'album.nearby_attach_failed'
+                    )
+                }
+            }
         }
         if (isForwarded) await markMessageForwarded(messageId)
         if (alreadyEdited) {
@@ -1034,22 +1079,19 @@ async function processMessage(
     const expected = albumExpectedOf(content, m.message)
     let albumParentId = association.parentId
     let albumIndex = association.index
-    if (messageType === 'imageMessage' || messageType === 'videoMessage') {
+    if (!albumParentId && isAlbumMediaType(messageType) && isHistory) {
+        // History sync often strips messageAssociation; fall back to nearby attach.
         albumParentId = await resolveAlbumParent({
             groupJid: jid,
             senderJid: senderId || null,
             timestamp,
             messageType,
-            explicitParentId: association.parentId,
+            explicitParentId: null,
             isHistory,
         })
         if (!albumParentId) albumIndex = null
     }
-    if (
-        albumParentId &&
-        albumIndex == null &&
-        (messageType === 'imageMessage' || messageType === 'videoMessage')
-    ) {
+    if (albumParentId && albumIndex == null && isAlbumMediaType(messageType)) {
         albumIndex = await nextAlbumIndex(albumParentId)
     }
 
@@ -1096,7 +1138,7 @@ async function processMessage(
             isForwarded,
         })
         if (messageId) await flushPendingEdits(messageId)
-        if (messageType === 'albumMessage') {
+        if (messageType === 'albumMessage' && isHistory) {
             try {
                 await attachNearbyAlbumMedia({
                     parentId: messageId,
@@ -1136,6 +1178,7 @@ async function processMessage(
                 hasMedia: Boolean(fileTypes[messageType]),
                 albumParentId,
                 albumIndex,
+                albumAssociation: Boolean(association.parentId),
                 ...(messageType === 'albumMessage'
                     ? {
                           albumExpectedImages: expected.images,

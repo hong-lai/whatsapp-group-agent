@@ -4024,6 +4024,21 @@ h3 {
     white-space: nowrap;
 }
 
+.message-content .edited-label {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 7px;
+    border: 1px solid rgba(42, 100, 150, 0.22);
+    border-radius: 999px;
+    color: #2a6496;
+    background: rgba(46, 120, 198, 0.1);
+    font-size: 0.58rem;
+    font-weight: 700;
+    line-height: 1.2;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
 .forwarded-label svg {
     width: 0.78rem;
     height: 0.78rem;
@@ -4198,7 +4213,7 @@ blockquote.quoted-preview .quoted-text {
 }
 
 .reveal-original {
-    margin-top: 8px;
+    margin-top: 0;
     padding: 5px 9px;
     border: 1px solid #d7e3de;
     border-radius: 8px;
@@ -4206,6 +4221,13 @@ blockquote.quoted-preview .quoted-text {
     background: white;
     font-size: 0.68rem;
     font-weight: 700;
+}
+
+.message-body-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
 }
 
 .message-card.revealed .message-content {
@@ -4217,14 +4239,15 @@ blockquote.quoted-preview .quoted-text {
     position: relative;
     width: fit-content;
     max-width: min(420px, 100%);
-    display: inline-block;
+    display: block;
     margin-top: 8px;
     overflow: hidden;
     border-radius: 11px;
     background: #e8eeeb;
 }
 
-.media-frame.is-loading {
+.media-frame.is-loading,
+.media-frame.is-missing {
     width: min(240px, 100%);
     min-height: 180px;
     max-height: 260px;
@@ -4234,10 +4257,25 @@ blockquote.quoted-preview .quoted-text {
 .media-placeholder,
 .media-placeholder.skeleton {
     position: absolute;
-    z-index: 1;
+    z-index: 0;
     inset: 0;
     display: block;
     border-radius: inherit;
+}
+
+.media-missing {
+    position: absolute;
+    z-index: 1;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 12px;
+    color: #7a8a85;
+    background: #eef2f0;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-align: center;
 }
 
 button.media-frame {
@@ -4248,8 +4286,12 @@ button.media-frame {
     cursor: pointer;
 }
 
-button.media-frame:hover img,
-button.media-frame:hover video {
+button.media-frame:disabled {
+    cursor: default;
+}
+
+button.media-frame:hover:not(:disabled) img,
+button.media-frame:hover:not(:disabled) video {
     transform: scale(1.02);
 }
 
@@ -4260,16 +4302,17 @@ button.media-frame video {
 
 .media-frame.is-loading img,
 .media-frame.is-loading video {
-    position: absolute;
-    inset: 0;
+    position: relative;
+    z-index: 1;
     width: 100%;
     height: 100%;
-    opacity: 0;
+    opacity: 1;
 }
 
 .media-frame.is-ready img,
 .media-frame.is-ready video {
-    animation: media-in 240ms var(--ease-out);
+    position: relative;
+    z-index: 1;
 }
 
 .conversation-album {
@@ -4329,12 +4372,27 @@ button.media-frame video {
 
 .conversation-album-tile.is-loading img,
 .conversation-album-tile.is-loading video {
-    opacity: 0;
+    position: relative;
+    z-index: 1;
+    opacity: 1;
 }
 
 .conversation-album-tile.is-ready img,
 .conversation-album-tile.is-ready video {
-    animation: media-in 240ms var(--ease-out);
+    position: relative;
+    z-index: 1;
+}
+
+.conversation-album-tile.is-missing {
+    cursor: default;
+}
+
+.conversation-album-tile .media-placeholder {
+    z-index: 0;
+}
+
+.conversation-album-tile .media-missing {
+    font-size: 0.62rem;
 }
 
 .conversation-album-play,

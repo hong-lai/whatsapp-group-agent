@@ -154,16 +154,24 @@ async function migrateMessagesTimestamp(): Promise<void> {
     log.info('db.messages_timestamp_migrated')
 }
 
-// History sync often strips messageAssociation. Group only within a short burst of
-// the album itself, and never across another album from the same sender. Live
-// children carry parentMessageKey; do not absorb a later standalone photo just
-// because it arrived a few minutes after an album.
-const ALBUM_BURST_GAP_SECONDS = 2
+// History sync often strips messageAssociation. Nearby attach is only a history
+// fallback: group within a short burst of the album itself, never across another
+// album from the same sender. Live children must use native parentMessageKey.
+const ALBUM_BURST_GAP_SECONDS = 10
 const ALBUM_ASSOCIATION_WINDOW_SECONDS = 30
-const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage'] as const
+const ALBUM_MEDIA_TYPES = ['imageMessage', 'videoMessage', 'ptvMessage'] as const
 const ALBUM_PARENTS_BACKFILL_KEY = 'album_parents_backfilled'
 const ALBUM_BURST_UNLINK_KEY = 'album_burst_unlinked_v1'
 const ALBUM_EXPECTED_ZERO_KEY = 'album_expected_zero_nulled_v1'
+const ALBUM_ORPHAN_REATTACH_KEY = 'album_orphan_reattach_v2'
+
+function isAlbumVideoType(messageType: string): boolean {
+    return messageType === 'videoMessage' || messageType === 'ptvMessage'
+}
+
+function isAlbumMediaType(messageType: string): boolean {
+    return messageType === 'imageMessage' || isAlbumVideoType(messageType)
+}
 
 type AlbumCandidate = {
     messageId: string
@@ -399,6 +407,52 @@ async function migrateAlbumParents(): Promise<void> {
             )
         }
     }
+
+    if (!(await getAppSetting(ALBUM_ORPHAN_REATTACH_KEY))) {
+        const albums = await pool.query<{
+            message_id: string
+            group_jid: string
+            sender_jid: string | null
+            timestamp: string
+            album_expected_images: number | null
+            album_expected_videos: number | null
+        }>(
+            `SELECT
+                message_id,
+                group_jid,
+                sender_jid,
+                EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp,
+                album_expected_images,
+                album_expected_videos
+             FROM messages
+             WHERE message_type = 'albumMessage' AND timestamp IS NOT NULL
+             ORDER BY timestamp ASC, message_id ASC`
+        )
+        let attached = 0
+        for (const album of albums.rows) {
+            if (!Number.isFinite(asEpochSeconds(album.timestamp))) continue
+            attached += await attachNearbyAlbumMedia({
+                parentId: album.message_id,
+                groupJid: album.group_jid,
+                senderJid: album.sender_jid,
+                timestamp: asEpochSeconds(album.timestamp),
+                expectedImages: album.album_expected_images,
+                expectedVideos: album.album_expected_videos,
+            })
+        }
+        await setAppSetting(ALBUM_ORPHAN_REATTACH_KEY, {
+            albums: albums.rowCount ?? 0,
+            attached,
+            at: Date.now(),
+        })
+        if (attached > 0) {
+            log.info(
+                { albums: albums.rowCount ?? 0, attached },
+                'db.album_orphans_reattached'
+            )
+        }
+        await fillMissingAlbumIndexes()
+    }
 }
 
 function asEpochSeconds(value: string | number | null | undefined): number {
@@ -446,10 +500,10 @@ function albumSlotsRemaining(
 ): boolean {
     if (!expectedKnown(album)) return true
     const images = children.filter((child) => child.messageType === 'imageMessage').length
-    const videos = children.filter((child) => child.messageType === 'videoMessage').length
+    const videos = children.filter((child) => isAlbumVideoType(child.messageType)).length
     const imageLimit = album.expectedImages ?? 0
     const videoLimit = album.expectedVideos ?? 0
-    if (messageType === 'videoMessage') return videos < videoLimit
+    if (isAlbumVideoType(messageType)) return videos < videoLimit
     return images < imageLimit
 }
 
@@ -470,7 +524,7 @@ function pickAlbumMembers(
     let images = 0
     let videos = 0
     for (const item of byDistance) {
-        const isVideo = item.messageType === 'videoMessage'
+        const isVideo = isAlbumVideoType(item.messageType)
         if (isVideo) {
             if (videos >= videoLimit) continue
             videos += 1
@@ -486,13 +540,21 @@ function pickAlbumMembers(
 function mediaFitsAlbum(
     album: AlbumMeta,
     children: AlbumCandidate[],
-    candidate: AlbumCandidate
+    candidate: AlbumCandidate,
+    options: { requireBurst?: boolean } = {}
 ): boolean {
     if (!albumSlotsRemaining(album, children, candidate.messageType)) return false
+    // Explicit parentMessageKey is authoritative — do not drop it on delivery lag.
+    if (options.requireBurst === false) return true
+    // When WhatsApp told us the slot counts, pick by distance within the window
+    // rather than requiring a tight delivery burst (children often land 3–10s later).
+    if (expectedKnown(album)) {
+        return pickAlbumMembers([...children, candidate], album).some(
+            (item) => item.messageId === candidate.messageId
+        )
+    }
     const burst = albumBurst([...children, candidate], album.timestamp)
-    if (!burst.some((item) => item.messageId === candidate.messageId)) return false
-    if (!expectedKnown(album)) return true
-    return pickAlbumMembers(burst, album).some((item) => item.messageId === candidate.messageId)
+    return burst.some((item) => item.messageId === candidate.messageId)
 }
 
 async function loadAlbumMeta(parentId: string): Promise<AlbumMeta | null> {
@@ -690,8 +752,11 @@ export async function attachNearbyAlbumMedia(row: {
             messageType: item.message_type,
             timestamp: asEpochSeconds(item.timestamp),
         }))
-    const burst = albumBurst([...existing, ...nearby], album.timestamp)
-    const keep = new Set(pickAlbumMembers(burst, album).map((item) => item.messageId))
+    const memberPool = [...existing, ...nearby]
+    const selected = expectedKnown(album)
+        ? pickAlbumMembers(memberPool, album)
+        : pickAlbumMembers(albumBurst(memberPool, album.timestamp), album)
+    const keep = new Set(selected.map((item) => item.messageId))
     const attachIds = nearby
         .filter((item) => keep.has(item.messageId))
         .map((item) => item.messageId)
@@ -727,16 +792,11 @@ export async function resolveAlbumParent(params: {
         timestamp: params.timestamp,
     }
     if (params.explicitParentId) {
-        const album = await loadAlbumMeta(params.explicitParentId)
-        if (!album) return params.explicitParentId
-        const children = await loadAlbumChildren(params.explicitParentId)
-        return mediaFitsAlbum(album, children, candidate) ? params.explicitParentId : null
+        // Native parentMessageKey — trust it; do not apply delivery-burst filters.
+        return params.explicitParentId
     }
-    if (!params.isHistory) return null
-    if (
-        params.messageType !== 'imageMessage' &&
-        params.messageType !== 'videoMessage'
-    ) {
+    // Nearby matching is only a history-sync fallback (association is often stripped).
+    if (!params.isHistory || !isAlbumMediaType(params.messageType)) {
         return null
     }
 
@@ -1339,6 +1399,8 @@ export type DashboardMessage = {
     fileName: string | null
     reactions: MessageReaction[]
     albumItems: DashboardMessage[]
+    albumExpectedImages: number | null
+    albumExpectedVideos: number | null
     siteReportExtracted: boolean
     siteReportFailed: boolean
 }
@@ -1362,6 +1424,8 @@ type DashboardMessageRow = {
     is_forwarded: boolean
     has_media: boolean
     file_name: string | null
+    album_expected_images: number | null
+    album_expected_videos: number | null
     site_report_extracted: boolean
     site_report_workflow_status: string | null
 }
@@ -1528,6 +1592,8 @@ function toDashboardMessage(
         fileName: row.file_name,
         reactions,
         albumItems,
+        albumExpectedImages: row.album_expected_images ?? null,
+        albumExpectedVideos: row.album_expected_videos ?? null,
         siteReportExtracted: row.site_report_extracted,
         siteReportFailed:
             !row.site_report_extracted && row.site_report_workflow_status === 'error',
@@ -1564,6 +1630,8 @@ export async function listDashboardMessages(
                 WHEN m.media_path IS NULL THEN NULL
                 ELSE ${FILE_NAME_SQL}
             END AS file_name,
+            m.album_expected_images,
+            m.album_expected_videos,
             EXISTS (
                 SELECT 1
                 FROM daily_site_reports dsr
@@ -1643,6 +1711,8 @@ export async function listDashboardMessages(
                     WHEN m.media_path IS NULL THEN NULL
                     ELSE ${FILE_NAME_SQL}
                 END AS file_name,
+                m.album_expected_images,
+                m.album_expected_videos,
                 m.album_parent_id,
                 EXISTS (
                     SELECT 1
