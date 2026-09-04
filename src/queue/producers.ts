@@ -33,9 +33,9 @@ function getQueue(): Queue<MessageEventJob> {
 
 export async function enqueueMessageEvent(
     job: Omit<MessageEventJob, 'enqueuedAt'>
-): Promise<void> {
-    if (!config.workflowsEnabled) return
-    if (job.isHistory && !config.workflowsProcessHistory) return
+): Promise<boolean> {
+    if (!config.workflowsEnabled) return false
+    if (job.isHistory && !config.workflowsProcessHistory) return false
 
     const payload: MessageEventJob = {
         ...job,
@@ -57,11 +57,13 @@ export async function enqueueMessageEvent(
             },
             'workflow.enqueued'
         )
+        return true
     } catch (err) {
         log.warn(
             { err, event: job.event, messageId: job.messageId },
             'workflow.enqueue_failed'
         )
+        return false
     }
 }
 

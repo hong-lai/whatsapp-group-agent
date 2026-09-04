@@ -24,6 +24,8 @@ export default function Drawer({
     const closeRef = useRef<HTMLButtonElement>(null)
     const titleRef = useRef<HTMLHeadingElement>(null)
     const start = useRef<{ x: number; y: number; axis: 'x' | 'y' | null } | null>(null)
+    const onCloseRef = useRef(onClose)
+    onCloseRef.current = onClose
 
     useEffect(() => {
         if (!open) return undefined
@@ -32,14 +34,14 @@ export default function Drawer({
         closeRef.current?.focus()
 
         function onKey(event: KeyboardEvent) {
-            if (event.key === 'Escape') onClose()
+            if (event.key === 'Escape') onCloseRef.current()
         }
         window.addEventListener('keydown', onKey)
         return () => {
             document.body.style.overflow = previous
             window.removeEventListener('keydown', onKey)
         }
-    }, [open, onClose])
+    }, [open])
 
     function syncTitleTooltip() {
         const el = titleRef.current

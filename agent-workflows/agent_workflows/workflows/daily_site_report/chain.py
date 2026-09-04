@@ -23,11 +23,16 @@ def _load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def build_chain():
+def build_chain(
+    model_id: str | None = None,
+    *,
+    classifier_prompt: str | None = None,
+    extractor_prompt: str | None = None,
+):
     model = ChatOpenAI(
         base_url=settings.llm_base_url,
         api_key=SecretStr(settings.llm_api_key),
-        model=settings.llm_model,
+        model=model_id or settings.llm_model,
         temperature=settings.llm_temperature,
     )
     model_with_thinking = model
@@ -37,18 +42,22 @@ def build_chain():
     classifier = model.with_structured_output(ClassifiedResult)
     report_extractor = model_with_thinking.with_structured_output(DailySiteReport)
 
-    classifier_prompt = _load_prompt("classifier_prompt.txt")
-    extractor_prompt = _load_prompt("extractor_prompt.txt")
+    classifier_prompt_text = (
+        classifier_prompt if classifier_prompt is not None else _load_prompt("classifier_prompt.txt")
+    )
+    extractor_prompt_text = (
+        extractor_prompt if extractor_prompt is not None else _load_prompt("extractor_prompt.txt")
+    )
 
     classification_chat_template = ChatPromptTemplate.from_messages(
         [
-            SystemMessage(content=classifier_prompt),
+            SystemMessage(content=classifier_prompt_text),
             ("human", "{user_input}"),
         ]
     )
     report_gen_chat_template = ChatPromptTemplate.from_messages(
         [
-            SystemMessage(content=extractor_prompt),
+            SystemMessage(content=extractor_prompt_text),
             ("human", "{user_input}"),
         ]
     )

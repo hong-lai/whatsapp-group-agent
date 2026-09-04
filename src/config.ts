@@ -76,6 +76,15 @@ export const config = {
     workflowsEnabled: env('WORKFLOWS_ENABLED', 'false') === 'true',
     /** When false, history/catch-up messages are not enqueued (avoids LLM floods). */
     workflowsProcessHistory: env('WORKFLOWS_PROCESS_HISTORY', 'false') === 'true',
+    /** Shared with workflows worker — used by debug UI for model listing / defaults. */
+    llmBaseUrl: env('LLM_BASE_URL', 'http://localhost:1234/v1'),
+    llmApiKey: env('LLM_API_KEY', '1234'),
+    llmModel: env('LLM_MODEL', 'google/gemma-4-e2b'),
+    /** Prompt files for daily_site_report (read-only for debug UI). */
+    dailySiteReportPromptsDir: env(
+        'DAILY_SITE_REPORT_PROMPTS_DIR',
+        './agent-workflows/private/daily_site_report'
+    ),
 }
 
 export function matchesGroupPattern(name: string | undefined | null): boolean {

@@ -11,6 +11,11 @@ export type MessageEventJob = {
     messageType: string | null
     mediaPath: string | null
     isHistory: boolean
+    /** Optional override for the workflows worker LLM model id. */
+    llmModel?: string | null
+    /** Optional one-off prompt overrides (debug re-run only). */
+    classifierPrompt?: string | null
+    extractorPrompt?: string | null
     enqueuedAt: string
 }
 

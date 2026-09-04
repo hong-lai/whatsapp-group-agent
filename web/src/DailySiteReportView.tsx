@@ -767,7 +767,9 @@ function ReportDeleteDialog({
     const [deleteError, setDeleteError] = useState<string | null>(null)
     const inputRef = useRef<HTMLInputElement>(null)
     const deletingRef = useRef(false)
+    const onCloseRef = useRef(onClose)
     deletingRef.current = deleting
+    onCloseRef.current = onClose
 
     useEffect(() => {
         if (!open) return undefined
@@ -776,17 +778,18 @@ function ReportDeleteDialog({
         setDeleting(false)
         const previous = document.body.style.overflow
         document.body.style.overflow = 'hidden'
-        inputRef.current?.focus()
+        const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 40)
 
         function onKey(event: KeyboardEvent) {
-            if (event.key === 'Escape' && !deletingRef.current) onClose()
+            if (event.key === 'Escape' && !deletingRef.current) onCloseRef.current()
         }
         window.addEventListener('keydown', onKey)
         return () => {
             document.body.style.overflow = previous
             window.removeEventListener('keydown', onKey)
+            window.clearTimeout(focusTimer)
         }
-    }, [open, onClose])
+    }, [open])
 
     async function handleDelete() {
         if (!adminPassword.trim()) {
@@ -896,11 +899,21 @@ function ReportDeleteDialog({
 function ReportDetail({
     report,
     onDeleted,
+    onReran,
+    onModalOpenChange,
 }: {
     report: DailySiteReport
     onDeleted: (id: number) => void
+    onReran?: () => void
+    onModalOpenChange?: (open: boolean) => void
 }) {
     const [deleteOpen, setDeleteOpen] = useState(false)
+    const [debugOpen, setDebugOpen] = useState(false)
+
+    useEffect(() => {
+        onModalOpenChange?.(deleteOpen || debugOpen)
+        return () => onModalOpenChange?.(false)
+    }, [deleteOpen, debugOpen, onModalOpenChange])
 
     const rows: Array<{ label: string; value: string; warn?: boolean }> = [
         { label: '報告日期', value: report.reportDate || '—', warn: hasIssue(report, 'date_mismatch') },
@@ -959,7 +972,14 @@ function ReportDetail({
                     </div>
                 )}
             </dl>
-            <div className="report-delete-panel">
+            <div className="report-detail-actions">
+                <button
+                    type="button"
+                    className="report-debug-trigger"
+                    onClick={() => setDebugOpen(true)}
+                >
+                    Workflow debug
+                </button>
                 <button
                     type="button"
                     className="report-delete-trigger"
@@ -975,6 +995,12 @@ function ReportDetail({
                     刪除報告
                 </button>
             </div>
+            <WorkflowDebugDialog
+                open={debugOpen}
+                messageId={report.messageId}
+                onClose={() => setDebugOpen(false)}
+                onReran={onReran}
+            />
             <ReportDeleteDialog
                 open={deleteOpen}
                 report={report}
@@ -985,6 +1011,488 @@ function ReportDetail({
                 }}
             />
         </>
+    )
+}
+
+type WorkflowDebugResponse = {
+    workflowsEnabled: boolean
+    workflowsProcessHistory: boolean
+    defaultModel: string
+    models: string[]
+    prompts: {
+        classifierPrompt: string | null
+        extractorPrompt: string | null
+        promptsDir: string
+    }
+    snapshot: {
+        message: {
+            messageId: string
+            groupJid: string
+            groupName: string | null
+            messageType: string
+            textContent: string | null
+            textLength: number
+            mediaPath: string | null
+            isDeleted: boolean
+            isEdited: boolean
+            isHistory: boolean
+            isForwarded: boolean
+            timestamp: number | null
+        }
+        runs: Array<{
+            id: number
+            workflowName: string
+            event: string
+            status: string
+            detail: string | null
+            createdAt: string
+        }>
+        reportId: number | null
+    }
+}
+
+function WorkflowDebugDialog({
+    open,
+    messageId,
+    onClose,
+    onReran,
+}: {
+    open: boolean
+    messageId: string
+    onClose: () => void
+    onReran?: () => void
+}) {
+    const [loading, setLoading] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [data, setData] = useState<WorkflowDebugResponse | null>(null)
+    const [adminPassword, setAdminPassword] = useState('')
+    const [unlocked, setUnlocked] = useState(false)
+    const [llmModel, setLlmModel] = useState('')
+    const [classifierPrompt, setClassifierPrompt] = useState('')
+    const [extractorPrompt, setExtractorPrompt] = useState('')
+    const [baselineClassifier, setBaselineClassifier] = useState('')
+    const [baselineExtractor, setBaselineExtractor] = useState('')
+    const [rerunning, setRerunning] = useState(false)
+    const [rerunNote, setRerunNote] = useState<string | null>(null)
+    const inputRef = useRef<HTMLInputElement>(null)
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const busyRef = useRef(false)
+    const promptsReadyRef = useRef(false)
+    const onCloseRef = useRef(onClose)
+    const onReranRef = useRef(onReran)
+    onCloseRef.current = onClose
+    onReranRef.current = onReran
+
+    useEffect(() => {
+        busyRef.current = loading || rerunning
+    }, [loading, rerunning])
+
+    useEffect(() => {
+        if (!open) {
+            if (pollRef.current) {
+                clearInterval(pollRef.current)
+                pollRef.current = null
+            }
+            setError(null)
+            setRerunNote(null)
+            setData(null)
+            setUnlocked(false)
+            setLlmModel('')
+            setClassifierPrompt('')
+            setExtractorPrompt('')
+            setBaselineClassifier('')
+            setBaselineExtractor('')
+            setAdminPassword('')
+            promptsReadyRef.current = false
+            return
+        }
+        const previous = document.body.style.overflow
+        document.body.style.overflow = 'hidden'
+        const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 40)
+
+        function onKey(event: KeyboardEvent) {
+            if (event.key === 'Escape' && !busyRef.current) onCloseRef.current()
+        }
+        window.addEventListener('keydown', onKey)
+        return () => {
+            document.body.style.overflow = previous
+            window.removeEventListener('keydown', onKey)
+            window.clearTimeout(focusTimer)
+        }
+    }, [open])
+
+    useEffect(() => {
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current)
+        }
+    }, [])
+
+    async function loadDebug(password: string) {
+        setLoading(true)
+        setError(null)
+        try {
+            const response = await fetch(
+                `/api/debug/workflows?messageId=${encodeURIComponent(messageId)}&limit=12`,
+                { headers: { 'x-admin-password': password } }
+            )
+            const body = (await response.json()) as WorkflowDebugResponse & { error?: string }
+            if (!response.ok) {
+                throw new Error(body.error || `Request failed (${response.status})`)
+            }
+            setData(body)
+            setUnlocked(true)
+            setLlmModel((current) => current || body.defaultModel)
+            const nextClassifier = body.prompts.classifierPrompt ?? ''
+            const nextExtractor = body.prompts.extractorPrompt ?? ''
+            setBaselineClassifier(nextClassifier)
+            setBaselineExtractor(nextExtractor)
+            if (!promptsReadyRef.current) {
+                setClassifierPrompt(nextClassifier)
+                setExtractorPrompt(nextExtractor)
+                promptsReadyRef.current = true
+            }
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'Could not load workflow debug')
+            setData(null)
+            setUnlocked(false)
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    async function handleUnlock(formEvent: { preventDefault(): void }) {
+        formEvent.preventDefault()
+        if (!adminPassword.trim()) {
+            setError('請輸入管理員密碼')
+            return
+        }
+        await loadDebug(adminPassword.trim())
+    }
+
+    async function handleRerun() {
+        if (!adminPassword.trim()) {
+            setError('請輸入管理員密碼')
+            return
+        }
+        if (!llmModel.trim()) {
+            setError('請選擇或輸入 model id')
+            return
+        }
+        if (!classifierPrompt.trim() || !extractorPrompt.trim()) {
+            setError('classifier / extractor prompt 不能為空')
+            return
+        }
+        setRerunning(true)
+        setError(null)
+        setRerunNote(null)
+        const password = adminPassword.trim()
+        try {
+            const response = await fetch('/api/debug/workflows/reenqueue', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-admin-password': password,
+                },
+                body: JSON.stringify({
+                    messageId,
+                    llmModel: llmModel.trim(),
+                    classifierPrompt,
+                    extractorPrompt,
+                }),
+            })
+            const body = (await response.json()) as {
+                error?: string
+                llmModel?: string
+            }
+            if (!response.ok) {
+                throw new Error(body.error || `Re-enqueue failed (${response.status})`)
+            }
+            setRerunNote(`已排入佇列（${body.llmModel ?? llmModel}），等待 worker…`)
+            if (pollRef.current) clearInterval(pollRef.current)
+            let attempts = 0
+            pollRef.current = setInterval(() => {
+                attempts += 1
+                void loadDebug(password)
+                if (attempts >= 12 && pollRef.current) {
+                    clearInterval(pollRef.current)
+                    pollRef.current = null
+                    onReranRef.current?.()
+                }
+            }, 1500)
+            window.setTimeout(() => {
+                void loadDebug(password).then(() => onReranRef.current?.())
+            }, 2500)
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'Could not re-enqueue workflow')
+        } finally {
+            setRerunning(false)
+        }
+    }
+
+    if (!open) return null
+
+    const message = data?.snapshot.message
+    const runs = data?.snapshot.runs ?? []
+    const models = data?.models ?? []
+    const promptsDirty =
+        classifierPrompt !== baselineClassifier || extractorPrompt !== baselineExtractor
+
+    return createPortal(
+        <div
+            className="workflow-debug-overlay"
+            role="presentation"
+            onClick={() => {
+                if (!busyRef.current) onCloseRef.current()
+            }}
+        >
+            <div
+                className="workflow-debug-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="workflow-debug-title"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <header className="workflow-debug-dialog-header">
+                    <div>
+                        <h3 id="workflow-debug-title">Workflow debug</h3>
+                        <p className="workflow-debug-dialog-summary">重新執行並檢視此訊息的 workflow 輸入</p>
+                    </div>
+                    <button
+                        type="button"
+                        className="workflow-debug-dialog-close"
+                        aria-label="Close"
+                        disabled={loading || rerunning}
+                        onClick={() => onCloseRef.current()}
+                    >
+                        ×
+                    </button>
+                </header>
+
+                {!unlocked ? (
+                    <form className="workflow-debug-unlock" onSubmit={handleUnlock}>
+                        <label className="workflow-debug-password">
+                            <span>管理員密碼</span>
+                            <input
+                                ref={inputRef}
+                                type="password"
+                                value={adminPassword}
+                                autoComplete="current-password"
+                                disabled={loading}
+                                onChange={(change) => setAdminPassword(change.target.value)}
+                            />
+                        </label>
+                        {error && <p className="workflow-debug-error">{error}</p>}
+                        <div className="workflow-debug-dialog-actions">
+                            <button
+                                type="button"
+                                className="workflow-debug-cancel"
+                                disabled={loading}
+                                onClick={() => onCloseRef.current()}
+                            >
+                                取消
+                            </button>
+                            <button type="submit" className="workflow-debug-submit" disabled={loading}>
+                                {loading ? '載入中…' : '開啟'}
+                            </button>
+                        </div>
+                    </form>
+                ) : (
+                    <>
+                        {error && <p className="workflow-debug-error">{error}</p>}
+                        {rerunNote && <p className="workflow-debug-note">{rerunNote}</p>}
+
+                        {message && (
+                            <dl className="workflow-debug-meta">
+                                <div>
+                                    <dt>messageId</dt>
+                                    <dd>
+                                        <code>{message.messageId}</code>
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>group</dt>
+                                    <dd>
+                                        {message.groupName || '—'}
+                                        <span className="workflow-debug-muted">
+                                            {' '}
+                                            ({message.groupJid})
+                                        </span>
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>messageType</dt>
+                                    <dd>{message.messageType}</dd>
+                                </div>
+                                <div>
+                                    <dt>textLength</dt>
+                                    <dd>
+                                        {message.textLength}
+                                        {message.textLength < 30 && (
+                                            <span className="workflow-debug-warn">
+                                                {' '}
+                                                （&lt;30，會跳過 LLM）
+                                            </span>
+                                        )}
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>flags</dt>
+                                    <dd>
+                                        {[
+                                            message.isEdited ? 'edited' : null,
+                                            message.isDeleted ? 'deleted' : null,
+                                            message.isHistory ? 'history' : null,
+                                            message.isForwarded ? 'forwarded' : null,
+                                        ]
+                                            .filter(Boolean)
+                                            .join(' · ') || '—'}
+                                    </dd>
+                                </div>
+                                <div>
+                                    <dt>config</dt>
+                                    <dd>
+                                        workflows={data?.workflowsEnabled ? 'on' : 'off'}
+                                        {' · '}
+                                        history={data?.workflowsProcessHistory ? 'on' : 'off'}
+                                        {' · '}
+                                        reportId={data?.snapshot.reportId ?? '—'}
+                                    </dd>
+                                </div>
+                            </dl>
+                        )}
+
+                        <div className="workflow-debug-input">
+                            <div className="workflow-debug-input-label">LLM input (text_content)</div>
+                            <pre>{message?.textContent?.trim() || '—'}</pre>
+                        </div>
+
+                        <label className="workflow-debug-model">
+                            <span>Model id</span>
+                            <input
+                                list="workflow-debug-model-options"
+                                value={llmModel}
+                                disabled={rerunning}
+                                placeholder={data?.defaultModel || 'model id'}
+                                onChange={(change) => setLlmModel(change.target.value)}
+                            />
+                            <datalist id="workflow-debug-model-options">
+                                {models.map((model) => (
+                                    <option key={model} value={model} />
+                                ))}
+                            </datalist>
+                        </label>
+
+                        <div className="workflow-debug-prompts">
+                            <div className="workflow-debug-runs-head">
+                                <div className="workflow-debug-input-label">
+                                    Prompts（僅此 rerun 暫用，不寫入檔案）
+                                    {promptsDirty && (
+                                        <span className="workflow-debug-warn"> · 已修改</span>
+                                    )}
+                                </div>
+                                <button
+                                    type="button"
+                                    className="workflow-debug-refresh"
+                                    disabled={rerunning || !promptsDirty}
+                                    onClick={() => {
+                                        setClassifierPrompt(baselineClassifier)
+                                        setExtractorPrompt(baselineExtractor)
+                                    }}
+                                >
+                                    還原
+                                </button>
+                            </div>
+                            {!baselineClassifier && !baselineExtractor && (
+                                <p className="workflow-debug-muted">
+                                    找不到 prompt 檔案
+                                    {data?.prompts.promptsDir
+                                        ? `（${data.prompts.promptsDir}）`
+                                        : ''}
+                                    。仍可手動貼上後 rerun。
+                                </p>
+                            )}
+                            <label className="workflow-debug-prompt">
+                                <span>classifier_prompt.txt</span>
+                                <textarea
+                                    value={classifierPrompt}
+                                    disabled={rerunning}
+                                    spellCheck={false}
+                                    rows={8}
+                                    onChange={(change) => setClassifierPrompt(change.target.value)}
+                                />
+                            </label>
+                            <label className="workflow-debug-prompt">
+                                <span>extractor_prompt.txt</span>
+                                <textarea
+                                    value={extractorPrompt}
+                                    disabled={rerunning}
+                                    spellCheck={false}
+                                    rows={8}
+                                    onChange={(change) => setExtractorPrompt(change.target.value)}
+                                />
+                            </label>
+                        </div>
+
+                        <div className="workflow-debug-runs">
+                            <div className="workflow-debug-runs-head">
+                                <div className="workflow-debug-input-label">Recent runs</div>
+                                <button
+                                    type="button"
+                                    className="workflow-debug-refresh"
+                                    disabled={loading || rerunning}
+                                    onClick={() => void loadDebug(adminPassword.trim())}
+                                >
+                                    {loading ? '重新整理…' : '重新整理'}
+                                </button>
+                            </div>
+                            {runs.length === 0 ? (
+                                <p className="workflow-debug-muted">尚無 workflow_runs 記錄</p>
+                            ) : (
+                                <ul>
+                                    {runs.map((run) => (
+                                        <li key={run.id}>
+                                            <span
+                                                className={`workflow-debug-status status-${run.status}`}
+                                            >
+                                                {run.status}
+                                            </span>
+                                            <span className="workflow-debug-run-event">{run.event}</span>
+                                            <span className="workflow-debug-run-name">
+                                                {run.workflowName}
+                                            </span>
+                                            <time>{formatHktDateTime(run.createdAt)}</time>
+                                            {run.detail && (
+                                                <p className="workflow-debug-run-detail">{run.detail}</p>
+                                            )}
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+
+                        <div className="workflow-debug-dialog-actions">
+                            <button
+                                type="button"
+                                className="workflow-debug-cancel"
+                                disabled={loading || rerunning}
+                                onClick={() => onCloseRef.current()}
+                            >
+                                關閉
+                            </button>
+                            <button
+                                type="button"
+                                className="workflow-debug-submit"
+                                disabled={rerunning || !data?.workflowsEnabled}
+                                onClick={() => void handleRerun()}
+                            >
+                                {rerunning ? '排隊中…' : '重新執行'}
+                            </button>
+                        </div>
+                    </>
+                )}
+            </div>
+        </div>,
+        document.body
     )
 }
 
@@ -1029,8 +1537,13 @@ export default function DailySiteReportView({
     const requestId = useRef(0)
     const scrollRef = useRef<HTMLDivElement>(null)
     const silentBusy = useRef(false)
+    const modalBusy = useRef(false)
     const hasRowsRef = useRef(false)
     hasRowsRef.current = reports.length > 0
+
+    const handleModalOpenChange = useCallback((open: boolean) => {
+        modalBusy.current = open
+    }, [])
 
     useEffect(() => {
         setQueryInput(query)
@@ -1124,7 +1637,7 @@ export default function DailySiteReportView({
     }
 
     async function silentRefresh() {
-        if (!active || loading || loadingMore || silentBusy.current) return
+        if (!active || loading || loadingMore || silentBusy.current || modalBusy.current) return
         silentBusy.current = true
         try {
             const data = await getJson<ReportsResponse>(buildUrl())
@@ -1341,10 +1854,15 @@ export default function DailySiteReportView({
                 {selected && (
                     <ReportDetail
                         report={selected}
+                        onModalOpenChange={handleModalOpenChange}
                         onDeleted={(id) => {
                             setReports((current) => current.filter((item) => item.id !== id))
                             setTotal((current) => Math.max(0, current - 1))
                             setSelected(null)
+                            onLiveUpdate?.()
+                        }}
+                        onReran={() => {
+                            setReloadKey((key) => key + 1)
                             onLiveUpdate?.()
                         }}
                     />

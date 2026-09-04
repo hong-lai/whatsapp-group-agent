@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...base import Workflow
+from ...config import settings
 from ...db import connect, record_workflow_run
 from .chain import build_chain
 from .models import DailySiteReport
@@ -17,7 +18,21 @@ class DailySiteReportWorkflow(Workflow):
     def __init__(self) -> None:
         self._chain = None
 
-    def _get_chain(self):
+    def _get_chain(
+        self,
+        model_id: str | None = None,
+        *,
+        classifier_prompt: str | None = None,
+        extractor_prompt: str | None = None,
+    ):
+        has_prompt_override = classifier_prompt is not None or extractor_prompt is not None
+        has_model_override = bool(model_id and model_id != settings.llm_model)
+        if has_prompt_override or has_model_override:
+            return build_chain(
+                model_id=model_id,
+                classifier_prompt=classifier_prompt,
+                extractor_prompt=extractor_prompt,
+            )
         if self._chain is None:
             self._chain = build_chain()
         return self._chain
@@ -77,7 +92,28 @@ class DailySiteReportWorkflow(Workflow):
             )
             return "skipped:short"
 
-        result = await self._get_chain().ainvoke({"user_input": text})
+        raw_model = job.get("llmModel")
+        model_id = raw_model.strip() if isinstance(raw_model, str) and raw_model.strip() else None
+        used_model = model_id or settings.llm_model
+
+        def _optional_prompt(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            return value if value.strip() else None
+
+        classifier_prompt = _optional_prompt(job.get("classifierPrompt"))
+        extractor_prompt = _optional_prompt(job.get("extractorPrompt"))
+        prompt_note = (
+            "prompts=override"
+            if classifier_prompt is not None or extractor_prompt is not None
+            else "prompts=default"
+        )
+
+        result = await self._get_chain(
+            model_id,
+            classifier_prompt=classifier_prompt,
+            extractor_prompt=extractor_prompt,
+        ).ainvoke({"user_input": text})
 
         if not isinstance(result, DailySiteReport):
             self._hard_delete(message_id)
@@ -86,7 +122,10 @@ class DailySiteReportWorkflow(Workflow):
                 message_id=message_id,
                 event=event,
                 status="irrelevant",
-                detail="classifier: not a daily site report; report hard-deleted",
+                detail=(
+                    "classifier: not a daily site report; report hard-deleted; "
+                    f"model={used_model}; {prompt_note}"
+                ),
             )
             return "irrelevant"
 
@@ -97,7 +136,10 @@ class DailySiteReportWorkflow(Workflow):
                 message_id=message_id,
                 event=event,
                 status="rejected",
-                detail="missing po_number or contractor; report hard-deleted",
+                detail=(
+                    "missing po_number or contractor; report hard-deleted; "
+                    f"model={used_model}; {prompt_note}"
+                ),
             )
             return "rejected:incomplete"
 
@@ -112,7 +154,10 @@ class DailySiteReportWorkflow(Workflow):
             message_id=message_id,
             event=event,
             status="extracted",
-            detail=f"po={result.po_number} date={result.date}",
+            detail=(
+                f"po={result.po_number} date={result.date}; "
+                f"model={used_model}; {prompt_note}"
+            ),
         )
         return "extracted"
 

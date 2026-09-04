@@ -66,9 +66,14 @@ services:
       # Enqueue BullMQ jobs for the workflows worker (LM Studio stays on the host).
       WORKFLOWS_ENABLED: ${WORKFLOWS_ENABLED:-true}
       WORKFLOWS_PROCESS_HISTORY: ${WORKFLOWS_PROCESS_HISTORY:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-1234}
+      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
+      DAILY_SITE_REPORT_PROMPTS_DIR: /app/agent-workflows/private/daily_site_report
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
       - ./downloads:/app/downloads
+      - ./agent-workflows/private:/app/agent-workflows/private:ro
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
     stdin_open: true

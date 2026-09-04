@@ -2508,3 +2508,156 @@ export async function deleteDailySiteReport(
     if (!row) return null
     return { groupJid: row.group_jid, reportDate: row.report_date }
 }
+
+export type WorkflowRunRecord = {
+    id: number
+    workflowName: string
+    messageId: string
+    event: string
+    status: string
+    detail: string | null
+    createdAt: string
+    updatedAt: string
+}
+
+export type WorkflowDebugMessage = {
+    messageId: string
+    groupJid: string
+    groupName: string | null
+    messageType: string
+    textContent: string | null
+    textLength: number
+    mediaPath: string | null
+    isDeleted: boolean
+    isEdited: boolean
+    isHistory: boolean
+    isForwarded: boolean
+    timestamp: number | null
+}
+
+export type WorkflowDebugSnapshot = {
+    message: WorkflowDebugMessage
+    runs: WorkflowRunRecord[]
+    reportId: number | null
+}
+
+export async function getWorkflowDebugSnapshot(
+    messageId: string,
+    limit = 20
+): Promise<WorkflowDebugSnapshot | null> {
+    const messageResult = await pool.query<{
+        message_id: string
+        group_jid: string
+        group_name: string | null
+        message_type: string
+        text_content: string | null
+        media_path: string | null
+        is_deleted: boolean
+        is_edited: boolean
+        is_history: boolean
+        is_forwarded: boolean
+        timestamp: string | null
+    }>(
+        `SELECT
+            m.message_id,
+            m.group_jid,
+            g.name AS group_name,
+            m.message_type,
+            m.text_content,
+            m.media_path,
+            m.is_deleted,
+            m.is_edited,
+            m.is_history,
+            m.is_forwarded,
+            EXTRACT(EPOCH FROM m.timestamp)::bigint::text AS timestamp
+         FROM messages m
+         LEFT JOIN groups g ON g.jid = m.group_jid
+         WHERE m.message_id = $1`,
+        [messageId]
+    )
+    const messageRow = messageResult.rows[0]
+    if (!messageRow) return null
+
+    const [runsResult, reportResult] = await Promise.all([
+        pool.query<{
+            id: number
+            workflow_name: string
+            message_id: string
+            event: string
+            status: string
+            detail: string | null
+            created_at: Date
+            updated_at: Date
+        }>(
+            `SELECT id, workflow_name, message_id, event, status, detail, created_at, updated_at
+             FROM workflow_runs
+             WHERE message_id = $1
+             ORDER BY created_at DESC, id DESC
+             LIMIT $2`,
+            [messageId, Math.min(Math.max(limit, 1), 100)]
+        ),
+        pool.query<{ id: number }>(
+            `SELECT id FROM daily_site_reports WHERE message_id = $1 AND is_deleted = FALSE LIMIT 1`,
+            [messageId]
+        ),
+    ])
+
+    const text = messageRow.text_content ?? ''
+    return {
+        message: {
+            messageId: messageRow.message_id,
+            groupJid: messageRow.group_jid,
+            groupName: messageRow.group_name,
+            messageType: messageRow.message_type,
+            textContent: messageRow.text_content,
+            textLength: text.trim().length,
+            mediaPath: messageRow.media_path,
+            isDeleted: messageRow.is_deleted,
+            isEdited: messageRow.is_edited,
+            isHistory: messageRow.is_history,
+            isForwarded: messageRow.is_forwarded,
+            timestamp: messageRow.timestamp == null ? null : Number(messageRow.timestamp),
+        },
+        runs: runsResult.rows.map((row) => ({
+            id: row.id,
+            workflowName: row.workflow_name,
+            messageId: row.message_id,
+            event: row.event,
+            status: row.status,
+            detail: row.detail,
+            createdAt: row.created_at.toISOString(),
+            updatedAt: row.updated_at.toISOString(),
+        })),
+        reportId: reportResult.rows[0]?.id ?? null,
+    }
+}
+
+export async function getMessageForWorkflowEnqueue(messageId: string): Promise<{
+    messageId: string
+    groupJid: string
+    messageType: string
+    mediaPath: string | null
+    isEdited: boolean
+} | null> {
+    const result = await pool.query<{
+        message_id: string
+        group_jid: string
+        message_type: string
+        media_path: string | null
+        is_edited: boolean
+    }>(
+        `SELECT message_id, group_jid, message_type, media_path, is_edited
+         FROM messages
+         WHERE message_id = $1`,
+        [messageId]
+    )
+    const row = result.rows[0]
+    if (!row) return null
+    return {
+        messageId: row.message_id,
+        groupJid: row.group_jid,
+        messageType: row.message_type,
+        mediaPath: row.media_path,
+        isEdited: Boolean(row.is_edited),
+    }
+}
