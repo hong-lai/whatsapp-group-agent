@@ -5,13 +5,27 @@ type Props = {
     open: boolean
     onClose: () => void
     title: string
+    subtitle?: string
     children: ReactNode
+    panelClassName?: string
+    bodyClassName?: string
 }
 
-export default function Drawer({ open, onClose, title, children }: Props) {
+export default function Drawer({
+    open,
+    onClose,
+    title,
+    subtitle,
+    children,
+    panelClassName,
+    bodyClassName,
+}: Props) {
     const panelRef = useRef<HTMLElement>(null)
     const closeRef = useRef<HTMLButtonElement>(null)
+    const titleRef = useRef<HTMLHeadingElement>(null)
     const start = useRef<{ x: number; y: number; axis: 'x' | 'y' | null } | null>(null)
+    const onCloseRef = useRef(onClose)
+    onCloseRef.current = onClose
 
     useEffect(() => {
         if (!open) return undefined
@@ -20,14 +34,22 @@ export default function Drawer({ open, onClose, title, children }: Props) {
         closeRef.current?.focus()
 
         function onKey(event: KeyboardEvent) {
-            if (event.key === 'Escape') onClose()
+            if (event.key === 'Escape') onCloseRef.current()
         }
         window.addEventListener('keydown', onKey)
         return () => {
             document.body.style.overflow = previous
             window.removeEventListener('keydown', onKey)
         }
-    }, [open, onClose])
+    }, [open])
+
+    function syncTitleTooltip() {
+        const el = titleRef.current
+        if (!el) return
+        const truncated = el.scrollWidth > el.clientWidth + 1
+        if (truncated) el.setAttribute('title', title)
+        else el.removeAttribute('title')
+    }
 
     function onTouchStart(event: TouchEvent) {
         const touch = event.touches[0]
@@ -62,17 +84,24 @@ export default function Drawer({ open, onClose, title, children }: Props) {
         <div className="drawer-overlay" role="presentation" onClick={onClose}>
             <aside
                 ref={panelRef}
-                className="drawer-panel"
+                className={`drawer-panel${panelClassName ? ` ${panelClassName}` : ''}`}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby="drawer-title"
                 onClick={(event) => event.stopPropagation()}
-                onTouchStart={onTouchStart}
-                onTouchMove={onTouchMove}
-                onTouchEnd={onTouchEnd}
             >
-                <header className="drawer-header">
-                    <h2 id="drawer-title">{title}</h2>
+                <header
+                    className="drawer-header"
+                    onTouchStart={onTouchStart}
+                    onTouchMove={onTouchMove}
+                    onTouchEnd={onTouchEnd}
+                >
+                    <div className="drawer-heading">
+                        <h2 id="drawer-title" ref={titleRef} onMouseEnter={syncTitleTooltip}>
+                            {title}
+                        </h2>
+                        {subtitle && <p className="drawer-subtitle">{subtitle}</p>}
+                    </div>
                     <button
                         ref={closeRef}
                         type="button"
@@ -83,7 +112,9 @@ export default function Drawer({ open, onClose, title, children }: Props) {
                         ×
                     </button>
                 </header>
-                <div className="drawer-body">{children}</div>
+                <div className={`drawer-body${bodyClassName ? ` ${bodyClassName}` : ''}`}>
+                    {children}
+                </div>
             </aside>
         </div>,
         document.body

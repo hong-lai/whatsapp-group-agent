@@ -7,3 +7,8 @@ auth_info_baileys/
 whatsapp_messages.db
 downloads/
 .cursor/
+
+# Confidential company prompts / local Python venv for agent workflows
+agent-workflows/private/
+agent-workflows/.venv/
+agent-workflows/.env

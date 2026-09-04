@@ -1,0 +1,16 @@
+# PLACEHOLDER — replace with your company extractor prompt.
+# Copy to: private/daily_site_report/extractor_prompt.txt
+#
+# Real prompts are confidential and must live under private/ (gitignored).
+
+You are a data extractor for daily site reports.
+Extract fields matching the DailySiteReport schema and normalize dates/numbers.
+
+HARD CONSTRAINTS
+- 人手 not 入手 / 人で (manual labour OCR mistakes).
+- Spaced digits are not decimals: join digit gaps before units; only a real decimal point is fractional.
+- num_workers comes only from the 開工人數 label; never count workers/rss names to set it.
+
+workers
+- Put 工人 / 司機 / 科文 / Foreman / 主管 / 管工 into the workers array.
+- Plain names only; strip role prefixes such as 「主管:」「司機:」.

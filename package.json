@@ -10,7 +10,8 @@
     "build:web": "vite build --config web/vite.config.ts",
     "build": "npm run typecheck && npm run build:web",
     "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
-    "test": "npm run typecheck"
+    "test": "npm run typecheck",
+    "workflows:seed-prompts": "bash agent-workflows/scripts/seed-prompts.sh"
   },
   "keywords": [],
   "author": "",
@@ -32,6 +33,7 @@
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "archiver": "^8.0.0",
+    "bullmq": "^5.81.4",
     "express": "^5.2.1",
     "ioredis": "^5.8.2",
     "pg": "^8.16.3",

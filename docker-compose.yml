@@ -63,13 +63,52 @@ services:
       CATCHUP_MAX_PAGES: ${CATCHUP_MAX_PAGES:-3}
       CATCHUP_BACKFILL_MAX_PAGES: ${CATCHUP_BACKFILL_MAX_PAGES:-40}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Enqueue BullMQ jobs for the workflows worker (LM Studio stays on the host).
+      WORKFLOWS_ENABLED: ${WORKFLOWS_ENABLED:-true}
+      WORKFLOWS_PROCESS_HISTORY: ${WORKFLOWS_PROCESS_HISTORY:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-1234}
+      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
+      DAILY_SITE_REPORT_PROMPTS_DIR: /app/agent-workflows/private/daily_site_report
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
       - ./downloads:/app/downloads
+      - ./agent-workflows/private:/app/agent-workflows/private:ro
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
     stdin_open: true
     tty: true
+    restart: unless-stopped
+
+  # Python BullMQ worker. LM Studio must run on the host (not in Docker).
+  # Prompts are bind-mounted from ./agent-workflows/private (gitignored).
+  workflows:
+    build: ./agent-workflows
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
+      REDIS_URL: redis://redis:6379
+      MESSAGE_EVENTS_QUEUE: message-events
+      ENABLED_WORKFLOWS: ${ENABLED_WORKFLOWS:-daily_site_report}
+      # Reach LM Studio on the host machine
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-1234}
+      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
+      LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-true}
+      DAILY_SITE_REPORT_PROMPTS_DIR: /app/private/daily_site_report
+      CONCURRENCY: ${WORKFLOWS_CONCURRENCY:-1}
+    volumes:
+      - ./agent-workflows/private:/app/private:ro
+      - ./downloads:/app/downloads:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Stable public URL. Needs a domain in Cloudflare + CLOUDFLARE_TUNNEL_TOKEN.

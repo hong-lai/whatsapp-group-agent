@@ -19,6 +19,7 @@ import {
     markMessageEdited,
 } from './db.js'
 import { log } from './log.js'
+import { enqueueMessageEvent } from './queue/index.js'
 
 const MessageEditEncType = proto.Message.SecretEncryptedMessage.SecretEncType.MESSAGE_EDIT
 const ProtocolEditType = proto.Message.ProtocolMessage.Type.MESSAGE_EDIT
@@ -210,6 +211,14 @@ async function persistEdit(
         { messageId: targetId, groupJid: meta.groupJid, isHistory: meta.isHistory },
         'message.edited'
     )
+    void enqueueMessageEvent({
+        event: 'message.edited',
+        messageId: targetId,
+        groupJid: meta.groupJid,
+        messageType: null,
+        mediaPath: null,
+        isHistory: meta.isHistory,
+    })
     return 'applied'
 }
 

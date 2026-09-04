@@ -1,9 +1,9 @@
 import { ZipArchive } from 'archiver'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import { timingSafeEqual } from 'node:crypto'
-import { createReadStream, existsSync } from 'node:fs'
+import { createReadStream, existsSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { basename, isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { config } from './config.js'
 import { getConnectionStatus } from './connection.js'
@@ -27,14 +27,86 @@ import {
     listAlbumMedia,
     listDashboardGroups,
     listDashboardMessages,
+    listDailySiteReports,
+    listDailySiteReportsForExport,
+    listDailySiteReportMessageIds,
+    deleteDailySiteReport,
+    defaultDailySiteReportSort,
+    isDailySiteReportSortBy,
+    getWorkflowDebugSnapshot,
+    getMessageForWorkflowEnqueue,
+    getMessagesForWorkflowEnqueue,
+    type DailySiteReportCursor,
+    type DailySiteReportDateField,
+    type DailySiteReportSortBy,
+    type DailySiteReportSortDir,
     type MessageCursor,
 } from './db.js'
+import { enqueueMessageEvent } from './queue/index.js'
+import type { MessageEventType } from './queue/types.js'
 
 const ROBOTS_TAG = 'noindex, nofollow, noarchive, nosnippet, noimageindex'
 const ROBOTS_TXT = 'User-agent: *\nDisallow: /\n'
 const HONG_KONG_OFFSET_MS = 8 * 60 * 60 * 1000
 const DAY_MS = 24 * 60 * 60 * 1000
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+
+async function listLlmModels(): Promise<string[]> {
+    const base = config.llmBaseUrl.replace(/\/+$/, '')
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 4000)
+    try {
+        const response = await fetch(`${base}/models`, {
+            headers: {
+                Authorization: `Bearer ${config.llmApiKey}`,
+            },
+            signal: controller.signal,
+        })
+        if (!response.ok) return []
+        const body = (await response.json()) as { data?: Array<{ id?: unknown }> }
+        if (!Array.isArray(body.data)) return []
+        const ids = body.data
+            .map((item) => (typeof item.id === 'string' ? item.id.trim() : ''))
+            .filter(Boolean)
+        return [...new Set(ids)].sort((a, b) => a.localeCompare(b))
+    } catch {
+        return []
+    } finally {
+        clearTimeout(timer)
+    }
+}
+
+function readPromptFile(fileName: string): string | null {
+    const dir = resolve(config.dailySiteReportPromptsDir)
+    const path = join(dir, fileName)
+    if (!existsSync(path)) return null
+    try {
+        return readFileSync(path, 'utf8')
+    } catch {
+        return null
+    }
+}
+
+function readWorkflowPrompts(): {
+    classifierPrompt: string | null
+    extractorPrompt: string | null
+    promptsDir: string
+} {
+    return {
+        classifierPrompt: readPromptFile('classifier_prompt.txt'),
+        extractorPrompt: readPromptFile('extractor_prompt.txt'),
+        promptsDir: resolve(config.dailySiteReportPromptsDir),
+    }
+}
+
+function optionalPromptOverride(value: unknown, maxChars = 50_000): string | null {
+    if (typeof value !== 'string') return null
+    if (!value.trim()) return null
+    if (value.length > maxChars) {
+        throw new Error(`Prompt exceeds ${maxChars} characters`)
+    }
+    return value
+}
 const MEDIA_TYPES = {
     image: 'imageMessage',
     video: 'videoMessage',
@@ -80,9 +152,13 @@ function parseHongKongDate(value: string): number {
 }
 
 function getDateRange(request: Request): DateRange {
+    return parseDateRangeValues(request.query.from, request.query.to)
+}
+
+function parseDateRangeValues(fromValue: unknown, toValue: unknown): DateRange {
     const today = dateStringFromHongKongTime()
-    const from = typeof request.query.from === 'string' ? request.query.from : today
-    const to = typeof request.query.to === 'string' ? request.query.to : today
+    const from = typeof fromValue === 'string' && fromValue ? fromValue : today
+    const to = typeof toValue === 'string' && toValue ? toValue : today
     const fromTimestamp = parseHongKongDate(from)
     const toStartTimestamp = parseHongKongDate(to)
     if (fromTimestamp > toStartTimestamp) {
@@ -118,6 +194,59 @@ function decodeCursor(value: unknown): MessageCursor | undefined {
         throw new Error('Invalid cursor')
     }
 }
+
+function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
+    if (typeof value !== 'string' || !value) return undefined
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<DailySiteReportCursor>
+        if (typeof parsed.id !== 'number' || !Number.isSafeInteger(parsed.id)) {
+            throw new Error('Invalid cursor')
+        }
+        if (!isDailySiteReportSortBy(parsed.sortBy)) {
+            throw new Error('Invalid cursor')
+        }
+        if (parsed.sortDir !== 'asc' && parsed.sortDir !== 'desc') {
+            throw new Error('Invalid cursor')
+        }
+        if (
+            parsed.sortValue !== null &&
+            typeof parsed.sortValue !== 'string' &&
+            typeof parsed.sortValue !== 'number'
+        ) {
+            throw new Error('Invalid cursor')
+        }
+        return {
+            sortBy: parsed.sortBy,
+            sortDir: parsed.sortDir,
+            sortValue: parsed.sortValue ?? null,
+            id: parsed.id,
+        }
+    } catch {
+        throw new Error('Invalid cursor')
+    }
+}
+
+function parseReportDateField(value: unknown): DailySiteReportDateField {
+    return value === 'created' ? 'created' : 'report'
+}
+
+function parseReportSort(
+    sortByValue: unknown,
+    sortDirValue: unknown,
+    dateField: DailySiteReportDateField
+): { sortBy: DailySiteReportSortBy; sortDir: DailySiteReportSortDir } {
+    const defaults = defaultDailySiteReportSort(dateField)
+    const sortBy = isDailySiteReportSortBy(sortByValue) ? sortByValue : defaults.sortBy
+    const sortDir: DailySiteReportSortDir =
+        sortDirValue === 'asc' || sortDirValue === 'desc' ? sortDirValue : defaults.sortDir
+    return { sortBy, sortDir }
+}
+
+function encodeReportCursor(cursor: DailySiteReportCursor | null): string | null {
+    return cursor ? Buffer.from(JSON.stringify(cursor)).toString('base64url') : null
+}
+
+import { buildDailySiteReportsCsv } from './reportsCsv.js'
 
 function parseLimit(value: unknown): number {
     if (typeof value !== 'string') return config.dashboardPageSize
@@ -321,6 +450,339 @@ export function createApiApp() {
                     mediaUrl: `/api/media/${encodeURIComponent(item.messageId)}`,
                 })),
                 nextCursor: encodeCursor(page.nextCursor),
+            })
+        })
+    )
+
+    app.get(
+        '/api/daily-site-reports',
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const groupJid =
+                typeof request.query.group === 'string' && request.query.group
+                    ? request.query.group
+                    : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(request.query.q)
+            const dateField = parseReportDateField(request.query.dateField)
+            const { sortBy, sortDir } = parseReportSort(
+                request.query.sortBy,
+                request.query.sortDir,
+                dateField
+            )
+            const cursor = decodeReportCursor(request.query.cursor)
+            const limit = parseLimit(request.query.limit)
+            const page = await listDailySiteReports({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                sortBy,
+                sortDir,
+                limit,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+                ...(cursor ? { cursor } : {}),
+            })
+            response.json({
+                range: { from: range.from, to: range.to },
+                dateField,
+                sortBy,
+                sortDir,
+                total: page.total,
+                reports: page.reports,
+                nextCursor: encodeReportCursor(page.nextCursor),
+            })
+        })
+    )
+
+    app.get(
+        '/api/daily-site-reports/export.csv',
+        asyncRoute(async (request, response) => {
+            const range = getDateRange(request)
+            const groupJid =
+                typeof request.query.group === 'string' && request.query.group
+                    ? request.query.group
+                    : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(request.query.q)
+            const dateField = parseReportDateField(request.query.dateField)
+            const { sortBy, sortDir } = parseReportSort(
+                request.query.sortBy,
+                request.query.sortDir,
+                dateField
+            )
+            const reports = await listDailySiteReportsForExport({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                sortBy,
+                sortDir,
+                maxRows: 5000,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+            })
+
+            const filename = `daily_site_reports_${range.from}_to_${range.to}.csv`
+            response
+                .status(200)
+                .type('text/csv; charset=utf-8')
+                .setHeader('Content-Disposition', `attachment; filename="${filename}"`)
+                .setHeader('Cache-Control', 'no-store')
+                .send(buildDailySiteReportsCsv(reports))
+        })
+    )
+
+    app.delete(
+        '/api/daily-site-reports/:id',
+        requireAdmin,
+        asyncRoute(async (request, response) => {
+            const id = Number.parseInt(String(request.params.id), 10)
+            if (!Number.isSafeInteger(id) || id < 1) {
+                throw new Error('Invalid report id')
+            }
+            const deleted = await deleteDailySiteReport(id)
+            if (!deleted) {
+                response.status(404).json({ error: 'Report not found' })
+                return
+            }
+            response.json({ ok: true })
+        })
+    )
+
+    app.get(
+        '/api/debug/workflows',
+        requireAdmin,
+        asyncRoute(async (request, response) => {
+            const messageId =
+                typeof request.query.messageId === 'string' ? request.query.messageId.trim() : ''
+            if (!messageId) throw new Error('messageId is required')
+            const limitRaw =
+                typeof request.query.limit === 'string'
+                    ? Number.parseInt(request.query.limit, 10)
+                    : 20
+            const limit = Number.isFinite(limitRaw) ? limitRaw : 20
+            const snapshot = await getWorkflowDebugSnapshot(messageId, limit)
+            if (!snapshot) {
+                response.status(404).json({ error: 'Message not found' })
+                return
+            }
+            const models = await listLlmModels()
+            const defaultModel = config.llmModel
+            const modelOptions = models.includes(defaultModel)
+                ? models
+                : [defaultModel, ...models]
+            const prompts = readWorkflowPrompts()
+            response.json({
+                workflowsEnabled: config.workflowsEnabled,
+                workflowsProcessHistory: config.workflowsProcessHistory,
+                defaultModel,
+                models: modelOptions,
+                prompts,
+                snapshot,
+            })
+        })
+    )
+
+    app.post(
+        '/api/debug/workflows/reenqueue',
+        requireAdmin,
+        express.json({ limit: '256kb' }),
+        asyncRoute(async (request, response) => {
+            if (!config.workflowsEnabled) {
+                response.status(503).json({ error: 'Workflows are disabled (WORKFLOWS_ENABLED=false)' })
+                return
+            }
+            const body = (request.body ?? {}) as {
+                messageId?: unknown
+                llmModel?: unknown
+                classifierPrompt?: unknown
+                extractorPrompt?: unknown
+            }
+            const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : ''
+            if (!messageId) throw new Error('messageId is required')
+
+            const llmModel =
+                typeof body.llmModel === 'string' && body.llmModel.trim()
+                    ? body.llmModel.trim()
+                    : config.llmModel
+            const classifierPrompt = optionalPromptOverride(body.classifierPrompt)
+            const extractorPrompt = optionalPromptOverride(body.extractorPrompt)
+
+            const message = await getMessageForWorkflowEnqueue(messageId)
+            if (!message) {
+                response.status(404).json({ error: 'Message not found' })
+                return
+            }
+
+            const event: MessageEventType = message.isEdited
+                ? 'message.edited'
+                : 'message.created'
+
+            const enqueued = await enqueueMessageEvent({
+                event,
+                messageId: message.messageId,
+                groupJid: message.groupJid,
+                messageType: message.messageType,
+                mediaPath: message.mediaPath,
+                isHistory: false,
+                llmModel,
+                classifierPrompt,
+                extractorPrompt,
+            })
+            if (!enqueued) {
+                response.status(503).json({ error: 'Failed to enqueue workflow job' })
+                return
+            }
+
+            log.info(
+                {
+                    messageId: message.messageId,
+                    event,
+                    llmModel,
+                    groupJid: message.groupJid,
+                    classifierPromptOverride: Boolean(classifierPrompt),
+                    extractorPromptOverride: Boolean(extractorPrompt),
+                },
+                'workflow.debug_reenqueued'
+            )
+            response.json({
+                ok: true,
+                event,
+                llmModel,
+                messageId: message.messageId,
+                groupJid: message.groupJid,
+                messageType: message.messageType,
+                classifierPromptOverride: Boolean(classifierPrompt),
+                extractorPromptOverride: Boolean(extractorPrompt),
+            })
+        })
+    )
+
+    app.post(
+        '/api/debug/workflows/reenqueue-filtered',
+        requireAdmin,
+        express.json({ limit: '256kb' }),
+        asyncRoute(async (request, response) => {
+            if (!config.workflowsEnabled) {
+                response.status(503).json({ error: 'Workflows are disabled (WORKFLOWS_ENABLED=false)' })
+                return
+            }
+
+            const body = (request.body ?? {}) as {
+                from?: unknown
+                to?: unknown
+                group?: unknown
+                q?: unknown
+                dateField?: unknown
+                llmModel?: unknown
+                classifierPrompt?: unknown
+                extractorPrompt?: unknown
+                maxRows?: unknown
+            }
+
+            const range = parseDateRangeValues(body.from, body.to)
+            const groupJid =
+                typeof body.group === 'string' && body.group.trim() ? body.group.trim() : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(body.q)
+            const dateField = parseReportDateField(body.dateField)
+            const maxRowsRaw =
+                typeof body.maxRows === 'number'
+                    ? body.maxRows
+                    : typeof body.maxRows === 'string'
+                      ? Number.parseInt(body.maxRows, 10)
+                      : 500
+            const maxRows = Number.isFinite(maxRowsRaw)
+                ? Math.min(Math.max(1, Math.floor(maxRowsRaw)), 500)
+                : 500
+
+            const llmModel =
+                typeof body.llmModel === 'string' && body.llmModel.trim()
+                    ? body.llmModel.trim()
+                    : config.llmModel
+            const classifierPrompt = optionalPromptOverride(body.classifierPrompt)
+            const extractorPrompt = optionalPromptOverride(body.extractorPrompt)
+
+            const { messageIds, total } = await listDailySiteReportMessageIds({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                maxRows,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+            })
+
+            if (total === 0) {
+                response.status(404).json({ error: 'No reports match the selected filters' })
+                return
+            }
+            if (total > maxRows) {
+                response.status(400).json({
+                    error: `Too many reports (${total}). Narrow filters to at most ${maxRows}.`,
+                    total,
+                    maxRows,
+                })
+                return
+            }
+
+            const messages = await getMessagesForWorkflowEnqueue(messageIds)
+            const foundIds = new Set(messages.map((item) => item.messageId))
+            const missing = messageIds.filter((id) => !foundIds.has(id))
+
+            let enqueued = 0
+            const failed: string[] = []
+            for (const message of messages) {
+                const event: MessageEventType = message.isEdited
+                    ? 'message.edited'
+                    : 'message.created'
+                const ok = await enqueueMessageEvent({
+                    event,
+                    messageId: message.messageId,
+                    groupJid: message.groupJid,
+                    messageType: message.messageType,
+                    mediaPath: message.mediaPath,
+                    isHistory: false,
+                    llmModel,
+                    classifierPrompt,
+                    extractorPrompt,
+                })
+                if (ok) enqueued += 1
+                else failed.push(message.messageId)
+            }
+
+            log.info(
+                {
+                    from: range.from,
+                    to: range.to,
+                    dateField,
+                    groupJid: groupJid ?? null,
+                    query: query ?? null,
+                    total,
+                    enqueued,
+                    failed: failed.length,
+                    missing: missing.length,
+                    llmModel,
+                },
+                'workflow.debug_reenqueued_filtered'
+            )
+
+            response.json({
+                ok: true,
+                total,
+                enqueued,
+                failed,
+                missing,
+                llmModel,
+                range: { from: range.from, to: range.to },
+                dateField,
+                groupJid: groupJid ?? null,
+                query: query ?? null,
             })
         })
     )

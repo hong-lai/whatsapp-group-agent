@@ -90,6 +90,7 @@ import {
     textFromMessage,
 } from './edits.js'
 import { createSerialQueue, retryBackoffMs, sleep, waitMediaDownload } from './rateLimit.js'
+import { enqueueMessageEvent } from './queue/index.js'
 
 const fileTypes: Record<string, string> = {
     imageMessage: 'jpeg',
@@ -584,6 +585,17 @@ async function persistMediaPath(messageId: string, filePath: string): Promise<st
     return deletedPath
 }
 
+function enqueueMediaReady(meta: MediaStoreMeta, mediaPath: string): void {
+    void enqueueMessageEvent({
+        event: 'message.media_ready',
+        messageId: meta.messageId,
+        groupJid: meta.groupJid,
+        messageType: meta.messageType,
+        mediaPath,
+        isHistory: meta.isHistory,
+    })
+}
+
 async function markDeletedAndRenameMedia(messageIds: string[]): Promise<void> {
     const rows = await markMessagesDeleted(messageIds)
     for (const row of rows) {
@@ -595,6 +607,16 @@ async function markDeletedAndRenameMedia(messageIds: string[]): Promise<void> {
             { messageId: row.messageId, from: row.mediaPath, to: deletedPath },
             'media.deleted_renamed'
         )
+    }
+    for (const messageId of messageIds) {
+        void enqueueMessageEvent({
+            event: 'message.deleted',
+            messageId,
+            groupJid: null,
+            messageType: null,
+            mediaPath: null,
+            isHistory: false,
+        })
     }
 }
 
@@ -761,6 +783,7 @@ async function retryMediaDownload(
         try {
             await downloadMediaOnce(m, sock, fileName)
             const storedPath = await persistMediaPath(meta.messageId, fileName)
+            enqueueMediaReady(meta, storedPath)
             log.info(
                 {
                     messageId: meta.messageId,
@@ -791,7 +814,9 @@ async function storeMediaFile(
     const fileName = await mediaDestPath(m, meta, fallbackExt)
     try {
         await downloadMediaOnce(m, sock, fileName)
-        return persistMediaPath(meta.messageId, fileName)
+        const storedPath = await persistMediaPath(meta.messageId, fileName)
+        enqueueMediaReady(meta, storedPath)
+        return storedPath
     } catch (err) {
         const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
         if (isRetryableMediaError(err) && maxAttempts > 1) {
@@ -1119,6 +1144,14 @@ async function processMessage(
             },
             'message.ingested'
         )
+        void enqueueMessageEvent({
+            event: 'message.created',
+            messageId,
+            groupJid: jid,
+            messageType,
+            mediaPath: null,
+            isHistory,
+        })
         return 'saved'
     } catch (err) {
         log.error(
