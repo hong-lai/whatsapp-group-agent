@@ -203,13 +203,25 @@ function decodeCursor(value: unknown): MessageCursor | undefined {
     }
 }
 
+function parseReportCursorId(value: unknown): number {
+    // node-pg returns BIGSERIAL as string; accept both forms in encoded cursors.
+    const id =
+        typeof value === 'number'
+            ? value
+            : typeof value === 'string' && value.trim()
+              ? Number(value)
+              : NaN
+    if (!Number.isSafeInteger(id) || id < 1) {
+        throw new Error('Invalid cursor')
+    }
+    return id
+}
+
 function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
     if (typeof value !== 'string' || !value) return undefined
     try {
         const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<DailySiteReportCursor>
-        if (typeof parsed.id !== 'number' || !Number.isSafeInteger(parsed.id)) {
-            throw new Error('Invalid cursor')
-        }
+        const id = parseReportCursorId(parsed.id)
         if (!isDailySiteReportSortBy(parsed.sortBy)) {
             throw new Error('Invalid cursor')
         }
@@ -227,7 +239,7 @@ function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
             sortBy: parsed.sortBy,
             sortDir: parsed.sortDir,
             sortValue: parsed.sortValue ?? null,
-            id: parsed.id,
+            id,
         }
     } catch {
         throw new Error('Invalid cursor')

@@ -2310,7 +2310,8 @@ function computeDailySiteReportIssues(input: {
 }
 
 type DailySiteReportRow = {
-    id: number
+    // BIGSERIAL comes back from node-pg as string
+    id: number | string
     message_id: string
     group_jid: string
     group_name: string
@@ -2339,6 +2340,14 @@ type DailySiteReportRow = {
     message_is_deleted: boolean
 }
 
+function coerceDailySiteReportId(value: number | string): number {
+    const id = typeof value === 'number' ? value : Number(value)
+    if (!Number.isSafeInteger(id) || id < 1) {
+        throw new Error(`Invalid daily site report id: ${value}`)
+    }
+    return id
+}
+
 function mapDailySiteReportRow(row: DailySiteReportRow): DailySiteReport {
     const messageTimestamp =
         row.message_timestamp == null ? null : Number(row.message_timestamp)
@@ -2358,7 +2367,7 @@ function mapDailySiteReportRow(row: DailySiteReportRow): DailySiteReport {
     })
 
     return {
-        id: row.id,
+        id: coerceDailySiteReportId(row.id),
         messageId: row.message_id,
         groupJid: row.group_jid,
         groupName: row.group_name,
@@ -2549,7 +2558,7 @@ export async function listDailySiteReports(options: {
                       sortBy,
                       sortDir,
                       sortValue: dailySiteReportSortValue(last, sortBy),
-                      id: last.id,
+                      id: coerceDailySiteReportId(last.id),
                   }
                 : null,
         total: Number(countResult.rows[0]?.count ?? 0),
