@@ -1163,7 +1163,7 @@ function WorkflowDebugDialog({
     async function handleUnlock(formEvent: { preventDefault(): void }) {
         formEvent.preventDefault()
         if (!adminPassword.trim()) {
-            setError('請輸入管理員密碼')
+            setError('Enter admin password')
             return
         }
         await loadDebug(adminPassword.trim())
@@ -1171,15 +1171,15 @@ function WorkflowDebugDialog({
 
     async function handleRerun() {
         if (!adminPassword.trim()) {
-            setError('請輸入管理員密碼')
+            setError('Enter admin password')
             return
         }
         if (!llmModel.trim()) {
-            setError('請選擇或輸入 model id')
+            setError('Select or enter a model id')
             return
         }
         if (!classifierPrompt.trim() || !extractorPrompt.trim()) {
-            setError('classifier / extractor prompt 不能為空')
+            setError('Classifier and extractor prompts cannot be empty')
             return
         }
         setRerunning(true)
@@ -1207,7 +1207,7 @@ function WorkflowDebugDialog({
             if (!response.ok) {
                 throw new Error(body.error || `Re-enqueue failed (${response.status})`)
             }
-            setRerunNote(`已排入佇列（${body.llmModel ?? llmModel}），等待 worker…`)
+            setRerunNote(`Queued (${body.llmModel ?? llmModel}), waiting for worker…`)
             if (pollRef.current) clearInterval(pollRef.current)
             let attempts = 0
             pollRef.current = setInterval(() => {
@@ -1255,7 +1255,9 @@ function WorkflowDebugDialog({
                 <header className="workflow-debug-dialog-header">
                     <div>
                         <h3 id="workflow-debug-title">Workflow debug</h3>
-                        <p className="workflow-debug-dialog-summary">重新執行並檢視此訊息的 workflow 輸入</p>
+                        <p className="workflow-debug-dialog-summary">
+                            Inspect workflow inputs and rerun this message
+                        </p>
                     </div>
                     <button
                         type="button"
@@ -1271,7 +1273,7 @@ function WorkflowDebugDialog({
                 {!unlocked ? (
                     <form className="workflow-debug-unlock" onSubmit={handleUnlock}>
                         <label className="workflow-debug-password">
-                            <span>管理員密碼</span>
+                            <span>Admin password</span>
                             <input
                                 ref={inputRef}
                                 type="password"
@@ -1289,10 +1291,10 @@ function WorkflowDebugDialog({
                                 disabled={loading}
                                 onClick={() => onCloseRef.current()}
                             >
-                                取消
+                                Cancel
                             </button>
                             <button type="submit" className="workflow-debug-submit" disabled={loading}>
-                                {loading ? '載入中…' : '開啟'}
+                                {loading ? 'Loading…' : 'Unlock'}
                             </button>
                         </div>
                     </form>
@@ -1330,7 +1332,7 @@ function WorkflowDebugDialog({
                                         {message.textLength < 30 && (
                                             <span className="workflow-debug-warn">
                                                 {' '}
-                                                （&lt;30，會跳過 LLM）
+                                                (&lt;30, LLM will be skipped)
                                             </span>
                                         )}
                                     </dd>
@@ -1385,9 +1387,9 @@ function WorkflowDebugDialog({
                         <div className="workflow-debug-prompts">
                             <div className="workflow-debug-runs-head">
                                 <div className="workflow-debug-input-label">
-                                    Prompts（僅此 rerun 暫用，不寫入檔案）
+                                    Prompts (this rerun only; not written to disk)
                                     {promptsDirty && (
-                                        <span className="workflow-debug-warn"> · 已修改</span>
+                                        <span className="workflow-debug-warn"> · edited</span>
                                     )}
                                 </div>
                                 <button
@@ -1399,16 +1401,16 @@ function WorkflowDebugDialog({
                                         setExtractorPrompt(baselineExtractor)
                                     }}
                                 >
-                                    還原
+                                    Reset
                                 </button>
                             </div>
                             {!baselineClassifier && !baselineExtractor && (
                                 <p className="workflow-debug-muted">
-                                    找不到 prompt 檔案
+                                    Prompt files not found
                                     {data?.prompts.promptsDir
-                                        ? `（${data.prompts.promptsDir}）`
+                                        ? ` (${data.prompts.promptsDir})`
                                         : ''}
-                                    。仍可手動貼上後 rerun。
+                                    . You can still paste prompts and rerun.
                                 </p>
                             )}
                             <label className="workflow-debug-prompt">
@@ -1442,11 +1444,11 @@ function WorkflowDebugDialog({
                                     disabled={loading || rerunning}
                                     onClick={() => void loadDebug(adminPassword.trim())}
                                 >
-                                    {loading ? '重新整理…' : '重新整理'}
+                                    {loading ? 'Refreshing…' : 'Refresh'}
                                 </button>
                             </div>
                             {runs.length === 0 ? (
-                                <p className="workflow-debug-muted">尚無 workflow_runs 記錄</p>
+                                <p className="workflow-debug-muted">No workflow_runs yet</p>
                             ) : (
                                 <ul>
                                     {runs.map((run) => (
@@ -1477,7 +1479,7 @@ function WorkflowDebugDialog({
                                 disabled={loading || rerunning}
                                 onClick={() => onCloseRef.current()}
                             >
-                                關閉
+                                Close
                             </button>
                             <button
                                 type="button"
@@ -1485,7 +1487,7 @@ function WorkflowDebugDialog({
                                 disabled={rerunning || !data?.workflowsEnabled}
                                 onClick={() => void handleRerun()}
                             >
-                                {rerunning ? '排隊中…' : '重新執行'}
+                                {rerunning ? 'Queuing…' : 'Rerun'}
                             </button>
                         </div>
                     </>
@@ -1552,11 +1554,11 @@ function BulkWorkflowRerunDialog({
 
     async function handleRerun() {
         if (!adminPassword.trim()) {
-            setError('請輸入管理員密碼')
+            setError('Enter admin password')
             return
         }
         if (total < 1) {
-            setError('目前篩選沒有可重跑的報告')
+            setError('No reports match the current filters')
             return
         }
         setRunning(true)
@@ -1591,8 +1593,8 @@ function BulkWorkflowRerunDialog({
             const failed = body.failed?.length ?? 0
             const missing = body.missing?.length ?? 0
             setResultNote(
-                `已排入 ${body.enqueued ?? 0} / ${body.total ?? total} 筆` +
-                    (failed || missing ? `（失敗 ${failed}，缺訊息 ${missing}）` : '')
+                `Queued ${body.enqueued ?? 0} / ${body.total ?? total}` +
+                    (failed || missing ? ` (failed ${failed}, missing ${missing})` : '')
             )
             onDone?.()
         } catch (reason) {
@@ -1623,7 +1625,7 @@ function BulkWorkflowRerunDialog({
                     <div>
                         <h3 id="bulk-workflow-rerun-title">Rerun filtered workflows</h3>
                         <p className="workflow-debug-dialog-summary">
-                            以目前篩選一次重跑全部報告（最多 500 筆）
+                            Rerun every report matching the current filters (max 500)
                         </p>
                     </div>
                     <button
@@ -1639,27 +1641,28 @@ function BulkWorkflowRerunDialog({
 
                 <dl className="workflow-debug-meta">
                     <div>
-                        <dt>範圍</dt>
+                        <dt>Range</dt>
                         <dd>
-                            {from} → {to}（{dateField === 'created' ? '建立日期' : '報告日期'}）
+                            {from} → {to} (
+                            {dateField === 'created' ? 'created date' : 'report date'})
                         </dd>
                     </div>
                     <div>
-                        <dt>群組</dt>
+                        <dt>Group</dt>
                         <dd>{groupName || 'All groups'}</dd>
                     </div>
                     <div>
-                        <dt>搜尋</dt>
+                        <dt>Search</dt>
                         <dd>{query.trim() || '—'}</dd>
                     </div>
                     <div>
-                        <dt>報告數</dt>
+                        <dt>Reports</dt>
                         <dd>{total}</dd>
                     </div>
                 </dl>
 
                 <label className="workflow-debug-password">
-                    <span>管理員密碼</span>
+                    <span>Admin password</span>
                     <input
                         ref={inputRef}
                         type="password"
@@ -1683,7 +1686,7 @@ function BulkWorkflowRerunDialog({
                         disabled={running}
                         onClick={onClose}
                     >
-                        {resultNote ? '關閉' : '取消'}
+                        {resultNote ? 'Close' : 'Cancel'}
                     </button>
                     <button
                         type="button"
@@ -1691,7 +1694,7 @@ function BulkWorkflowRerunDialog({
                         disabled={running || total < 1}
                         onClick={() => void handleRerun()}
                     >
-                        {running ? '排隊中…' : `重新執行 ${total} 筆`}
+                        {running ? 'Queuing…' : `Rerun ${total}`}
                     </button>
                 </div>
             </div>
