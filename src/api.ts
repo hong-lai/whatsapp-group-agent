@@ -29,11 +29,13 @@ import {
     listDashboardMessages,
     listDailySiteReports,
     listDailySiteReportsForExport,
+    listDailySiteReportMessageIds,
     deleteDailySiteReport,
     defaultDailySiteReportSort,
     isDailySiteReportSortBy,
     getWorkflowDebugSnapshot,
     getMessageForWorkflowEnqueue,
+    getMessagesForWorkflowEnqueue,
     type DailySiteReportCursor,
     type DailySiteReportDateField,
     type DailySiteReportSortBy,
@@ -150,9 +152,13 @@ function parseHongKongDate(value: string): number {
 }
 
 function getDateRange(request: Request): DateRange {
+    return parseDateRangeValues(request.query.from, request.query.to)
+}
+
+function parseDateRangeValues(fromValue: unknown, toValue: unknown): DateRange {
     const today = dateStringFromHongKongTime()
-    const from = typeof request.query.from === 'string' ? request.query.from : today
-    const to = typeof request.query.to === 'string' ? request.query.to : today
+    const from = typeof fromValue === 'string' && fromValue ? fromValue : today
+    const to = typeof toValue === 'string' && toValue ? toValue : today
     const fromTimestamp = parseHongKongDate(from)
     const toStartTimestamp = parseHongKongDate(to)
     if (fromTimestamp > toStartTimestamp) {
@@ -652,6 +658,131 @@ export function createApiApp() {
                 messageType: message.messageType,
                 classifierPromptOverride: Boolean(classifierPrompt),
                 extractorPromptOverride: Boolean(extractorPrompt),
+            })
+        })
+    )
+
+    app.post(
+        '/api/debug/workflows/reenqueue-filtered',
+        requireAdmin,
+        express.json({ limit: '256kb' }),
+        asyncRoute(async (request, response) => {
+            if (!config.workflowsEnabled) {
+                response.status(503).json({ error: 'Workflows are disabled (WORKFLOWS_ENABLED=false)' })
+                return
+            }
+
+            const body = (request.body ?? {}) as {
+                from?: unknown
+                to?: unknown
+                group?: unknown
+                q?: unknown
+                dateField?: unknown
+                llmModel?: unknown
+                classifierPrompt?: unknown
+                extractorPrompt?: unknown
+                maxRows?: unknown
+            }
+
+            const range = parseDateRangeValues(body.from, body.to)
+            const groupJid =
+                typeof body.group === 'string' && body.group.trim() ? body.group.trim() : undefined
+            if (groupJid && !groupJid.endsWith('@g.us')) {
+                throw new Error('Invalid group')
+            }
+            const query = parseFileNameQuery(body.q)
+            const dateField = parseReportDateField(body.dateField)
+            const maxRowsRaw =
+                typeof body.maxRows === 'number'
+                    ? body.maxRows
+                    : typeof body.maxRows === 'string'
+                      ? Number.parseInt(body.maxRows, 10)
+                      : 500
+            const maxRows = Number.isFinite(maxRowsRaw)
+                ? Math.min(Math.max(1, Math.floor(maxRowsRaw)), 500)
+                : 500
+
+            const llmModel =
+                typeof body.llmModel === 'string' && body.llmModel.trim()
+                    ? body.llmModel.trim()
+                    : config.llmModel
+            const classifierPrompt = optionalPromptOverride(body.classifierPrompt)
+            const extractorPrompt = optionalPromptOverride(body.extractorPrompt)
+
+            const { messageIds, total } = await listDailySiteReportMessageIds({
+                fromDate: range.from,
+                toDate: range.to,
+                dateField,
+                maxRows,
+                ...(groupJid ? { groupJid } : {}),
+                ...(query ? { query } : {}),
+            })
+
+            if (total === 0) {
+                response.status(404).json({ error: 'No reports match the selected filters' })
+                return
+            }
+            if (total > maxRows) {
+                response.status(400).json({
+                    error: `Too many reports (${total}). Narrow filters to at most ${maxRows}.`,
+                    total,
+                    maxRows,
+                })
+                return
+            }
+
+            const messages = await getMessagesForWorkflowEnqueue(messageIds)
+            const foundIds = new Set(messages.map((item) => item.messageId))
+            const missing = messageIds.filter((id) => !foundIds.has(id))
+
+            let enqueued = 0
+            const failed: string[] = []
+            for (const message of messages) {
+                const event: MessageEventType = message.isEdited
+                    ? 'message.edited'
+                    : 'message.created'
+                const ok = await enqueueMessageEvent({
+                    event,
+                    messageId: message.messageId,
+                    groupJid: message.groupJid,
+                    messageType: message.messageType,
+                    mediaPath: message.mediaPath,
+                    isHistory: false,
+                    llmModel,
+                    classifierPrompt,
+                    extractorPrompt,
+                })
+                if (ok) enqueued += 1
+                else failed.push(message.messageId)
+            }
+
+            log.info(
+                {
+                    from: range.from,
+                    to: range.to,
+                    dateField,
+                    groupJid: groupJid ?? null,
+                    query: query ?? null,
+                    total,
+                    enqueued,
+                    failed: failed.length,
+                    missing: missing.length,
+                    llmModel,
+                },
+                'workflow.debug_reenqueued_filtered'
+            )
+
+            response.json({
+                ok: true,
+                total,
+                enqueued,
+                failed,
+                missing,
+                llmModel,
+                range: { from: range.from, to: range.to },
+                dateField,
+                groupJid: groupJid ?? null,
+                query: query ?? null,
             })
         })
     )

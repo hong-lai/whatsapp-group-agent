@@ -2495,6 +2495,60 @@ export async function listDailySiteReportsForExport(options: {
     return page.reports
 }
 
+export async function listDailySiteReportMessageIds(options: {
+    fromDate: string
+    toDate: string
+    dateField?: DailySiteReportDateField
+    groupJid?: string
+    query?: string
+    maxRows: number
+}): Promise<{ messageIds: string[]; total: number }> {
+    const groupJids = await dailySiteReportGroupFilter(options.groupJid)
+    if (groupJids.length === 0) {
+        return { messageIds: [], total: 0 }
+    }
+
+    const dateField = options.dateField ?? 'report'
+    const dateFilterSql =
+        dateField === 'created'
+            ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date >= $1::date
+               AND (r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date <= $2::date`
+            : `r.report_date >= $1::date AND r.report_date <= $2::date`
+    const search = dailySiteReportSearchSql(options.query, 4)
+    const params: Array<string | number | string[]> = [
+        options.fromDate,
+        options.toDate,
+        groupJids,
+        ...search.params,
+    ]
+    const whereSql = `r.is_deleted = FALSE
+           AND ${dateFilterSql}
+           AND r.group_jid = ANY($3::text[])
+           ${search.sql}`
+
+    const [countResult, idResult] = await Promise.all([
+        pool.query<{ count: string }>(
+            `SELECT COUNT(*)::text AS count
+             FROM daily_site_reports r
+             WHERE ${whereSql}`,
+            params
+        ),
+        pool.query<{ message_id: string }>(
+            `SELECT r.message_id
+             FROM daily_site_reports r
+             WHERE ${whereSql}
+             ORDER BY r.id ASC
+             LIMIT $${params.length + 1}`,
+            [...params, options.maxRows]
+        ),
+    ])
+
+    return {
+        messageIds: idResult.rows.map((row) => row.message_id),
+        total: Number(countResult.rows[0]?.count ?? 0),
+    }
+}
+
 export async function deleteDailySiteReport(
     id: number
 ): Promise<{ groupJid: string; reportDate: string | null } | null> {
@@ -2639,6 +2693,20 @@ export async function getMessageForWorkflowEnqueue(messageId: string): Promise<{
     mediaPath: string | null
     isEdited: boolean
 } | null> {
+    const rows = await getMessagesForWorkflowEnqueue([messageId])
+    return rows[0] ?? null
+}
+
+export async function getMessagesForWorkflowEnqueue(messageIds: string[]): Promise<
+    Array<{
+        messageId: string
+        groupJid: string
+        messageType: string
+        mediaPath: string | null
+        isEdited: boolean
+    }>
+> {
+    if (messageIds.length === 0) return []
     const result = await pool.query<{
         message_id: string
         group_jid: string
@@ -2648,16 +2716,22 @@ export async function getMessageForWorkflowEnqueue(messageId: string): Promise<{
     }>(
         `SELECT message_id, group_jid, message_type, media_path, is_edited
          FROM messages
-         WHERE message_id = $1`,
-        [messageId]
+         WHERE message_id = ANY($1::text[])`,
+        [messageIds]
     )
-    const row = result.rows[0]
-    if (!row) return null
-    return {
-        messageId: row.message_id,
-        groupJid: row.group_jid,
-        messageType: row.message_type,
-        mediaPath: row.media_path,
-        isEdited: Boolean(row.is_edited),
-    }
+    const byId = new Map(
+        result.rows.map((row) => [
+            row.message_id,
+            {
+                messageId: row.message_id,
+                groupJid: row.group_jid,
+                messageType: row.message_type,
+                mediaPath: row.media_path,
+                isEdited: Boolean(row.is_edited),
+            },
+        ])
+    )
+    return messageIds
+        .map((id) => byId.get(id))
+        .filter((row): row is NonNullable<typeof row> => Boolean(row))
 }

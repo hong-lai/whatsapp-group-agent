@@ -1496,6 +1496,210 @@ function WorkflowDebugDialog({
     )
 }
 
+function BulkWorkflowRerunDialog({
+    open,
+    total,
+    from,
+    to,
+    groupJid,
+    groupName,
+    query,
+    dateField,
+    onClose,
+    onDone,
+}: {
+    open: boolean
+    total: number
+    from: string
+    to: string
+    groupJid: string | null
+    groupName: string | null
+    query: string
+    dateField: DailySiteReportDateField
+    onClose: () => void
+    onDone?: () => void
+}) {
+    const [adminPassword, setAdminPassword] = useState('')
+    const [running, setRunning] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [resultNote, setResultNote] = useState<string | null>(null)
+    const inputRef = useRef<HTMLInputElement>(null)
+    const runningRef = useRef(false)
+    const onCloseRef = useRef(onClose)
+    runningRef.current = running
+    onCloseRef.current = onClose
+
+    useEffect(() => {
+        if (!open) return undefined
+        setAdminPassword('')
+        setError(null)
+        setResultNote(null)
+        setRunning(false)
+        const previous = document.body.style.overflow
+        document.body.style.overflow = 'hidden'
+        const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 40)
+
+        function onKey(event: KeyboardEvent) {
+            if (event.key === 'Escape' && !runningRef.current) onCloseRef.current()
+        }
+        window.addEventListener('keydown', onKey)
+        return () => {
+            document.body.style.overflow = previous
+            window.removeEventListener('keydown', onKey)
+            window.clearTimeout(focusTimer)
+        }
+    }, [open])
+
+    async function handleRerun() {
+        if (!adminPassword.trim()) {
+            setError('請輸入管理員密碼')
+            return
+        }
+        if (total < 1) {
+            setError('目前篩選沒有可重跑的報告')
+            return
+        }
+        setRunning(true)
+        setError(null)
+        setResultNote(null)
+        try {
+            const response = await fetch('/api/debug/workflows/reenqueue-filtered', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-admin-password': adminPassword.trim(),
+                },
+                body: JSON.stringify({
+                    from,
+                    to,
+                    dateField,
+                    ...(groupJid ? { group: groupJid } : {}),
+                    ...(query.trim() ? { q: query.trim() } : {}),
+                }),
+            })
+            const body = (await response.json()) as {
+                error?: string
+                total?: number
+                enqueued?: number
+                failed?: string[]
+                missing?: string[]
+                maxRows?: number
+            }
+            if (!response.ok) {
+                throw new Error(body.error || `Bulk re-enqueue failed (${response.status})`)
+            }
+            const failed = body.failed?.length ?? 0
+            const missing = body.missing?.length ?? 0
+            setResultNote(
+                `已排入 ${body.enqueued ?? 0} / ${body.total ?? total} 筆` +
+                    (failed || missing ? `（失敗 ${failed}，缺訊息 ${missing}）` : '')
+            )
+            onDone?.()
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'Could not re-enqueue workflows')
+        } finally {
+            setRunning(false)
+        }
+    }
+
+    if (!open) return null
+
+    return createPortal(
+        <div
+            className="workflow-debug-overlay"
+            role="presentation"
+            onClick={() => {
+                if (!running) onClose()
+            }}
+        >
+            <div
+                className="workflow-debug-dialog workflow-debug-dialog--bulk"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="bulk-workflow-rerun-title"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <header className="workflow-debug-dialog-header">
+                    <div>
+                        <h3 id="bulk-workflow-rerun-title">Rerun filtered workflows</h3>
+                        <p className="workflow-debug-dialog-summary">
+                            以目前篩選一次重跑全部報告（最多 500 筆）
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        className="workflow-debug-dialog-close"
+                        aria-label="Close"
+                        disabled={running}
+                        onClick={onClose}
+                    >
+                        ×
+                    </button>
+                </header>
+
+                <dl className="workflow-debug-meta">
+                    <div>
+                        <dt>範圍</dt>
+                        <dd>
+                            {from} → {to}（{dateField === 'created' ? '建立日期' : '報告日期'}）
+                        </dd>
+                    </div>
+                    <div>
+                        <dt>群組</dt>
+                        <dd>{groupName || 'All groups'}</dd>
+                    </div>
+                    <div>
+                        <dt>搜尋</dt>
+                        <dd>{query.trim() || '—'}</dd>
+                    </div>
+                    <div>
+                        <dt>報告數</dt>
+                        <dd>{total}</dd>
+                    </div>
+                </dl>
+
+                <label className="workflow-debug-password">
+                    <span>管理員密碼</span>
+                    <input
+                        ref={inputRef}
+                        type="password"
+                        value={adminPassword}
+                        autoComplete="current-password"
+                        disabled={running}
+                        onChange={(change) => setAdminPassword(change.target.value)}
+                        onKeyDown={(event) => {
+                            if (event.key === 'Enter') void handleRerun()
+                        }}
+                    />
+                </label>
+
+                {error && <p className="workflow-debug-error">{error}</p>}
+                {resultNote && <p className="workflow-debug-note">{resultNote}</p>}
+
+                <div className="workflow-debug-dialog-actions">
+                    <button
+                        type="button"
+                        className="workflow-debug-cancel"
+                        disabled={running}
+                        onClick={onClose}
+                    >
+                        {resultNote ? '關閉' : '取消'}
+                    </button>
+                    <button
+                        type="button"
+                        className="workflow-debug-submit"
+                        disabled={running || total < 1}
+                        onClick={() => void handleRerun()}
+                    >
+                        {running ? '排隊中…' : `重新執行 ${total} 筆`}
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
+    )
+}
+
 export default function DailySiteReportView({
     from,
     to,
@@ -1530,6 +1734,7 @@ export default function DailySiteReportView({
     const [loadingMore, setLoadingMore] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [selected, setSelected] = useState<DailySiteReport | null>(null)
+    const [bulkRerunOpen, setBulkRerunOpen] = useState(false)
     const [reloadKey, setReloadKey] = useState(0)
     const [visibleColumns, setVisibleColumns] = useState(readVisibleReportColumns)
     const [sort, setSort] = useState<ReportSortState>(() => readReportSort(dateField))
@@ -1544,6 +1749,10 @@ export default function DailySiteReportView({
     const handleModalOpenChange = useCallback((open: boolean) => {
         modalBusy.current = open
     }, [])
+
+    useEffect(() => {
+        modalBusy.current = bulkRerunOpen
+    }, [bulkRerunOpen])
 
     useEffect(() => {
         setQueryInput(query)
@@ -1672,82 +1881,96 @@ export default function DailySiteReportView({
     return (
         <section className="reports-panel">
             <header className="reports-heading">
-                <div className="reports-heading-main">
-                    <div className="reports-heading-title">
-                        {groupsCollapsed && onOpenGroups && (
-                            <button
-                                type="button"
-                                className="groups-panel-toggle groups-panel-toggle--open desktop-only"
-                                onClick={onOpenGroups}
-                                title="Show groups"
-                                aria-label="Show groups"
-                            >
-                                <svg viewBox="0 0 24 24" aria-hidden="true">
-                                    <path d="m9 6 6 6-6 6" />
-                                </svg>
-                            </button>
-                        )}
-                        <div className="reports-heading-text">
-                            <h2>每日工地報告</h2>
-                            <div className="reports-meta">
-                                <span className="reports-meta-pill">
-                                    {groupName || 'All groups'}
-                                </span>
-                                <span className="reports-meta-pill">
-                                    {total} report{total === 1 ? '' : 's'}
-                                </span>
-                                <span className="reports-meta-hint">{dateRangeHint}</span>
+                <div className="reports-heading-row">
+                    {groupsCollapsed && onOpenGroups && (
+                        <button
+                            type="button"
+                            className="groups-panel-toggle groups-panel-toggle--open desktop-only"
+                            onClick={onOpenGroups}
+                            title="Show groups"
+                            aria-label="Show groups"
+                        >
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="m9 6 6 6-6 6" />
+                            </svg>
+                        </button>
+                    )}
+                    <div className="reports-heading-body">
+                        <div className="reports-heading-main">
+                            <div className="reports-heading-text">
+                                <h2>每日工地報告</h2>
+                                <div className="reports-meta">
+                                    <span className="reports-meta-pill">
+                                        {groupName || 'All groups'}
+                                    </span>
+                                    <span className="reports-meta-pill">
+                                        {total} report{total === 1 ? '' : 's'}
+                                    </span>
+                                    <span className="reports-meta-hint" title={dateRangeHint}>
+                                        {dateField === 'created' ? '建立日期' : '報告日期'}
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="reports-heading-actions">
+                                <button
+                                    type="button"
+                                    className="reports-bulk-rerun"
+                                    disabled={total < 1}
+                                    onClick={() => setBulkRerunOpen(true)}
+                                >
+                                    Rerun
+                                </button>
+                                <a
+                                    className="reports-export"
+                                    href={exportUrl(from, to, groupJid, query, dateField, sort)}
+                                    download
+                                >
+                                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                                        <path d="M12 3v12" />
+                                        <path d="m7 10 5 5 5-5" />
+                                        <path d="M5 21h14" />
+                                    </svg>
+                                    CSV
+                                </a>
                             </div>
                         </div>
+                        <div className="reports-toolbar">
+                            <div className="reports-date-filter" role="group" aria-label="日期篩選">
+                                <button
+                                    type="button"
+                                    className={dateField === 'report' ? 'active' : ''}
+                                    aria-pressed={dateField === 'report'}
+                                    onClick={() => onDateFieldChange('report')}
+                                >
+                                    報告日期
+                                </button>
+                                <button
+                                    type="button"
+                                    className={dateField === 'created' ? 'active' : ''}
+                                    aria-pressed={dateField === 'created'}
+                                    onClick={() => onDateFieldChange('created')}
+                                >
+                                    建立日期
+                                </button>
+                            </div>
+                            <ReportColumnPicker
+                                visibleColumns={visibleColumns}
+                                onChange={setVisibleColumns}
+                            />
+                            <label className="search-box reports-search">
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <circle cx="11" cy="11" r="7" />
+                                    <path d="m20 20-4-4" />
+                                </svg>
+                                <input
+                                    type="search"
+                                    placeholder="Search PO, contractor, ref…"
+                                    value={queryInput}
+                                    onChange={(event) => setQueryInput(event.target.value)}
+                                />
+                            </label>
+                        </div>
                     </div>
-                    <a
-                        className="reports-export"
-                        href={exportUrl(from, to, groupJid, query, dateField, sort)}
-                        download
-                    >
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 3v12" />
-                            <path d="m7 10 5 5 5-5" />
-                            <path d="M5 21h14" />
-                        </svg>
-                        Export CSV
-                    </a>
-                </div>
-                <div className="reports-toolbar">
-                    <div className="reports-date-filter" role="group" aria-label="日期篩選">
-                        <button
-                            type="button"
-                            className={dateField === 'report' ? 'active' : ''}
-                            aria-pressed={dateField === 'report'}
-                            onClick={() => onDateFieldChange('report')}
-                        >
-                            報告日期
-                        </button>
-                        <button
-                            type="button"
-                            className={dateField === 'created' ? 'active' : ''}
-                            aria-pressed={dateField === 'created'}
-                            onClick={() => onDateFieldChange('created')}
-                        >
-                            建立日期
-                        </button>
-                    </div>
-                    <ReportColumnPicker
-                        visibleColumns={visibleColumns}
-                        onChange={setVisibleColumns}
-                    />
-                    <label className="search-box reports-search">
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                            <circle cx="11" cy="11" r="7" />
-                            <path d="m20 20-4-4" />
-                        </svg>
-                        <input
-                            type="search"
-                            placeholder="Search PO, contractor, ref…"
-                            value={queryInput}
-                            onChange={(event) => setQueryInput(event.target.value)}
-                        />
-                    </label>
                 </div>
             </header>
 
@@ -1868,6 +2091,21 @@ export default function DailySiteReportView({
                     />
                 )}
             </Drawer>
+            <BulkWorkflowRerunDialog
+                open={bulkRerunOpen}
+                total={total}
+                from={from}
+                to={to}
+                groupJid={groupJid}
+                groupName={groupName}
+                query={query}
+                dateField={dateField}
+                onClose={() => setBulkRerunOpen(false)}
+                onDone={() => {
+                    setReloadKey((key) => key + 1)
+                    onLiveUpdate?.()
+                }}
+            />
         </section>
     )
 }

@@ -1136,69 +1136,108 @@ h3 {
 .reports-heading {
     display: flex;
     flex-direction: column;
-    gap: 12px;
-    padding: 16px 18px;
+    gap: 0;
+    padding: 0;
     border-bottom: 1px solid var(--line);
     background: linear-gradient(180deg, #fbfcfb 0%, #fff 100%);
+}
+
+.reports-heading-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+    min-width: 0;
+    min-height: 86px;
+    padding: 10px 12px 8px;
+    box-sizing: border-box;
+}
+
+.reports-heading-row > .groups-panel-toggle {
+    align-self: stretch;
+    flex: 0 0 40px;
+    width: 40px;
+    min-width: 40px;
+    height: auto;
+    min-height: 68px;
+    margin: 0;
+}
+
+.reports-heading-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0;
+    box-sizing: border-box;
 }
 
 .reports-heading-main {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 16px;
+    gap: 12px;
+    min-width: 0;
 }
 
 .reports-heading-text {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
     min-width: 0;
 }
 
 .reports-heading h2 {
     margin: 0;
-    font-size: 1.12rem;
+    font-size: 1.02rem;
+    line-height: 1.2;
     letter-spacing: -0.02em;
     color: #18332c;
+    white-space: nowrap;
 }
 
 .reports-meta {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
-    margin-top: 6px;
+    gap: 5px;
+    margin: 0;
 }
 
 .reports-meta-pill {
     display: inline-flex;
     align-items: center;
-    padding: 3px 9px;
+    padding: 2px 8px;
     border-radius: 999px;
     background: #eef5f2;
     color: #35584c;
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     font-weight: 700;
 }
 
 .reports-meta-hint {
     color: #8a9b94;
-    font-size: 0.72rem;
+    font-size: 0.7rem;
 }
 
 .reports-toolbar {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
-    border: 1px solid #e6eeea;
-    border-radius: 14px;
-    background: #f7faf8;
+    gap: 8px;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
 }
 
 .reports-toolbar .reports-search {
-    flex: 1 1 auto;
-    min-width: 0;
+    flex: 1 1 140px;
+    min-width: 120px;
     margin: 0;
-    height: 38px;
+    height: 30px;
 }
 
 .reports-actions {
@@ -1210,30 +1249,46 @@ h3 {
 }
 
 .reports-search {
-    min-width: min(240px, 100%);
+    min-width: min(180px, 100%);
 }
 
+.reports-heading-actions {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.reports-bulk-rerun,
 .reports-export {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 7px;
+    gap: 6px;
     flex-shrink: 0;
-    min-height: 38px;
-    padding: 0 14px;
+    min-height: 30px;
+    padding: 0 11px;
     border-radius: 999px;
     border: 1px solid rgba(22, 134, 111, 0.18);
     background: linear-gradient(180deg, #e8f6f0 0%, #dff1ea 100%);
     color: var(--green-dark);
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 700;
     text-decoration: none;
     white-space: nowrap;
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+    cursor: pointer;
     transition:
         background var(--duration) var(--ease-out),
         box-shadow var(--duration) var(--ease-out),
         transform var(--duration) var(--ease-out);
+}
+
+.reports-bulk-rerun:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
 }
 
 .reports-export svg {
@@ -1246,6 +1301,7 @@ h3 {
     stroke-linejoin: round;
 }
 
+.reports-bulk-rerun:hover:not(:disabled),
 .reports-export:hover {
     background: linear-gradient(180deg, #dff1ea 0%, #d0ebe1 100%);
     box-shadow:
@@ -1262,9 +1318,9 @@ h3 {
 .reports-date-filter {
     display: inline-flex;
     flex-shrink: 0;
-    padding: 3px;
+    padding: 2px;
     border-radius: 999px;
-    background: #fff;
+    background: #f4f8f6;
     border: 1px solid #e0e9e4;
     gap: 2px;
 }
@@ -1272,10 +1328,10 @@ h3 {
 .reports-date-filter button {
     border: 0;
     border-radius: 999px;
-    padding: 6px 12px;
+    padding: 4px 10px;
     background: transparent;
     color: var(--muted);
-    font-size: 0.78rem;
+    font-size: 0.72rem;
     font-weight: 700;
     cursor: pointer;
     transition:
@@ -1298,13 +1354,13 @@ h3 {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    min-height: 38px;
-    padding: 0 12px;
+    min-height: 30px;
+    padding: 0 11px;
     border: 1px solid #dde7e2;
     border-radius: 999px;
     background: #fff;
     color: #35584c;
-    font-size: 0.78rem;
+    font-size: 0.74rem;
     font-weight: 700;
     cursor: pointer;
     transition:
@@ -2136,6 +2192,11 @@ h3 {
     border-radius: 16px;
     background: #fbfdfc;
     box-shadow: 0 18px 48px rgba(16, 36, 30, 0.22);
+}
+
+.workflow-debug-dialog--bulk {
+    width: min(460px, 100%);
+    max-height: min(88vh, 640px);
 }
 
 .workflow-debug-dialog-header {
@@ -5344,29 +5405,41 @@ button.document-link {
     }
 
     .reports-heading {
-        padding: 12px 14px;
+        padding: 0;
+    }
+
+    .reports-heading-row {
+        flex-wrap: wrap;
+        min-height: 0;
+        padding: 10px 12px 8px;
+        gap: 8px;
+    }
+
+    .reports-heading-body {
+        flex: 1 1 100%;
+        padding: 0;
+        gap: 8px;
+    }
+
+    .reports-heading-main {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+
+    .reports-heading-actions {
+        margin-left: auto;
     }
 
     .reports-meta-hint {
         display: none;
     }
 
-    .reports-heading-main {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .reports-export {
-        align-self: flex-start;
-    }
-
     .reports-toolbar {
-        flex-direction: column;
-        align-items: stretch;
+        flex-wrap: wrap;
     }
 
     .reports-toolbar .reports-date-filter {
-        align-self: flex-start;
+        flex-shrink: 0;
     }
 
     .reports-actions {
@@ -5374,7 +5447,7 @@ button.document-link {
     }
 
     .reports-search {
-        flex: 1 1 auto;
+        flex: 1 1 140px;
         min-width: 0;
     }
 
