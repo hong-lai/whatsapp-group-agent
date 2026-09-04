@@ -708,6 +708,74 @@ h3 {
     font-weight: 700;
 }
 
+.report-toast {
+    position: fixed;
+    z-index: 80;
+    right: max(16px, env(safe-area-inset-right, 0px));
+    bottom: max(72px, calc(16px + env(safe-area-inset-bottom, 0px)));
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 2px 12px;
+    align-items: center;
+    max-width: min(360px, calc(100vw - 32px));
+    padding: 14px 16px;
+    border: 1px solid #b7e2d4;
+    border-radius: 16px;
+    background: #f3fbf8;
+    box-shadow: 0 16px 40px rgba(13, 39, 33, 0.14);
+    color: var(--ink);
+    animation: rise-in 240ms var(--ease-out) both;
+}
+
+.report-toast.is-deleted {
+    border-color: #f0c7c7;
+    background: #fff6f6;
+}
+
+.report-toast strong {
+    grid-column: 1;
+    font-size: 0.92rem;
+    font-weight: 700;
+}
+
+.report-toast > span {
+    grid-column: 1;
+    color: var(--muted);
+    font-size: 0.8rem;
+    line-height: 1.35;
+}
+
+.report-toast > button:not(.report-toast-dismiss) {
+    grid-column: 1;
+    justify-self: start;
+    margin-top: 6px;
+    border: 0;
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: var(--green);
+    color: #fff;
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+
+.report-toast-dismiss {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    align-self: start;
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    font-size: 1.25rem;
+    line-height: 1;
+    padding: 0 2px;
+}
+
+@media (min-width: 960px) {
+    .report-toast {
+        bottom: max(24px, env(safe-area-inset-bottom, 0px));
+    }
+}
+
 .dashboard {
     position: relative;
     flex: 1;

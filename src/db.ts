@@ -2740,18 +2740,37 @@ export async function listDailySiteReportMetricsSeries(options: {
     })
 }
 
-export async function deleteDailySiteReport(
+export async function deleteDailySiteReport(id: number): Promise<{
     id: number
-): Promise<{ groupJid: string; reportDate: string | null } | null> {
-    const result = await pool.query<{ group_jid: string; report_date: string | null }>(
+    messageId: string
+    groupJid: string
+    reportDate: string | null
+    poNumber: string | null
+    contractor: string | null
+} | null> {
+    const result = await pool.query<{
+        id: number
+        message_id: string
+        group_jid: string
+        report_date: string | null
+        po_number: string | null
+        contractor: string | null
+    }>(
         `DELETE FROM daily_site_reports
          WHERE id = $1
-         RETURNING group_jid, report_date::text`,
+         RETURNING id, message_id, group_jid, report_date::text, po_number, contractor`,
         [id]
     )
     const row = result.rows[0]
     if (!row) return null
-    return { groupJid: row.group_jid, reportDate: row.report_date }
+    return {
+        id: row.id,
+        messageId: row.message_id,
+        groupJid: row.group_jid,
+        reportDate: row.report_date,
+        poNumber: row.po_number,
+        contractor: row.contractor,
+    }
 }
 
 export type WorkflowRunRecord = {

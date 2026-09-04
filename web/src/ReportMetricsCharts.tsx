@@ -69,7 +69,7 @@ function MetricChartCard({
     points: MetricsSeriesPoint[]
 }) {
     const gradientId = useId().replace(/:/g, '')
-    const total = points.reduce((sum, point) => sum + point[metric.key], 0)
+    // Values are already cumulative running totals — only the latest reading is meaningful.
     const latest = points.at(-1)?.[metric.key] ?? 0
 
     return (
@@ -83,10 +83,6 @@ function MetricChartCard({
                     <span>
                         <strong>{formatTooltipValue(latest, metric.unit)}</strong>
                         <small>latest</small>
-                    </span>
-                    <span>
-                        <strong>{formatTooltipValue(total, metric.unit)}</strong>
-                        <small>sum</small>
                     </span>
                 </div>
             </header>
@@ -210,7 +206,7 @@ export default function ReportMetricsCharts({
             <div className="report-metrics-head">
                 <div>
                     <h3>Cumulative metrics</h3>
-                    <p>Daily totals for the current filters</p>
+                    <p>Latest cumulative values for the current filters</p>
                 </div>
                 {loading && <span className="report-metrics-loading">Updating…</span>}
             </div>

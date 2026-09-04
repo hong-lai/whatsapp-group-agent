@@ -5,6 +5,7 @@ from typing import Any
 from ...base import Workflow
 from ...config import settings
 from ...db import connect, record_workflow_run
+from ...events import publish_report_change
 from .chain import build_chain
 from .models import DailySiteReport
 
@@ -60,7 +61,7 @@ class DailySiteReportWorkflow(Workflow):
         event = job["event"]
 
         if event == "message.deleted" or (message and message.get("is_deleted")):
-            self._soft_delete(message_id)
+            deleted = self._soft_delete(message_id)
             record_workflow_run(
                 workflow_name=self.name,
                 message_id=message_id,
@@ -68,6 +69,16 @@ class DailySiteReportWorkflow(Workflow):
                 status="deleted",
                 detail="report soft-deleted",
             )
+            if deleted:
+                publish_report_change(
+                    action="deleted",
+                    message_id=message_id,
+                    group_jid=deleted.get("group_jid"),
+                    po_number=deleted.get("po_number"),
+                    report_date=_date_str(deleted.get("report_date")),
+                    contractor=deleted.get("contractor"),
+                    report_id=deleted.get("id"),
+                )
             return "deleted"
 
         if message is None:
@@ -82,7 +93,7 @@ class DailySiteReportWorkflow(Workflow):
 
         text = (message.get("text_content") or "").strip()
         if len(text) < MIN_REPORT_TEXT_LENGTH:
-            self._hard_delete(message_id)
+            removed = self._hard_delete(message_id)
             record_workflow_run(
                 workflow_name=self.name,
                 message_id=message_id,
@@ -90,6 +101,7 @@ class DailySiteReportWorkflow(Workflow):
                 status="skipped",
                 detail=f"text length {len(text)} < {MIN_REPORT_TEXT_LENGTH}; skipped LLM",
             )
+            self._notify_hard_deleted(message_id, removed)
             return "skipped:short"
 
         raw_model = job.get("llmModel")
@@ -116,7 +128,7 @@ class DailySiteReportWorkflow(Workflow):
         ).ainvoke({"user_input": text})
 
         if not isinstance(result, DailySiteReport):
-            self._hard_delete(message_id)
+            removed = self._hard_delete(message_id)
             record_workflow_run(
                 workflow_name=self.name,
                 message_id=message_id,
@@ -127,10 +139,11 @@ class DailySiteReportWorkflow(Workflow):
                     f"model={used_model}; {prompt_note}"
                 ),
             )
+            self._notify_hard_deleted(message_id, removed)
             return "irrelevant"
 
         if not result.po_number or not result.contractor:
-            self._hard_delete(message_id)
+            removed = self._hard_delete(message_id)
             record_workflow_run(
                 workflow_name=self.name,
                 message_id=message_id,
@@ -141,14 +154,17 @@ class DailySiteReportWorkflow(Workflow):
                     f"model={used_model}; {prompt_note}"
                 ),
             )
+            self._notify_hard_deleted(message_id, removed)
             return "rejected:incomplete"
 
-        self._upsert_report(
+        group_jid = message["group_jid"]
+        report_id = self._upsert_report(
             message_id=message_id,
-            group_jid=message["group_jid"],
+            group_jid=group_jid,
             report=result,
             source_text=text,
         )
+        action = "updated" if event == "message.edited" else "extracted"
         record_workflow_run(
             workflow_name=self.name,
             message_id=message_id,
@@ -159,30 +175,60 @@ class DailySiteReportWorkflow(Workflow):
                 f"model={used_model}; {prompt_note}"
             ),
         )
+        publish_report_change(
+            action=action,
+            message_id=message_id,
+            group_jid=group_jid,
+            po_number=result.po_number,
+            report_date=result.date,
+            contractor=result.contractor,
+            report_id=report_id,
+        )
         return "extracted"
 
-    def _hard_delete(self, message_id: str) -> None:
+    def _notify_hard_deleted(
+        self,
+        message_id: str,
+        removed: dict[str, Any] | None,
+    ) -> None:
+        if not removed:
+            return
+        publish_report_change(
+            action="deleted",
+            message_id=message_id,
+            group_jid=removed.get("group_jid"),
+            po_number=removed.get("po_number"),
+            report_date=_date_str(removed.get("report_date")),
+            contractor=removed.get("contractor"),
+            report_id=removed.get("id"),
+        )
+
+    def _hard_delete(self, message_id: str) -> dict[str, Any] | None:
         with connect() as conn:
-            conn.execute(
+            row = conn.execute(
                 """
                 DELETE FROM daily_site_reports
                 WHERE message_id = %s
+                RETURNING id, group_jid, po_number, report_date, contractor
                 """,
                 (message_id,),
-            )
+            ).fetchone()
             conn.commit()
+            return dict(row) if row else None
 
-    def _soft_delete(self, message_id: str) -> None:
+    def _soft_delete(self, message_id: str) -> dict[str, Any] | None:
         with connect() as conn:
-            conn.execute(
+            row = conn.execute(
                 """
                 UPDATE daily_site_reports
                 SET is_deleted = TRUE, updated_at = NOW()
                 WHERE message_id = %s AND is_deleted = FALSE
+                RETURNING id, group_jid, po_number, report_date, contractor
                 """,
                 (message_id,),
-            )
+            ).fetchone()
             conn.commit()
+            return dict(row) if row else None
 
     def _upsert_report(
         self,
@@ -191,7 +237,7 @@ class DailySiteReportWorkflow(Workflow):
         group_jid: str,
         report: DailySiteReport,
         source_text: str,
-    ) -> None:
+    ) -> int | None:
         actual_num_workers = len(report.workers) + 1  # include RSS
         is_valid = (
             report.num_workers <= actual_num_workers
@@ -200,7 +246,7 @@ class DailySiteReportWorkflow(Workflow):
         metrics = report.cumulative_metrics
 
         with connect() as conn:
-            conn.execute(
+            row = conn.execute(
                 """
                 INSERT INTO daily_site_reports (
                     message_id, group_jid, report_date, po_number, ref_numbers,
@@ -239,6 +285,7 @@ class DailySiteReportWorkflow(Workflow):
                     source_text = EXCLUDED.source_text,
                     is_deleted = FALSE,
                     updated_at = NOW()
+                RETURNING id
                 """,
                 (
                     message_id,
@@ -262,5 +309,14 @@ class DailySiteReportWorkflow(Workflow):
                     report.remarks,
                     source_text,
                 ),
-            )
+            ).fetchone()
             conn.commit()
+            return int(row["id"]) if row else None
+
+
+def _date_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
