@@ -2556,6 +2556,27 @@ export async function listDailySiteReports(options: {
     }
 }
 
+export async function getDailySiteReportByMessageId(
+    messageId: string
+): Promise<DailySiteReport | null> {
+    const allowedJids = await matchingGroupJids()
+    if (allowedJids.length === 0) return null
+    const result = await pool.query<DailySiteReportRow>(
+        `SELECT
+            ${DAILY_SITE_REPORT_SELECT}
+         FROM daily_site_reports r
+         JOIN groups g ON g.jid = r.group_jid
+         LEFT JOIN messages m ON m.message_id = r.message_id
+         WHERE r.message_id = $1
+           AND r.is_deleted = FALSE
+           AND r.group_jid = ANY($2::text[])
+         LIMIT 1`,
+        [messageId, allowedJids]
+    )
+    const row = result.rows[0]
+    return row ? mapDailySiteReportRow(row) : null
+}
+
 export async function listDailySiteReportsForExport(options: {
     fromDate: string
     toDate: string

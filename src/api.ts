@@ -31,6 +31,7 @@ import {
     listDailySiteReportsForExport,
     listDailySiteReportMessageIds,
     listDailySiteReportMetricsSeries,
+    getDailySiteReportByMessageId,
     deleteDailySiteReport,
     defaultDailySiteReportSort,
     isDailySiteReportSortBy,
@@ -499,6 +500,19 @@ export function createApiApp() {
                 reports: page.reports,
                 nextCursor: encodeReportCursor(page.nextCursor),
             })
+        })
+    )
+
+    app.get(
+        '/api/daily-site-reports/by-message/:messageId',
+        asyncRoute(async (request, response) => {
+            const messageId = getRouteParam(request.params.messageId)
+            const report = await getDailySiteReportByMessageId(messageId)
+            if (!report) {
+                response.status(404).json({ error: 'Report not found' })
+                return
+            }
+            response.json({ report })
         })
     )
 

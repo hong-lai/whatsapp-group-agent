@@ -7,7 +7,7 @@ import AlbumView, {
     type AlbumScope,
     type MediaCategory,
 } from './AlbumView'
-import DailySiteReportView from './DailySiteReportView'
+import DailySiteReportView, { type DailySiteReport } from './DailySiteReportView'
 import DateRangePicker from './DateRangePicker'
 import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
@@ -1046,6 +1046,291 @@ function MessageBody({ message, revealed }: { message: Message; revealed: boolea
     )
 }
 
+function joinPreviewList(items: string[]): string {
+    return items.length ? items.join('、') : '—'
+}
+
+function SiteReportTag({
+    messageId,
+    failed,
+    onOpenReports,
+}: {
+    messageId: string
+    failed: boolean
+    onOpenReports?: () => void
+}) {
+    const triggerRef = useRef<HTMLButtonElement>(null)
+    const panelRef = useRef<HTMLDivElement>(null)
+    const openTimer = useRef<number | null>(null)
+    const closeTimer = useRef<number | null>(null)
+    const cacheRef = useRef<DailySiteReport | null | undefined>(undefined)
+    const [open, setOpen] = useState(false)
+    const [loading, setLoading] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [report, setReport] = useState<DailySiteReport | null>(null)
+    const [coords, setCoords] = useState<{ top: number; left: number; place: 'below' | 'above' }>({
+        top: 0,
+        left: 0,
+        place: 'below',
+    })
+
+    function clearTimers() {
+        if (openTimer.current != null) window.clearTimeout(openTimer.current)
+        if (closeTimer.current != null) window.clearTimeout(closeTimer.current)
+        openTimer.current = null
+        closeTimer.current = null
+    }
+
+    function placePanel() {
+        const trigger = triggerRef.current
+        if (!trigger) return
+        const rect = trigger.getBoundingClientRect()
+        const width = Math.min(300, window.innerWidth - 24)
+        const estimatedHeight = 280
+        const gap = 8
+        const placeBelow = rect.bottom + gap + estimatedHeight <= window.innerHeight - 12
+        const top = placeBelow ? rect.bottom + gap : Math.max(12, rect.top - gap - estimatedHeight)
+        const left = Math.min(
+            Math.max(12, rect.left),
+            Math.max(12, window.innerWidth - width - 12)
+        )
+        setCoords({ top, left, place: placeBelow ? 'below' : 'above' })
+    }
+
+    async function loadReport() {
+        if (failed) return
+        if (cacheRef.current !== undefined) {
+            setReport(cacheRef.current)
+            setError(cacheRef.current ? null : '找不到報告')
+            return
+        }
+        setLoading(true)
+        setError(null)
+        try {
+            const response = await fetch(
+                `/api/daily-site-reports/by-message/${encodeURIComponent(messageId)}`
+            )
+            const body = (await response.json()) as { report?: DailySiteReport; error?: string }
+            if (!response.ok || !body.report) {
+                cacheRef.current = null
+                setReport(null)
+                setError(body.error || '找不到報告')
+                return
+            }
+            cacheRef.current = body.report
+            setReport(body.report)
+        } catch (reason) {
+            setReport(null)
+            setError(reason instanceof Error ? reason.message : '無法載入報告')
+        } finally {
+            setLoading(false)
+        }
+    }
+
+    function showPreview() {
+        clearTimers()
+        openTimer.current = window.setTimeout(() => {
+            placePanel()
+            setOpen(true)
+            void loadReport()
+        }, 220)
+    }
+
+    function hidePreview() {
+        clearTimers()
+        closeTimer.current = window.setTimeout(() => setOpen(false), 180)
+    }
+
+    useEffect(() => () => clearTimers(), [])
+
+    useEffect(() => {
+        if (!open) return undefined
+        function onScrollOrResize() {
+            placePanel()
+        }
+        window.addEventListener('scroll', onScrollOrResize, true)
+        window.addEventListener('resize', onScrollOrResize)
+        return () => {
+            window.removeEventListener('scroll', onScrollOrResize, true)
+            window.removeEventListener('resize', onScrollOrResize)
+        }
+    }, [open])
+
+    const preview = open
+        ? createPortal(
+              <div
+                  ref={panelRef}
+                  className={`site-report-preview is-${coords.place}${failed ? ' is-failed' : ''}`}
+                  style={{ top: coords.top, left: coords.left }}
+                  role="tooltip"
+                  onMouseEnter={showPreview}
+                  onMouseLeave={hidePreview}
+              >
+                  {failed ? (
+                      <>
+                          <header className="site-report-preview-head">
+                              <strong>工地報告</strong>
+                              <span className="site-report-preview-pill is-bad">分析失敗</span>
+                          </header>
+                          <p className="site-report-preview-note">
+                              工作流程未能抽出報告。點擊標籤開啟 Reports 查看詳情。
+                          </p>
+                      </>
+                  ) : loading ? (
+                      <div className="site-report-preview-loading" aria-busy="true">
+                          <span className="skeleton" />
+                          <span className="skeleton" />
+                          <span className="skeleton" />
+                      </div>
+                  ) : error || !report ? (
+                      <>
+                          <header className="site-report-preview-head">
+                              <strong>工地報告</strong>
+                              <span className="site-report-preview-pill is-bad">無法預覽</span>
+                          </header>
+                          <p className="site-report-preview-note">{error || '找不到報告'}</p>
+                      </>
+                  ) : (
+                      <>
+                          <div className="site-report-preview-kicker">工地報告</div>
+                          <header className="site-report-preview-head">
+                              <strong>{report.projectName?.trim() || '未命名項目'}</strong>
+                              {report.isValid ? (
+                                  <span className="site-report-preview-pill is-ok">正常</span>
+                              ) : (
+                                  <span className="site-report-preview-pill is-warn">需檢查</span>
+                              )}
+                          </header>
+                          {!report.isValid && report.issues.length > 0 && (
+                              <div className="site-report-preview-issues">
+                                  {report.issues.map((issue) => (
+                                      <span key={issue.code}>{issue.label}</span>
+                                  ))}
+                              </div>
+                          )}
+                          <dl className="site-report-preview-grid">
+                              <div>
+                                  <dt>報告日期</dt>
+                                  <dd className={!report.reportDate ? 'is-warn' : undefined}>
+                                      {report.reportDate || '—'}
+                                  </dd>
+                              </div>
+                              <div>
+                                  <dt>PO</dt>
+                                  <dd className={!report.poNumber?.trim() ? 'is-warn' : undefined}>
+                                      {report.poNumber?.trim() || '—'}
+                                  </dd>
+                              </div>
+                              <div>
+                                  <dt>承辦商</dt>
+                                  <dd className={!report.contractor?.trim() ? 'is-warn' : undefined}>
+                                      {report.contractor?.trim() || '—'}
+                                  </dd>
+                              </div>
+                              <div>
+                                  <dt>RSS</dt>
+                                  <dd className={!report.rss?.trim() ? 'is-warn' : undefined}>
+                                      {report.rss?.trim() || '—'}
+                                  </dd>
+                              </div>
+                              <div className="is-wide">
+                                  <dt>Ref</dt>
+                                  <dd className={report.refNumbers.length === 0 ? 'is-warn' : undefined}>
+                                      {joinPreviewList(report.refNumbers)}
+                                  </dd>
+                              </div>
+                              <div className="is-wide">
+                                  <dt>工作內容</dt>
+                                  <dd className={report.workScopes.length === 0 ? 'is-warn' : undefined}>
+                                      {joinPreviewList(report.workScopes)}
+                                  </dd>
+                              </div>
+                              <div className="is-wide">
+                                  <dt>開工人數</dt>
+                                  <dd
+                                      className={
+                                          report.numWorkers == null ||
+                                          report.issues.some((issue) => issue.code === 'workers_over')
+                                              ? 'is-warn'
+                                              : undefined
+                                      }
+                                  >
+                                      {report.numWorkers ?? '—'}
+                                  </dd>
+                              </div>
+                          </dl>
+                          <div className="site-report-preview-metrics" aria-label="工程數量">
+                              <span>
+                                  <strong>{report.trenchLength}</strong>
+                                  <small>m</small>
+                                  <em>開坑</em>
+                              </span>
+                              <span>
+                                  <strong>{report.coringLength}</strong>
+                                  <small>m</small>
+                                  <em>Coring</em>
+                              </span>
+                              <span>
+                                  <strong>{report.cablePullingLength}</strong>
+                                  <small>m</small>
+                                  <em>拉線</em>
+                              </span>
+                              <span>
+                                  <strong>{report.conduitLayingLength}</strong>
+                                  <small>m</small>
+                                  <em>放筒</em>
+                              </span>
+                              <span>
+                                  <strong>{report.trialPitCount}</strong>
+                                  <small>pcs</small>
+                                  <em>探窿</em>
+                              </span>
+                          </div>
+                          {report.remarks?.trim() && (
+                              <p className="site-report-preview-remarks">{report.remarks.trim()}</p>
+                          )}
+                          <footer className="site-report-preview-foot">點擊標籤開啟完整報告</footer>
+                      </>
+                  )}
+              </div>,
+              document.body
+          )
+        : null
+
+    return (
+        <>
+            <button
+                ref={triggerRef}
+                type="button"
+                className={`site-report-label${failed ? ' is-failed' : ''}`}
+                aria-expanded={open}
+                aria-haspopup="true"
+                onMouseEnter={showPreview}
+                onMouseLeave={hidePreview}
+                onFocus={showPreview}
+                onBlur={(event) => {
+                    if (panelRef.current?.contains(event.relatedTarget as Node)) return
+                    hidePreview()
+                }}
+                onClick={() => onOpenReports?.()}
+            >
+                {failed ? (
+                    '分析失敗'
+                ) : (
+                    <>
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M7 4h10v16H7z" />
+                            <path d="M9 8h6M9 12h4" />
+                        </svg>
+                        工地報告
+                    </>
+                )}
+            </button>
+            {preview}
+        </>
+    )
+}
+
 function MessageCard({
     message,
     onOpenReports,
@@ -1086,28 +1371,11 @@ function MessageCard({
                             </span>
                         )}
                         {showSiteReportBadge && (
-                            <button
-                                type="button"
-                                className={`site-report-label${message.siteReportFailed ? ' is-failed' : ''}`}
-                                title={
-                                    message.siteReportExtracted
-                                        ? 'Daily site report extracted — open Reports'
-                                        : 'Site report workflow failed'
-                                }
-                                onClick={() => onOpenReports?.()}
-                            >
-                                {message.siteReportExtracted ? (
-                                    <>
-                                        <svg viewBox="0 0 24 24" aria-hidden="true">
-                                            <path d="M7 4h10v16H7z" />
-                                            <path d="M9 8h6M9 12h4" />
-                                        </svg>
-                                        工地報告
-                                    </>
-                                ) : (
-                                    '分析失敗'
-                                )}
-                            </button>
+                            <SiteReportTag
+                                messageId={message.messageId}
+                                failed={message.siteReportFailed}
+                                onOpenReports={onOpenReports}
+                            />
                         )}
                     </span>
                     <time>{hkDateTime.format(message.timestamp * 1000)}</time>
