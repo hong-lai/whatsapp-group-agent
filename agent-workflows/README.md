@@ -55,3 +55,13 @@ pip install -r requirements.txt
 cp .env.example .env   # use localhost Redis/Postgres ports
 python -m agent_workflows.worker
 ```
+
+## Dashboard notify (no WhatsApp outbound)
+
+The worker publishes JSON on Redis channel `report.processed` when a daily site report is:
+
+- **extracted** — new report from `message.created`
+- **updated** — re-extract after `message.edited`
+- **deleted** — soft-delete on message delete, hard-delete when a prior report is removed, or admin API delete
+
+The Node app fans that out on SSE `GET /api/events/report-processed` so the web dashboard can show a toast and refresh the reports list.

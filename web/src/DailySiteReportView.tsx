@@ -1714,6 +1714,7 @@ export default function DailySiteReportView({
     dateField,
     onDateFieldChange,
     active,
+    liveTick = 0,
     onLiveUpdate,
     onOpenGroups,
     groupsCollapsed,
@@ -1727,6 +1728,7 @@ export default function DailySiteReportView({
     dateField: DailySiteReportDateField
     onDateFieldChange: (value: DailySiteReportDateField) => void
     active: boolean
+    liveTick?: number
     onLiveUpdate?: () => void
     onOpenGroups?: () => void
     groupsCollapsed?: boolean
@@ -1868,6 +1870,11 @@ export default function DailySiteReportView({
     }
 
     useVisibleInterval(silentRefresh, active ? 15_000 : null)
+
+    useEffect(() => {
+        if (!liveTick || !active) return
+        setReloadKey((key) => key + 1)
+    }, [liveTick, active])
 
     const sentinelRef = useInfiniteScroll(
         scrollRef,

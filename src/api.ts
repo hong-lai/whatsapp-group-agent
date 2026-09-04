@@ -19,6 +19,7 @@ import {
     uniqueArchivePath,
 } from './hkt.js'
 import { log } from './log.js'
+import { handleReportProcessedSse, publishReportChange } from './reportProcessedEvents.js'
 import {
     countAlbumMedia,
     getAlbumMediaForDownload,
@@ -388,6 +389,10 @@ export function createApiApp() {
         response.json(getConnectionStatus())
     })
 
+    app.get('/api/events/report-processed', (request, response) => {
+        handleReportProcessedSse(request, response)
+    })
+
     app.get(
         '/api/groups',
         asyncRoute(async (request, response) => {
@@ -608,6 +613,15 @@ export function createApiApp() {
                 response.status(404).json({ error: 'Report not found' })
                 return
             }
+            await publishReportChange({
+                action: 'deleted',
+                messageId: deleted.messageId,
+                groupJid: deleted.groupJid,
+                poNumber: deleted.poNumber,
+                date: deleted.reportDate,
+                contractor: deleted.contractor,
+                reportId: deleted.id,
+            })
             response.json({ ok: true })
         })
     )

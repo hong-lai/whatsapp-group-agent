@@ -78,6 +78,23 @@ type MessagesResponse = {
     nextCursor: string | null
 }
 
+type ReportProcessedEvent = {
+    action?: 'extracted' | 'updated' | 'deleted'
+    messageId: string
+    groupJid: string | null
+    poNumber: string | null
+    date: string | null
+    contractor: string | null
+    reportId: number | null
+    at: string
+}
+
+function reportToastTitle(action: ReportProcessedEvent['action']): string {
+    if (action === 'updated') return '工地報告已更新'
+    if (action === 'deleted') return '工地報告已刪除'
+    return '新工地報告已處理'
+}
+
 type AgentConnectionState = 'connecting' | 'connected' | 'disconnected'
 
 type AgentConnectionEvent = {
@@ -1489,6 +1506,8 @@ export default function App() {
     const [drawerOpen, setDrawerOpen] = useState(false)
     const [filterOpen, setFilterOpen] = useState(false)
     const [overflowOpen, setOverflowOpen] = useState(false)
+    const [reportToast, setReportToast] = useState<ReportProcessedEvent | null>(null)
+    const [reportsLiveTick, setReportsLiveTick] = useState(0)
     const [albumCounts, setAlbumCounts] = useState(emptyCounts)
     const overflowRef = useRef<HTMLDivElement>(null)
     const groupsRequestId = useRef(0)
@@ -1578,6 +1597,28 @@ export default function App() {
         if (typeof localStorage === 'undefined') return
         localStorage.setItem('reportsGroupsCollapsed', reportsGroupsCollapsed ? '1' : '0')
     }, [reportsGroupsCollapsed])
+
+    useEffect(() => {
+        const source = new EventSource('/api/events/report-processed')
+        source.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data) as ReportProcessedEvent
+                if (!data?.messageId) return
+                setReportToast(data)
+                setReportsLiveTick((tick) => tick + 1)
+                pulseLive()
+            } catch {
+                // ignore malformed payloads
+            }
+        }
+        return () => source.close()
+    }, [])
+
+    useEffect(() => {
+        if (!reportToast) return undefined
+        const timer = window.setTimeout(() => setReportToast(null), 5500)
+        return () => window.clearTimeout(timer)
+    }, [reportToast])
 
     useEffect(() => {
         if (groupsLoading || view === 'reports') return
@@ -2474,6 +2515,7 @@ export default function App() {
                         dateField={reportsDateField}
                         onDateFieldChange={setReportsDateField}
                         active={view === 'reports'}
+                        liveTick={reportsLiveTick}
                         onLiveUpdate={pulseLive}
                         groupsCollapsed={reportsGroupsCollapsed}
                         onOpenGroups={() => setReportsGroupsCollapsed(false)}
@@ -2551,6 +2593,35 @@ export default function App() {
                 }}
             />
             <FilenameSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+            {reportToast &&
+                createPortal(
+                    <div
+                        className={`report-toast${reportToast.action === 'deleted' ? ' is-deleted' : ''}`}
+                        role="status"
+                        aria-live="polite"
+                    >
+                        <strong>{reportToastTitle(reportToast.action)}</strong>
+                        <span>
+                            {[reportToast.poNumber, reportToast.date, reportToast.contractor]
+                                .filter(Boolean)
+                                .join(' · ') || reportToast.messageId}
+                        </span>
+                        {view !== 'reports' && reportToast.action !== 'deleted' && (
+                            <button type="button" onClick={() => setView('reports')}>
+                                查看
+                            </button>
+                        )}
+                        <button
+                            type="button"
+                            className="report-toast-dismiss"
+                            aria-label="Dismiss"
+                            onClick={() => setReportToast(null)}
+                        >
+                            ×
+                        </button>
+                    </div>,
+                    document.body
+                )}
         </div>
     )
 }
