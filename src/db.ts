@@ -2549,6 +2549,89 @@ export async function listDailySiteReportMessageIds(options: {
     }
 }
 
+export type DailySiteReportMetricsPoint = {
+    date: string
+    trenchLength: number
+    coringLength: number
+    cablePullingLength: number
+    conduitLayingLength: number
+    trialPitCount: number
+    reportCount: number
+}
+
+export async function listDailySiteReportMetricsSeries(options: {
+    fromDate: string
+    toDate: string
+    dateField?: DailySiteReportDateField
+    groupJid?: string
+    query?: string
+}): Promise<DailySiteReportMetricsPoint[]> {
+    const groupJids = await dailySiteReportGroupFilter(options.groupJid)
+    if (groupJids.length === 0) return []
+
+    const dateField = options.dateField ?? 'report'
+    const dateExpr =
+        dateField === 'created'
+            ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date`
+            : `r.report_date`
+    const dateFilterSql =
+        dateField === 'created'
+            ? `${dateExpr} >= $1::date AND ${dateExpr} <= $2::date`
+            : `r.report_date >= $1::date AND r.report_date <= $2::date`
+    const search = dailySiteReportSearchSql(options.query, 4)
+    const params: Array<string | string[]> = [
+        options.fromDate,
+        options.toDate,
+        groupJids,
+        ...search.params,
+    ]
+    const whereSql = `r.is_deleted = FALSE
+           AND ${dateFilterSql}
+           AND r.group_jid = ANY($3::text[])
+           AND ${dateExpr} IS NOT NULL
+           ${search.sql}`
+
+    const result = await pool.query<{
+        day: Date | string
+        trench_length: string
+        coring_length: string
+        cable_pulling_length: string
+        conduit_laying_length: string
+        trial_pit_count: string
+        report_count: string
+    }>(
+        `SELECT
+            ${dateExpr} AS day,
+            COALESCE(SUM(r.trench_length), 0)::text AS trench_length,
+            COALESCE(SUM(r.coring_length), 0)::text AS coring_length,
+            COALESCE(SUM(r.cable_pulling_length), 0)::text AS cable_pulling_length,
+            COALESCE(SUM(r.conduit_laying_length), 0)::text AS conduit_laying_length,
+            COALESCE(SUM(r.trial_pit_count), 0)::text AS trial_pit_count,
+            COUNT(*)::text AS report_count
+         FROM daily_site_reports r
+         WHERE ${whereSql}
+         GROUP BY ${dateExpr}
+         ORDER BY ${dateExpr} ASC`,
+        params
+    )
+
+    return result.rows.map((row) => {
+        const day =
+            row.day instanceof Date
+                ? row.day.toISOString().slice(0, 10)
+                : String(row.day).slice(0, 10)
+        return {
+            date: day,
+            trenchLength: Number(row.trench_length) || 0,
+            coringLength: Number(row.coring_length) || 0,
+            cablePullingLength: Number(row.cable_pulling_length) || 0,
+            conduitLayingLength: Number(row.conduit_laying_length) || 0,
+            trialPitCount: Number(row.trial_pit_count) || 0,
+            reportCount: Number(row.report_count) || 0,
+        }
+    })
+}
+
 export async function deleteDailySiteReport(
     id: number
 ): Promise<{ groupJid: string; reportDate: string | null } | null> {
