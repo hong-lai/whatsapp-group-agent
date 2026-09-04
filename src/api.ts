@@ -30,8 +30,12 @@ import {
     listDailySiteReports,
     listDailySiteReportsForExport,
     deleteDailySiteReport,
+    defaultDailySiteReportSort,
+    isDailySiteReportSortBy,
     type DailySiteReportCursor,
     type DailySiteReportDateField,
+    type DailySiteReportSortBy,
+    type DailySiteReportSortDir,
     type MessageCursor,
 } from './db.js'
 
@@ -131,22 +135,23 @@ function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
         if (typeof parsed.id !== 'number' || !Number.isSafeInteger(parsed.id)) {
             throw new Error('Invalid cursor')
         }
-        const dateField: DailySiteReportDateField = parsed.dateField === 'created' ? 'created' : 'report'
-        if (dateField === 'created' && typeof parsed.createdAt !== 'string') {
+        if (!isDailySiteReportSortBy(parsed.sortBy)) {
+            throw new Error('Invalid cursor')
+        }
+        if (parsed.sortDir !== 'asc' && parsed.sortDir !== 'desc') {
             throw new Error('Invalid cursor')
         }
         if (
-            dateField === 'report' &&
-            parsed.reportDate !== null &&
-            parsed.reportDate !== undefined &&
-            typeof parsed.reportDate !== 'string'
+            parsed.sortValue !== null &&
+            typeof parsed.sortValue !== 'string' &&
+            typeof parsed.sortValue !== 'number'
         ) {
             throw new Error('Invalid cursor')
         }
         return {
-            dateField,
-            reportDate: parsed.reportDate ?? null,
-            createdAt: parsed.createdAt ?? null,
+            sortBy: parsed.sortBy,
+            sortDir: parsed.sortDir,
+            sortValue: parsed.sortValue ?? null,
             id: parsed.id,
         }
     } catch {
@@ -156,6 +161,18 @@ function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
 
 function parseReportDateField(value: unknown): DailySiteReportDateField {
     return value === 'created' ? 'created' : 'report'
+}
+
+function parseReportSort(
+    sortByValue: unknown,
+    sortDirValue: unknown,
+    dateField: DailySiteReportDateField
+): { sortBy: DailySiteReportSortBy; sortDir: DailySiteReportSortDir } {
+    const defaults = defaultDailySiteReportSort(dateField)
+    const sortBy = isDailySiteReportSortBy(sortByValue) ? sortByValue : defaults.sortBy
+    const sortDir: DailySiteReportSortDir =
+        sortDirValue === 'asc' || sortDirValue === 'desc' ? sortDirValue : defaults.sortDir
+    return { sortBy, sortDir }
 }
 
 function encodeReportCursor(cursor: DailySiteReportCursor | null): string | null {
@@ -383,12 +400,19 @@ export function createApiApp() {
             }
             const query = parseFileNameQuery(request.query.q)
             const dateField = parseReportDateField(request.query.dateField)
+            const { sortBy, sortDir } = parseReportSort(
+                request.query.sortBy,
+                request.query.sortDir,
+                dateField
+            )
             const cursor = decodeReportCursor(request.query.cursor)
             const limit = parseLimit(request.query.limit)
             const page = await listDailySiteReports({
                 fromDate: range.from,
                 toDate: range.to,
                 dateField,
+                sortBy,
+                sortDir,
                 limit,
                 ...(groupJid ? { groupJid } : {}),
                 ...(query ? { query } : {}),
@@ -397,6 +421,8 @@ export function createApiApp() {
             response.json({
                 range: { from: range.from, to: range.to },
                 dateField,
+                sortBy,
+                sortDir,
                 total: page.total,
                 reports: page.reports,
                 nextCursor: encodeReportCursor(page.nextCursor),
@@ -417,10 +443,17 @@ export function createApiApp() {
             }
             const query = parseFileNameQuery(request.query.q)
             const dateField = parseReportDateField(request.query.dateField)
+            const { sortBy, sortDir } = parseReportSort(
+                request.query.sortBy,
+                request.query.sortDir,
+                dateField
+            )
             const reports = await listDailySiteReportsForExport({
                 fromDate: range.from,
                 toDate: range.to,
                 dateField,
+                sortBy,
+                sortDir,
                 maxRows: 5000,
                 ...(groupJid ? { groupJid } : {}),
                 ...(query ? { query } : {}),

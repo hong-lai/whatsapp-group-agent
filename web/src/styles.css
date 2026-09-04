@@ -1449,6 +1449,51 @@ h3 {
     max-width: 220px;
 }
 
+.reports-table--modern thead th.is-sortable {
+    padding: 4px 6px;
+}
+
+.reports-sort-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 100%;
+    min-height: 28px;
+    padding: 4px 6px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 700;
+    letter-spacing: inherit;
+    cursor: pointer;
+    transition:
+        background var(--duration) var(--ease-out),
+        color var(--duration) var(--ease-out);
+}
+
+.reports-sort-btn:hover {
+    background: rgba(22, 134, 111, 0.08);
+    color: var(--green-dark);
+}
+
+.reports-table--modern thead th.is-sorted .reports-sort-btn {
+    color: var(--green-dark);
+}
+
+.reports-sort-icon {
+    flex-shrink: 0;
+    font-size: 0.68rem;
+    opacity: 0.45;
+    line-height: 1;
+}
+
+.reports-table--modern thead th.is-sorted .reports-sort-icon {
+    opacity: 1;
+}
+
 .reports-table--modern thead th:first-child {
     border-radius: 10px 0 0 10px;
 }
@@ -1512,6 +1557,16 @@ h3 {
 .reports-table--modern .col-project {
     min-width: 140px;
     max-width: 200px;
+}
+
+.reports-table--modern .col-group,
+.reports-table--modern .col-updated {
+    min-width: 108px;
+    max-width: 160px;
+}
+
+.reports-table--modern .col-status {
+    min-width: 96px;
 }
 
 .reports-table--modern .col-rss {

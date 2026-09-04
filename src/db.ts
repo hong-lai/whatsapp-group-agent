@@ -1976,6 +1976,32 @@ export async function getAlbumMediaForDownload(
 
 export type DailySiteReportDateField = 'report' | 'created'
 
+export type DailySiteReportSortBy =
+    | 'reportDate'
+    | 'createdDate'
+    | 'createdAt'
+    | 'messageDate'
+    | 'po'
+    | 'ref'
+    | 'contractor'
+    | 'project'
+    | 'groupName'
+    | 'rss'
+    | 'workers'
+    | 'numWorkers'
+    | 'workScopes'
+    | 'trench'
+    | 'coring'
+    | 'cable'
+    | 'conduit'
+    | 'trialPit'
+    | 'remarks'
+    | 'status'
+    | 'flags'
+    | 'updatedAt'
+
+export type DailySiteReportSortDir = 'asc' | 'desc'
+
 export type DailySiteReportIssueCode = 'missing_fields' | 'date_mismatch' | 'workers_over'
 
 export type DailySiteReportIssue = {
@@ -1984,10 +2010,142 @@ export type DailySiteReportIssue = {
 }
 
 export type DailySiteReportCursor = {
-    dateField: DailySiteReportDateField
-    reportDate: string | null
-    createdAt: string | null
+    sortBy: DailySiteReportSortBy
+    sortDir: DailySiteReportSortDir
+    sortValue: string | number | null
     id: number
+}
+
+const DAILY_SITE_REPORT_SORT_SPECS: Record<
+    DailySiteReportSortBy,
+    { sql: string; type: 'text' | 'number' | 'date' | 'timestamptz' }
+> = {
+    reportDate: { sql: 'r.report_date', type: 'date' },
+    createdDate: {
+        sql: `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date`,
+        type: 'date',
+    },
+    createdAt: { sql: 'r.created_at', type: 'timestamptz' },
+    messageDate: {
+        sql: `(m.timestamp AT TIME ZONE 'Asia/Hong_Kong')::date`,
+        type: 'date',
+    },
+    po: { sql: 'r.po_number', type: 'text' },
+    ref: { sql: `array_to_string(r.ref_numbers, '、')`, type: 'text' },
+    contractor: { sql: 'r.contractor', type: 'text' },
+    project: { sql: 'r.project_name', type: 'text' },
+    groupName: { sql: 'g.name', type: 'text' },
+    rss: { sql: 'r.rss', type: 'text' },
+    workers: { sql: `array_to_string(r.workers, '、')`, type: 'text' },
+    numWorkers: { sql: 'r.num_workers', type: 'number' },
+    workScopes: { sql: `array_to_string(r.work_scopes, '、')`, type: 'text' },
+    trench: { sql: 'r.trench_length', type: 'number' },
+    coring: { sql: 'r.coring_length', type: 'number' },
+    cable: { sql: 'r.cable_pulling_length', type: 'number' },
+    conduit: { sql: 'r.conduit_laying_length', type: 'number' },
+    trialPit: { sql: 'r.trial_pit_count', type: 'number' },
+    remarks: { sql: 'r.remarks', type: 'text' },
+    status: {
+        sql: `(CASE WHEN COALESCE(r.valid_num_workers, TRUE) THEN 1 ELSE 0 END)`,
+        type: 'number',
+    },
+    flags: {
+        sql: `(CASE WHEN COALESCE(m.is_deleted, FALSE) THEN 2 WHEN COALESCE(m.is_edited, FALSE) THEN 1 ELSE 0 END)`,
+        type: 'number',
+    },
+    updatedAt: { sql: 'r.updated_at', type: 'timestamptz' },
+}
+
+export function defaultDailySiteReportSort(
+    dateField: DailySiteReportDateField
+): { sortBy: DailySiteReportSortBy; sortDir: DailySiteReportSortDir } {
+    return dateField === 'created'
+        ? { sortBy: 'createdAt', sortDir: 'desc' }
+        : { sortBy: 'reportDate', sortDir: 'desc' }
+}
+
+export function isDailySiteReportSortBy(value: unknown): value is DailySiteReportSortBy {
+    return typeof value === 'string' && value in DAILY_SITE_REPORT_SORT_SPECS
+}
+
+function dailySiteReportSortValue(
+    row: DailySiteReportRow,
+    sortBy: DailySiteReportSortBy
+): string | number | null {
+    switch (sortBy) {
+        case 'reportDate':
+            return row.report_date
+        case 'createdDate':
+            return hktDateFromDate(row.created_at)
+        case 'createdAt':
+            return row.created_at.toISOString()
+        case 'messageDate':
+            return row.message_timestamp == null
+                ? null
+                : hktStamp(Number(row.message_timestamp)).date
+        case 'po':
+            return row.po_number
+        case 'ref':
+            return row.ref_numbers.length ? row.ref_numbers.join('、') : null
+        case 'contractor':
+            return row.contractor
+        case 'project':
+            return row.project_name
+        case 'groupName':
+            return row.group_name
+        case 'rss':
+            return row.rss
+        case 'workers':
+            return row.workers.length ? row.workers.join('、') : null
+        case 'numWorkers':
+            return row.num_workers
+        case 'workScopes':
+            return row.work_scopes.length ? row.work_scopes.join('、') : null
+        case 'trench':
+            return row.trench_length
+        case 'coring':
+            return row.coring_length
+        case 'cable':
+            return row.cable_pulling_length
+        case 'conduit':
+            return row.conduit_laying_length
+        case 'trialPit':
+            return row.trial_pit_count
+        case 'remarks':
+            return row.remarks
+        case 'status':
+            return row.valid_num_workers === false ? 0 : 1
+        case 'flags':
+            if (row.message_is_deleted) return 2
+            if (row.message_is_edited) return 1
+            return 0
+        case 'updatedAt':
+            return row.updated_at.toISOString()
+    }
+}
+
+function dailySiteReportCursorSql(
+    sortBy: DailySiteReportSortBy,
+    sortDir: DailySiteReportSortDir,
+    sortValueParam: number,
+    idParam: number,
+    sortValue: string | number | null
+): string {
+    const { sql } = DAILY_SITE_REPORT_SORT_SPECS[sortBy]
+    const idCmp = sortDir === 'asc' ? '>' : '<'
+    const valueCmp = sortDir === 'asc' ? '>' : '<'
+
+    if (sortValue === null) {
+        return ` AND (${sql}) IS NULL AND r.id ${idCmp} $${idParam}`
+    }
+
+    return ` AND (
+        ((${sql}) IS NOT NULL AND (
+            (${sql}) ${valueCmp} $${sortValueParam}
+            OR ((${sql}) IS NOT DISTINCT FROM $${sortValueParam} AND r.id ${idCmp} $${idParam})
+        ))
+        OR ((${sql}) IS NULL)
+    )`
 }
 
 export type DailySiteReport = {
@@ -2224,6 +2382,8 @@ export async function listDailySiteReports(options: {
     dateField?: DailySiteReportDateField
     groupJid?: string
     query?: string
+    sortBy?: DailySiteReportSortBy
+    sortDir?: DailySiteReportSortDir
     limit: number
     cursor?: DailySiteReportCursor
 }): Promise<{ reports: DailySiteReport[]; nextCursor: DailySiteReportCursor | null; total: number }> {
@@ -2233,15 +2393,16 @@ export async function listDailySiteReports(options: {
     }
 
     const dateField = options.dateField ?? 'report'
+    const defaults = defaultDailySiteReportSort(dateField)
+    const sortBy = options.sortBy ?? defaults.sortBy
+    const sortDir = options.sortDir ?? defaults.sortDir
+    const sortSpec = DAILY_SITE_REPORT_SORT_SPECS[sortBy]
     const dateFilterSql =
         dateField === 'created'
             ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date >= $1::date
                AND (r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date <= $2::date`
             : `r.report_date >= $1::date AND r.report_date <= $2::date`
-    const orderSql =
-        dateField === 'created'
-            ? 'r.created_at DESC NULLS LAST, r.id DESC'
-            : 'r.report_date DESC NULLS LAST, r.id DESC'
+    const orderSql = `${sortSpec.sql} ${sortDir.toUpperCase()} NULLS LAST, r.id ${sortDir.toUpperCase()}`
 
     const search = dailySiteReportSearchSql(options.query, 4)
     const cursor = options.cursor
@@ -2255,23 +2416,19 @@ export async function listDailySiteReports(options: {
 
     const params = [...baseParams]
     if (cursor) {
-        if (dateField === 'created') {
-            const tsParam = params.length + 1
-            const idParam = params.length + 2
-            cursorSql = ` AND (
-                r.created_at < $${tsParam}::timestamptz
-                OR (r.created_at = $${tsParam}::timestamptz AND r.id < $${idParam})
-            )`
-            params.push(cursor.createdAt, cursor.id)
-        } else {
-            const dateParam = params.length + 1
-            const idParam = params.length + 2
-            cursorSql = ` AND (
-                r.report_date < $${dateParam}::date
-                OR (r.report_date IS NOT DISTINCT FROM $${dateParam}::date AND r.id < $${idParam})
-            )`
-            params.push(cursor.reportDate, cursor.id)
+        if (cursor.sortBy !== sortBy || cursor.sortDir !== sortDir) {
+            throw new Error('Invalid cursor')
         }
+        const sortValueParam = params.length + 1
+        const idParam = params.length + 2
+        cursorSql = dailySiteReportCursorSql(
+            sortBy,
+            sortDir,
+            sortValueParam,
+            idParam,
+            cursor.sortValue
+        )
+        params.push(cursor.sortValue, cursor.id)
     }
 
     const limitParam = params.length + 1
@@ -2311,9 +2468,9 @@ export async function listDailySiteReports(options: {
         nextCursor:
             hasMore && last
                 ? {
-                      dateField,
-                      reportDate: last.report_date,
-                      createdAt: last.created_at.toISOString(),
+                      sortBy,
+                      sortDir,
+                      sortValue: dailySiteReportSortValue(last, sortBy),
                       id: last.id,
                   }
                 : null,
@@ -2327,6 +2484,8 @@ export async function listDailySiteReportsForExport(options: {
     dateField?: DailySiteReportDateField
     groupJid?: string
     query?: string
+    sortBy?: DailySiteReportSortBy
+    sortDir?: DailySiteReportSortDir
     maxRows: number
 }): Promise<DailySiteReport[]> {
     const page = await listDailySiteReports({

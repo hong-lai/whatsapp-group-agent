@@ -24,7 +24,6 @@ export type DailySiteReport = {
     rss: string | null
     workers: string[]
     numWorkers: number | null
-    actualNumWorkers: number | null
     workScopes: string[]
     trenchLength: number
     coringLength: number
@@ -94,13 +93,17 @@ function TruncatedText({
 }
 
 const REPORT_TABLE_COLUMNS_STORAGE_KEY = 'reportsTableColumns'
+const REPORT_TABLE_SORT_STORAGE_KEY = 'reportsTableSort'
 
 type ReportTableColumnId =
     | 'reportDate'
+    | 'createdDate'
+    | 'messageDate'
     | 'po'
     | 'ref'
     | 'contractor'
     | 'project'
+    | 'groupName'
     | 'rss'
     | 'workers'
     | 'numWorkers'
@@ -111,21 +114,32 @@ type ReportTableColumnId =
     | 'conduit'
     | 'trialPit'
     | 'remarks'
+    | 'status'
     | 'flags'
+    | 'updatedAt'
+
+type ReportSortBy = ReportTableColumnId | 'createdAt'
+type ReportSortDir = 'asc' | 'desc'
+type ReportSortState = { sortBy: ReportSortBy; sortDir: ReportSortDir }
 
 type ReportTableColumn = {
     id: ReportTableColumnId
     className?: string
     label: string
     title?: string
+    sortable?: boolean
+    defaultVisible?: boolean
 }
 
 const REPORT_TABLE_COLUMNS: ReportTableColumn[] = [
     { id: 'reportDate', className: 'col-date', label: '報告日期' },
+    { id: 'createdDate', className: 'col-date', label: '建立日期', defaultVisible: false },
+    { id: 'messageDate', className: 'col-date', label: '訊息日期', defaultVisible: false },
     { id: 'po', className: 'col-po', label: 'PO' },
     { id: 'ref', label: 'Ref' },
     { id: 'contractor', label: '承辦商' },
     { id: 'project', className: 'col-project', label: '項目名稱' },
+    { id: 'groupName', className: 'col-group', label: '群組', defaultVisible: false },
     { id: 'rss', className: 'col-rss', label: 'RSS' },
     { id: 'workers', className: 'col-workers', label: '工人' },
     { id: 'numWorkers', className: 'col-num', label: '開工', title: '開工人數' },
@@ -136,13 +150,46 @@ const REPORT_TABLE_COLUMNS: ReportTableColumn[] = [
     { id: 'conduit', className: 'col-metric', label: '放筒', title: '累計放筒長度' },
     { id: 'trialPit', className: 'col-metric', label: '探窿', title: '累計探窿數量' },
     { id: 'remarks', className: 'col-remarks', label: '備註' },
+    { id: 'status', className: 'col-status', label: '狀態', defaultVisible: false },
     { id: 'flags', className: 'col-flags', label: '訊息' },
+    {
+        id: 'updatedAt',
+        className: 'col-updated',
+        label: '更新',
+        title: '最後更新',
+        defaultVisible: false,
+    },
 ]
 
 const REPORT_TABLE_COLUMN_IDS = REPORT_TABLE_COLUMNS.map((column) => column.id)
+const REPORT_TABLE_DEFAULT_VISIBLE_IDS = REPORT_TABLE_COLUMNS.filter(
+    (column) => column.defaultVisible !== false
+).map((column) => column.id)
+const REPORT_SORT_BY_IDS: ReportSortBy[] = [...REPORT_TABLE_COLUMN_IDS, 'createdAt']
+
+function defaultReportSort(dateField: DailySiteReportDateField): ReportSortState {
+    return dateField === 'created'
+        ? { sortBy: 'createdAt', sortDir: 'desc' }
+        : { sortBy: 'reportDate', sortDir: 'desc' }
+}
+
+function readReportSort(dateField: DailySiteReportDateField): ReportSortState {
+    const defaults = defaultReportSort(dateField)
+    if (typeof localStorage === 'undefined') return defaults
+    try {
+        const raw = localStorage.getItem(REPORT_TABLE_SORT_STORAGE_KEY)
+        if (!raw) return defaults
+        const parsed = JSON.parse(raw) as Partial<ReportSortState>
+        if (!REPORT_SORT_BY_IDS.includes(parsed.sortBy as ReportSortBy)) return defaults
+        if (parsed.sortDir !== 'asc' && parsed.sortDir !== 'desc') return defaults
+        return { sortBy: parsed.sortBy as ReportSortBy, sortDir: parsed.sortDir }
+    } catch {
+        return defaults
+    }
+}
 
 function readVisibleReportColumns(): Set<ReportTableColumnId> {
-    const defaults = new Set(REPORT_TABLE_COLUMN_IDS)
+    const defaults = new Set(REPORT_TABLE_DEFAULT_VISIBLE_IDS)
     if (typeof localStorage === 'undefined') return defaults
     try {
         const raw = localStorage.getItem(REPORT_TABLE_COLUMNS_STORAGE_KEY)
@@ -167,6 +214,21 @@ function renderReportTableCell(report: DailySiteReport, columnId: ReportTableCol
                     className={`col-date${hasIssue(report, 'date_mismatch') ? ' cell-warn' : ''}`}
                 >
                     <span className="reports-date-pill">{report.reportDate || '—'}</span>
+                </td>
+            )
+        case 'createdDate':
+            return (
+                <td key={columnId} className="col-date">
+                    <span className="reports-date-pill">{report.createdDate}</span>
+                </td>
+            )
+        case 'messageDate':
+            return (
+                <td
+                    key={columnId}
+                    className={`col-date${hasIssue(report, 'date_mismatch') ? ' cell-warn' : ''}`}
+                >
+                    <span className="reports-date-pill">{report.messageDate || '—'}</span>
                 </td>
             )
         case 'po':
@@ -199,6 +261,12 @@ function renderReportTableCell(report: DailySiteReport, columnId: ReportTableCol
             return (
                 <td key={columnId} className="cell-wrap col-project">
                     <TruncatedText text={report.projectName} className="cell-ellipsis" />
+                </td>
+            )
+        case 'groupName':
+            return (
+                <td key={columnId} className="cell-wrap col-group">
+                    <TruncatedText text={report.groupName} className="cell-ellipsis" />
                 </td>
             )
         case 'rss':
@@ -273,10 +341,25 @@ function renderReportTableCell(report: DailySiteReport, columnId: ReportTableCol
                     <TruncatedText text={report.remarks} className="cell-ellipsis" />
                 </td>
             )
+        case 'status':
+            return (
+                <td key={columnId} className="col-status">
+                    <ReportStatus report={report} />
+                </td>
+            )
         case 'flags':
             return (
                 <td key={columnId} className="col-flags">
                     <MessageFlags report={report} compact />
+                </td>
+            )
+        case 'updatedAt':
+            return (
+                <td key={columnId} className="col-updated">
+                    <TruncatedText
+                        text={formatHktDateTime(report.updatedAt)}
+                        className="cell-ellipsis"
+                    />
                 </td>
             )
     }
@@ -378,10 +461,16 @@ function ReportTableHeader({
     label,
     title,
     className,
+    sortable = true,
+    sortDir,
+    onSort,
 }: {
     label: string
     title?: string
     className?: string
+    sortable?: boolean
+    sortDir?: ReportSortDir | null
+    onSort?: () => void
 }) {
     const ref = useRef<HTMLTableCellElement>(null)
     const full = title ?? label
@@ -394,9 +483,27 @@ function ReportTableHeader({
         else el.removeAttribute('title')
     }
 
+    if (!sortable || !onSort) {
+        return (
+            <th ref={ref} className={className} onMouseEnter={syncTitle}>
+                {label}
+            </th>
+        )
+    }
+
     return (
-        <th ref={ref} className={className} onMouseEnter={syncTitle}>
-            {label}
+        <th
+            ref={ref}
+            className={`${className ?? ''} is-sortable${sortDir ? ` is-sorted is-sorted--${sortDir}` : ''}`.trim()}
+            aria-sort={sortDir === 'asc' ? 'ascending' : sortDir === 'desc' ? 'descending' : 'none'}
+            onMouseEnter={syncTitle}
+        >
+            <button type="button" className="reports-sort-btn" onClick={onSort}>
+                <span>{label}</span>
+                <span className="reports-sort-icon" aria-hidden="true">
+                    {sortDir === 'asc' ? '↑' : sortDir === 'desc' ? '↓' : '↕'}
+                </span>
+            </button>
         </th>
     )
 }
@@ -417,9 +524,16 @@ function exportUrl(
     to: string,
     groupJid: string | null,
     query: string,
-    dateField: DailySiteReportDateField
+    dateField: DailySiteReportDateField,
+    sort: ReportSortState
 ): string {
-    const params = new URLSearchParams({ from, to, dateField })
+    const params = new URLSearchParams({
+        from,
+        to,
+        dateField,
+        sortBy: sort.sortBy,
+        sortDir: sort.sortDir,
+    })
     if (groupJid) params.set('group', groupJid)
     if (query.trim()) params.set('q', query.trim())
     return `/api/daily-site-reports/export.csv?${params}`
@@ -910,6 +1024,7 @@ export default function DailySiteReportView({
     const [selected, setSelected] = useState<DailySiteReport | null>(null)
     const [reloadKey, setReloadKey] = useState(0)
     const [visibleColumns, setVisibleColumns] = useState(readVisibleReportColumns)
+    const [sort, setSort] = useState<ReportSortState>(() => readReportSort(dateField))
     const [queryInput, setQueryInput] = useState(query)
     const requestId = useRef(0)
     const scrollRef = useRef<HTMLDivElement>(null)
@@ -929,14 +1044,25 @@ export default function DailySiteReportView({
 
     const buildUrl = useCallback(
         (cursor?: string | null) => {
-            const params = new URLSearchParams({ from, to, dateField })
+            const params = new URLSearchParams({
+                from,
+                to,
+                dateField,
+                sortBy: sort.sortBy,
+                sortDir: sort.sortDir,
+            })
             if (groupJid) params.set('group', groupJid)
             if (query.trim()) params.set('q', query.trim())
             if (cursor) params.set('cursor', cursor)
             return `/api/daily-site-reports?${params}`
         },
-        [from, to, groupJid, query, dateField]
+        [from, to, groupJid, query, dateField, sort]
     )
+
+    useEffect(() => {
+        if (typeof localStorage === 'undefined') return
+        localStorage.setItem(REPORT_TABLE_SORT_STORAGE_KEY, JSON.stringify(sort))
+    }, [sort])
 
     useEffect(() => {
         if (typeof localStorage === 'undefined') return
@@ -945,6 +1071,18 @@ export default function DailySiteReportView({
             JSON.stringify([...visibleColumns])
         )
     }, [visibleColumns])
+
+    function toggleSort(columnId: ReportTableColumnId) {
+        setSort((current) => {
+            if (current.sortBy === columnId) {
+                return {
+                    sortBy: columnId,
+                    sortDir: current.sortDir === 'asc' ? 'desc' : 'asc',
+                }
+            }
+            return { sortBy: columnId, sortDir: 'desc' }
+        })
+    }
 
     const activeColumns = REPORT_TABLE_COLUMNS.filter((column) => visibleColumns.has(column.id))
 
@@ -1051,7 +1189,7 @@ export default function DailySiteReportView({
                     </div>
                     <a
                         className="reports-export"
-                        href={exportUrl(from, to, groupJid, query, dateField)}
+                        href={exportUrl(from, to, groupJid, query, dateField, sort)}
                         download
                     >
                         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -1148,6 +1286,9 @@ export default function DailySiteReportView({
                                         className={column.className}
                                         label={column.label}
                                         title={column.title}
+                                        sortable={column.sortable !== false}
+                                        sortDir={sort.sortBy === column.id ? sort.sortDir : null}
+                                        onSort={() => toggleSort(column.id)}
                                     />
                                 ))}
                             </tr>
