@@ -65,6 +65,8 @@ export const config = {
     mediaRetryMaxAttempts: envInt('MEDIA_RETRY_MAX_ATTEMPTS', 5),
     mediaRetryMinMs: envInt('MEDIA_RETRY_MIN_MS', 5000),
     mediaRetryMaxMs: envInt('MEDIA_RETRY_MAX_MS', 60_000),
+    /** When true, save message rows but skip downloading media files (faster text-only ingest). */
+    skipMediaDownload: env('SKIP_MEDIA_DOWNLOAD', 'false') === 'true',
     catchupWindowSeconds: envInt('CATCHUP_WINDOW_SECONDS', 15 * 60),
     catchupBackfillSeconds: envInt('CATCHUP_BACKFILL_SECONDS', 2 * 24 * 60 * 60),
     catchupPageSize: envInt('CATCHUP_PAGE_SIZE', 50),

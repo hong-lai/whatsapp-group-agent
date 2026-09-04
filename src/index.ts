@@ -1155,18 +1155,21 @@ async function processMessage(
                 )
             }
         }
-        const mediaMeta = {
-            messageId,
-            groupJid: jid,
-            groupName,
-            messageType,
-            timestamp,
-            isHistory,
-            senderName,
-            albumIndex: albumIndex ?? null,
+        const hasMedia = Boolean(fileTypes[messageType])
+        if (hasMedia && !config.skipMediaDownload) {
+            const mediaMeta = {
+                messageId,
+                groupJid: jid,
+                groupName,
+                messageType,
+                timestamp,
+                isHistory,
+                senderName,
+                albumIndex: albumIndex ?? null,
+            }
+            if (isHistory) void storeMediaFile(m, sock, mediaMeta)
+            else await storeMediaFile(m, sock, mediaMeta)
         }
-        if (isHistory) void storeMediaFile(m, sock, mediaMeta)
-        else await storeMediaFile(m, sock, mediaMeta)
         ingestLog(
             {
                 messageId,
@@ -1175,7 +1178,8 @@ async function processMessage(
                 senderJid: senderId,
                 senderName,
                 messageType,
-                hasMedia: Boolean(fileTypes[messageType]),
+                hasMedia,
+                mediaSkipped: hasMedia && config.skipMediaDownload,
                 albumParentId,
                 albumIndex,
                 albumAssociation: Boolean(association.parentId),
@@ -1522,7 +1526,14 @@ async function connectToWhatsApp() {
 
 ;(async () => {
     try {
-        log.info({ pattern: config.groupPatternSource, logLevel: config.logLevel }, 'agent.starting')
+        log.info(
+            {
+                pattern: config.groupPatternSource,
+                logLevel: config.logLevel,
+                skipMediaDownload: config.skipMediaDownload,
+            },
+            'agent.starting'
+        )
         await initDb()
         await loadFilenameFormatSettings()
         startApi()
