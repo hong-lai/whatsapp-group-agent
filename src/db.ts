@@ -2,6 +2,7 @@ import { Pool } from 'pg'
 import { config, matchesGroupPattern } from './config.js'
 import { hktStamp } from './hkt.js'
 import { log } from './log.js'
+import { publishWorkflowStatus } from './workflowStatusEvents.js'
 
 export const pool = new Pool({ connectionString: config.databaseUrl })
 
@@ -1483,6 +1484,9 @@ export type DashboardMessage = {
     siteReportExtracted: boolean
     siteReportFailed: boolean
     siteReportFailureDetail: string | null
+    /** Latest daily_site_report workflow_runs.status (or null if never run). */
+    siteReportStatus: string | null
+    siteReportStatusDetail: string | null
 }
 
 type DashboardMessageRow = {
@@ -1682,6 +1686,8 @@ function toDashboardMessage(
             !row.site_report_extracted && row.site_report_workflow_status === 'error'
                 ? row.site_report_workflow_detail?.trim() || null
                 : null,
+        siteReportStatus: row.site_report_workflow_status,
+        siteReportStatusDetail: row.site_report_workflow_detail?.trim() || null,
     }
 }
 
@@ -3045,4 +3051,89 @@ export async function getMessagesForWorkflowEnqueue(messageIds: string[]): Promi
     return messageIds
         .map((id) => byId.get(id))
         .filter((row): row is NonNullable<typeof row> => Boolean(row))
+}
+
+/** Statuses that mean a workflow job is still outstanding for a message. */
+export const WORKFLOW_IN_PROGRESS_STATUSES = new Set(['queued', 'running', 'retrying'])
+
+export type LatestWorkflowRunStatus = {
+    workflowName: string
+    status: string
+    detail: string | null
+    event: string
+}
+
+export async function recordWorkflowRun(params: {
+    workflowName: string
+    messageId: string
+    event: string
+    status: string
+    detail?: string | null
+    groupJid?: string | null
+}): Promise<void> {
+    await pool.query(
+        `INSERT INTO workflow_runs (workflow_name, message_id, event, status, detail)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+            params.workflowName,
+            params.messageId,
+            params.event,
+            params.status,
+            params.detail ?? null,
+        ]
+    )
+    let groupJid = params.groupJid ?? null
+    if (groupJid == null) {
+        const groupResult = await pool.query<{ group_jid: string | null }>(
+            `SELECT group_jid FROM messages WHERE message_id = $1`,
+            [params.messageId]
+        )
+        groupJid = groupResult.rows[0]?.group_jid ?? null
+    }
+    await publishWorkflowStatus({
+        workflowName: params.workflowName,
+        messageId: params.messageId,
+        groupJid,
+        event: params.event,
+        status: params.status,
+        detail: params.detail ?? null,
+    })
+}
+
+export async function getLatestWorkflowRunStatuses(
+    messageId: string,
+    workflowNames?: string[]
+): Promise<LatestWorkflowRunStatus[]> {
+    const result = await pool.query<{
+        workflow_name: string
+        status: string
+        detail: string | null
+        event: string
+    }>(
+        `SELECT DISTINCT ON (workflow_name)
+            workflow_name,
+            status,
+            detail,
+            event
+         FROM workflow_runs
+         WHERE message_id = $1
+           AND ($2::text[] IS NULL OR workflow_name = ANY($2::text[]))
+         ORDER BY workflow_name, created_at DESC, id DESC`,
+        [messageId, workflowNames?.length ? workflowNames : null]
+    )
+    return result.rows.map((row) => ({
+        workflowName: row.workflow_name,
+        status: row.status,
+        detail: row.detail,
+        event: row.event,
+    }))
+}
+
+export async function findInProgressWorkflows(
+    messageId: string,
+    workflowNames: string[]
+): Promise<LatestWorkflowRunStatus[]> {
+    if (workflowNames.length === 0) return []
+    const latest = await getLatestWorkflowRunStatuses(messageId, workflowNames)
+    return latest.filter((row) => WORKFLOW_IN_PROGRESS_STATUSES.has(row.status))
 }

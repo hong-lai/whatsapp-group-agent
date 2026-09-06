@@ -14,6 +14,7 @@ from .config import settings
 logger = logging.getLogger(__name__)
 
 REPORT_PROCESSED_CHANNEL = "report.processed"
+WORKFLOW_STATUS_CHANNEL = "workflow.status"
 
 ReportAction = Literal["extracted", "updated", "deleted"]
 
@@ -25,6 +26,30 @@ def _redis() -> redis.Redis:
     if _client is None:
         _client = redis.from_url(settings.redis_url, decode_responses=True)
     return _client
+
+
+def publish_workflow_status(
+    *,
+    workflow_name: str,
+    message_id: str,
+    event: str,
+    status: str,
+    detail: str | None = None,
+    group_jid: str | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "workflowName": workflow_name,
+        "messageId": message_id,
+        "groupJid": group_jid,
+        "event": event,
+        "status": status,
+        "detail": detail,
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _redis().publish(WORKFLOW_STATUS_CHANNEL, json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        logger.exception("Failed to publish %s", WORKFLOW_STATUS_CHANNEL)
 
 
 def publish_report_change(

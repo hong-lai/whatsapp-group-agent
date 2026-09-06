@@ -4058,6 +4058,93 @@ h3 {
     gap: 12px;
 }
 
+.message-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.message-run-workflow {
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 1px solid #d5e4de;
+    border-radius: 8px;
+    color: #2c6b5b;
+    background: #f3faf7;
+    cursor: pointer;
+}
+
+.message-run-workflow svg {
+    width: 12px;
+    height: 12px;
+    fill: currentColor;
+}
+
+.message-run-workflow:hover {
+    border-color: #b7d3c8;
+    background: #e8f4ef;
+}
+
+.message-run-workflow:focus-visible {
+    outline: 2px solid #2c6b5b;
+    outline-offset: 1px;
+}
+
+.run-workflow-dialog {
+    width: min(420px, calc(100vw - 24px));
+}
+
+.run-workflow-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.run-workflow-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid #dde7e2;
+    border-radius: 12px;
+    background: #fbfefd;
+    cursor: pointer;
+}
+
+.run-workflow-option.is-checked {
+    border-color: #b7d3c8;
+    background: #eef7f3;
+}
+
+.run-workflow-option input {
+    margin-top: 3px;
+}
+
+.run-workflow-option-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.run-workflow-option-text strong {
+    color: #175f50;
+    font-size: 0.88rem;
+}
+
+.run-workflow-option-text code {
+    color: #6b857c;
+    font-size: 0.72rem;
+}
+
 .message-byline {
     min-width: 0;
     display: inline-flex;
@@ -4151,6 +4238,32 @@ h3 {
     cursor: pointer;
 }
 
+.site-report-label.is-processing {
+    border-color: rgba(42, 100, 150, 0.28);
+    color: #2a6496;
+    background: rgba(42, 100, 150, 0.08);
+    cursor: default;
+}
+
+.site-report-spinner {
+    width: 0.65rem;
+    height: 0.65rem;
+    border: 1.5px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+.message-run-workflow:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.message-run-workflow:disabled:hover {
+    border-color: #d5e4de;
+    background: #f3faf7;
+}
+
 .site-report-preview {
     position: fixed;
     z-index: 60;
@@ -4178,6 +4291,23 @@ h3 {
     visibility: visible;
     pointer-events: auto;
     animation: rise-in 180ms var(--ease-out);
+}
+
+.site-report-preview.is-below::before,
+.site-report-preview.is-above::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 12px;
+}
+
+.site-report-preview.is-below::before {
+    bottom: 100%;
+}
+
+.site-report-preview.is-above::before {
+    top: 100%;
 }
 
 .site-report-preview-kicker {

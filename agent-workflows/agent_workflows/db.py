@@ -44,7 +44,10 @@ def record_workflow_run(
     event: str,
     status: str,
     detail: str | None = None,
+    group_jid: str | None = None,
 ) -> None:
+    from .events import publish_workflow_status
+
     with connect() as conn:
         conn.execute(
             """
@@ -53,4 +56,21 @@ def record_workflow_run(
             """,
             (workflow_name, message_id, event, status, detail),
         )
+        resolved_group = group_jid
+        if resolved_group is None:
+            row = conn.execute(
+                "SELECT group_jid FROM messages WHERE message_id = %s",
+                (message_id,),
+            ).fetchone()
+            if row:
+                resolved_group = row.get("group_jid")
         conn.commit()
+
+    publish_workflow_status(
+        workflow_name=workflow_name,
+        message_id=message_id,
+        event=event,
+        status=status,
+        detail=detail,
+        group_jid=resolved_group,
+    )

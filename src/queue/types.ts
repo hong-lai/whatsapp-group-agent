@@ -16,6 +16,11 @@ export type MessageEventJob = {
     /** Optional one-off prompt overrides (debug re-run only). */
     classifierPrompt?: string | null
     extractorPrompt?: string | null
+    /**
+     * When set, the worker runs only these enabled workflows (still subject to matches()).
+     * When omitted, all enabled workflows that match are run.
+     */
+    workflowNames?: string[] | null
     enqueuedAt: string
 }
 

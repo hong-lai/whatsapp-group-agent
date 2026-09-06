@@ -5,7 +5,7 @@ import { createReadStream, existsSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { config } from './config.js'
+import { config, WORKFLOW_LABELS } from './config.js'
 import { getConnectionStatus } from './connection.js'
 import {
     getFilenameFormatSettings,
@@ -20,6 +20,7 @@ import {
 } from './hkt.js'
 import { log } from './log.js'
 import { handleReportProcessedSse, publishReportChange } from './reportProcessedEvents.js'
+import { handleWorkflowStatusSse } from './workflowStatusEvents.js'
 import {
     countAlbumMedia,
     getAlbumMediaForDownload,
@@ -39,6 +40,8 @@ import {
     getWorkflowDebugSnapshot,
     getMessageForWorkflowEnqueue,
     getMessagesForWorkflowEnqueue,
+    findInProgressWorkflows,
+    recordWorkflowRun,
     type DailySiteReportCursor,
     type DailySiteReportDateField,
     type DailySiteReportSortBy,
@@ -109,6 +112,75 @@ function optionalPromptOverride(value: unknown, maxChars = 50_000): string | nul
         throw new Error(`Prompt exceeds ${maxChars} characters`)
     }
     return value
+}
+
+/** Parse optional workflowNames; undefined = run all enabled. Empty array is invalid. */
+function parseWorkflowNames(value: unknown): string[] | undefined {
+    if (value === undefined || value === null) return undefined
+    if (!Array.isArray(value)) {
+        throw new Error('workflowNames must be an array of workflow name strings')
+    }
+    const names = [
+        ...new Set(
+            value
+                .map((item) => (typeof item === 'string' ? item.trim() : ''))
+                .filter(Boolean)
+        ),
+    ]
+    if (names.length === 0) {
+        throw new Error('Select at least one workflow')
+    }
+    const available = new Set<string>(config.availableWorkflows)
+    const enabled = new Set<string>(config.enabledWorkflows)
+    const unknown = names.filter((name) => !available.has(name))
+    if (unknown.length > 0) {
+        throw new Error(`Unknown workflow(s): ${unknown.join(', ')}`)
+    }
+    const disabled = names.filter((name) => !enabled.has(name))
+    if (disabled.length > 0) {
+        throw new Error(`Workflow(s) not enabled: ${disabled.join(', ')}`)
+    }
+    return names.sort((a, b) => a.localeCompare(b))
+}
+
+function resolveTargetWorkflowNames(workflowNames: string[] | undefined): string[] {
+    return workflowNames ?? [...config.enabledWorkflows]
+}
+
+async function rejectIfWorkflowsInProgress(
+    response: Response,
+    messageId: string,
+    targetWorkflows: string[]
+): Promise<boolean> {
+    const inProgress = await findInProgressWorkflows(messageId, targetWorkflows)
+    if (inProgress.length === 0) return false
+    response.status(409).json({
+        error: `Workflow already in progress: ${inProgress
+            .map((row) => `${row.workflowName} (${row.status})`)
+            .join(', ')}`,
+        inProgress: inProgress.map((row) => ({
+            workflowName: row.workflowName,
+            status: row.status,
+            detail: row.detail,
+        })),
+    })
+    return true
+}
+
+async function markWorkflowsQueued(params: {
+    messageId: string
+    event: string
+    workflowNames: string[]
+}): Promise<void> {
+    for (const workflowName of params.workflowNames) {
+        await recordWorkflowRun({
+            workflowName,
+            messageId: params.messageId,
+            event: params.event,
+            status: 'queued',
+            detail: 'Waiting for worker',
+        })
+    }
 }
 const MEDIA_TYPES = {
     image: ['imageMessage'],
@@ -397,6 +469,10 @@ export function createApiApp() {
         handleReportProcessedSse(request, response)
     })
 
+    app.get('/api/events/workflow-status', (request, response) => {
+        handleWorkflowStatusSse(request, response)
+    })
+
     app.get(
         '/api/groups',
         asyncRoute(async (request, response) => {
@@ -631,6 +707,25 @@ export function createApiApp() {
     )
 
     app.get(
+        '/api/workflows',
+        requireAdmin,
+        asyncRoute(async (_request, response) => {
+            const enabled = new Set(config.enabledWorkflows)
+            response.json({
+                workflowsEnabled: config.workflowsEnabled,
+                workflowsProcessHistory: config.workflowsProcessHistory,
+                available: config.availableWorkflows,
+                enabled: config.enabledWorkflows,
+                workflows: config.availableWorkflows.map((name) => ({
+                    name,
+                    label: WORKFLOW_LABELS[name] ?? name,
+                    enabled: enabled.has(name),
+                })),
+            })
+        })
+    )
+
+    app.get(
         '/api/debug/workflows',
         requireAdmin,
         asyncRoute(async (request, response) => {
@@ -678,6 +773,7 @@ export function createApiApp() {
                 llmModel?: unknown
                 classifierPrompt?: unknown
                 extractorPrompt?: unknown
+                workflowNames?: unknown
             }
             const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : ''
             if (!messageId) throw new Error('messageId is required')
@@ -688,10 +784,20 @@ export function createApiApp() {
                     : config.llmModel
             const classifierPrompt = optionalPromptOverride(body.classifierPrompt)
             const extractorPrompt = optionalPromptOverride(body.extractorPrompt)
+            const workflowNames = parseWorkflowNames(body.workflowNames)
+            const targetWorkflows = resolveTargetWorkflowNames(workflowNames)
+            if (targetWorkflows.length === 0) {
+                response.status(503).json({ error: 'No workflows enabled' })
+                return
+            }
 
             const message = await getMessageForWorkflowEnqueue(messageId)
             if (!message) {
                 response.status(404).json({ error: 'Message not found' })
+                return
+            }
+
+            if (await rejectIfWorkflowsInProgress(response, message.messageId, targetWorkflows)) {
                 return
             }
 
@@ -709,11 +815,18 @@ export function createApiApp() {
                 llmModel,
                 classifierPrompt,
                 extractorPrompt,
+                workflowNames: targetWorkflows,
             })
             if (!enqueued) {
                 response.status(503).json({ error: 'Failed to enqueue workflow job' })
                 return
             }
+
+            await markWorkflowsQueued({
+                messageId: message.messageId,
+                event,
+                workflowNames: targetWorkflows,
+            })
 
             log.info(
                 {
@@ -721,6 +834,7 @@ export function createApiApp() {
                     event,
                     llmModel,
                     groupJid: message.groupJid,
+                    workflowNames: targetWorkflows,
                     classifierPromptOverride: Boolean(classifierPrompt),
                     extractorPromptOverride: Boolean(extractorPrompt),
                 },
@@ -733,6 +847,7 @@ export function createApiApp() {
                 messageId: message.messageId,
                 groupJid: message.groupJid,
                 messageType: message.messageType,
+                workflowNames: targetWorkflows,
                 classifierPromptOverride: Boolean(classifierPrompt),
                 extractorPromptOverride: Boolean(extractorPrompt),
             })
@@ -758,6 +873,7 @@ export function createApiApp() {
                 llmModel?: unknown
                 classifierPrompt?: unknown
                 extractorPrompt?: unknown
+                workflowNames?: unknown
                 maxRows?: unknown
             }
 
@@ -785,6 +901,12 @@ export function createApiApp() {
                     : config.llmModel
             const classifierPrompt = optionalPromptOverride(body.classifierPrompt)
             const extractorPrompt = optionalPromptOverride(body.extractorPrompt)
+            const workflowNames = parseWorkflowNames(body.workflowNames)
+            const targetWorkflows = resolveTargetWorkflowNames(workflowNames)
+            if (targetWorkflows.length === 0) {
+                response.status(503).json({ error: 'No workflows enabled' })
+                return
+            }
 
             const { messageIds, total } = await listDailySiteReportMessageIds({
                 fromDate: range.from,
@@ -814,7 +936,13 @@ export function createApiApp() {
 
             let enqueued = 0
             const failed: string[] = []
+            const skippedInProgress: string[] = []
             for (const message of messages) {
+                const busy = await findInProgressWorkflows(message.messageId, targetWorkflows)
+                if (busy.length > 0) {
+                    skippedInProgress.push(message.messageId)
+                    continue
+                }
                 const event: MessageEventType = message.isEdited
                     ? 'message.edited'
                     : 'message.created'
@@ -828,9 +956,18 @@ export function createApiApp() {
                     llmModel,
                     classifierPrompt,
                     extractorPrompt,
+                    workflowNames: targetWorkflows,
                 })
-                if (ok) enqueued += 1
-                else failed.push(message.messageId)
+                if (ok) {
+                    await markWorkflowsQueued({
+                        messageId: message.messageId,
+                        event,
+                        workflowNames: targetWorkflows,
+                    })
+                    enqueued += 1
+                } else {
+                    failed.push(message.messageId)
+                }
             }
 
             log.info(
@@ -844,7 +981,9 @@ export function createApiApp() {
                     enqueued,
                     failed: failed.length,
                     missing: missing.length,
+                    skippedInProgress: skippedInProgress.length,
                     llmModel,
+                    workflowNames: targetWorkflows,
                 },
                 'workflow.debug_reenqueued_filtered'
             )
@@ -855,7 +994,9 @@ export function createApiApp() {
                 enqueued,
                 failed,
                 missing,
+                skippedInProgress,
                 llmModel,
+                workflowNames: targetWorkflows,
                 range: { from: range.from, to: range.to },
                 dateField,
                 groupJid: groupJid ?? null,

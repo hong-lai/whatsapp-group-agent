@@ -9,7 +9,7 @@ import {
     type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { useAdminAuth } from './adminAuth'
+import { adminHeaders, useAdminAuth } from './adminAuth'
 import AlbumView, {
     allMediaCategories,
     emptyCounts,
@@ -74,6 +74,8 @@ type Message = {
     siteReportExtracted: boolean
     siteReportFailed: boolean
     siteReportFailureDetail?: string | null
+    siteReportStatus?: string | null
+    siteReportStatusDetail?: string | null
 }
 
 type GroupsResponse = {
@@ -100,10 +102,136 @@ type ReportProcessedEvent = {
     at: string
 }
 
+type WorkflowStatusEvent = {
+    workflowName: string
+    messageId: string
+    groupJid: string | null
+    event: string
+    status: string
+    detail: string | null
+    at: string
+}
+
 function reportToastTitle(action: ReportProcessedEvent['action']): string {
     if (action === 'updated') return '工地報告已更新'
     if (action === 'deleted') return '工地報告已刪除'
     return '新工地報告已處理'
+}
+
+/** Keep chat badges in sync with report SSE (don't wait for the 10s poll). */
+function applyReportProcessedToMessage(message: Message, event: ReportProcessedEvent): Message {
+    let changed = false
+    let albumItems = message.albumItems
+    if (albumItems?.length) {
+        const nextAlbum = albumItems.map((item) => applyReportProcessedToMessage(item, event))
+        if (nextAlbum.some((item, index) => item !== albumItems![index])) {
+            albumItems = nextAlbum
+            changed = true
+        }
+    }
+
+    if (message.messageId !== event.messageId) {
+        return changed ? { ...message, albumItems } : message
+    }
+
+    if (event.action === 'deleted') {
+        return {
+            ...message,
+            albumItems,
+            siteReportExtracted: false,
+            siteReportFailed: false,
+            siteReportFailureDetail: null,
+            siteReportStatus: 'deleted',
+            siteReportStatusDetail: null,
+        }
+    }
+
+    return {
+        ...message,
+        albumItems,
+        siteReportExtracted: true,
+        siteReportFailed: false,
+        siteReportFailureDetail: null,
+        siteReportStatus: 'extracted',
+        siteReportStatusDetail: null,
+    }
+}
+
+/** Apply live workflow_runs status (queued/running/skipped/error/…). */
+function applyWorkflowStatusToMessage(message: Message, event: WorkflowStatusEvent): Message {
+    let changed = false
+    let albumItems = message.albumItems
+    if (albumItems?.length) {
+        const nextAlbum = albumItems.map((item) => applyWorkflowStatusToMessage(item, event))
+        if (nextAlbum.some((item, index) => item !== albumItems![index])) {
+            albumItems = nextAlbum
+            changed = true
+        }
+    }
+
+    if (message.messageId !== event.messageId) {
+        return changed ? { ...message, albumItems } : message
+    }
+    // Chat badge is currently daily_site_report only.
+    if (event.workflowName !== 'daily_site_report') {
+        return changed ? { ...message, albumItems } : message
+    }
+
+    const status = event.status
+    const detail = event.detail?.trim() || null
+
+    if (status === 'extracted') {
+        return {
+            ...message,
+            albumItems,
+            siteReportExtracted: true,
+            siteReportFailed: false,
+            siteReportFailureDetail: null,
+            siteReportStatus: status,
+            siteReportStatusDetail: detail,
+        }
+    }
+    if (status === 'deleted') {
+        return {
+            ...message,
+            albumItems,
+            siteReportExtracted: false,
+            siteReportFailed: false,
+            siteReportFailureDetail: null,
+            siteReportStatus: status,
+            siteReportStatusDetail: detail,
+        }
+    }
+    if (status === 'error') {
+        return {
+            ...message,
+            albumItems,
+            siteReportExtracted: false,
+            siteReportFailed: true,
+            siteReportFailureDetail: detail,
+            siteReportStatus: status,
+            siteReportStatusDetail: detail,
+        }
+    }
+    if (isWorkflowInProgress(status)) {
+        return {
+            ...message,
+            albumItems,
+            siteReportStatus: status,
+            siteReportStatusDetail: detail,
+        }
+    }
+
+    // skipped / irrelevant / rejected / etc. — clear processing badge
+    return {
+        ...message,
+        albumItems,
+        siteReportExtracted: false,
+        siteReportFailed: false,
+        siteReportFailureDetail: null,
+        siteReportStatus: status,
+        siteReportStatusDetail: detail,
+    }
 }
 
 type AgentConnectionState = 'connecting' | 'connected' | 'disconnected'
@@ -1146,7 +1274,7 @@ function SiteReportTag({
         const panel = panelRef.current
         const width = Math.min(failed ? 280 : 300, window.innerWidth - 24)
         const height = panel?.offsetHeight || (failed ? 130 : 280)
-        const gap = 8
+        const gap = 6
         const margin = 12
         const spaceBelow = window.innerHeight - rect.bottom - gap - margin
         const spaceAbove = rect.top - gap - margin
@@ -1200,15 +1328,22 @@ function SiteReportTag({
         void loadReport()
     }
 
+    function keepPreviewOpen() {
+        if (touchUsedRef.current) return
+        clearTimers()
+    }
+
     function showPreview() {
         if (touchUsedRef.current || sticky || !canHoverPreview()) return
         clearTimers()
+        // Already open: only cancel any pending close from leaving the tag.
+        if (open) return
         openTimer.current = window.setTimeout(() => {
             setPlaced(false)
             setSticky(false)
             setOpen(true)
             void loadReport()
-        }, 220)
+        }, 180)
     }
 
     function hidePreview() {
@@ -1217,7 +1352,7 @@ function SiteReportTag({
         closeTimer.current = window.setTimeout(() => {
             setOpen(false)
             setPlaced(false)
-        }, 180)
+        }, 220)
     }
 
     function closePreviewNow() {
@@ -1298,7 +1433,7 @@ function SiteReportTag({
                   }`}
                   style={{ top: coords.top, left: coords.left }}
                   role="tooltip"
-                  onMouseEnter={showPreview}
+                  onMouseEnter={keepPreviewOpen}
                   onMouseLeave={hidePreview}
               >
                   {failed ? (
@@ -1487,21 +1622,314 @@ function SiteReportTag({
     )
 }
 
+function isWorkflowInProgress(status: string | null | undefined): boolean {
+    return status === 'queued' || status === 'running' || status === 'retrying'
+}
+
+function workflowInProgressLabel(status: string): string {
+    if (status === 'queued') return '排隊中'
+    if (status === 'retrying') return '重試中'
+    return '分析中'
+}
+
+function RunWorkflowDialog({
+    open,
+    messageId,
+    busy = false,
+    busyDetail = null,
+    onClose,
+    onQueued,
+}: {
+    open: boolean
+    messageId: string
+    busy?: boolean
+    busyDetail?: string | null
+    onClose: () => void
+    onQueued?: () => void
+}) {
+    const { adminPassword, logout } = useAdminAuth()
+    const [loading, setLoading] = useState(false)
+    const [running, setRunning] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [note, setNote] = useState<string | null>(null)
+    const [workflowsEnabled, setWorkflowsEnabled] = useState(true)
+    const [workflows, setWorkflows] = useState<
+        Array<{ name: string; label: string; enabled: boolean }>
+    >([])
+    const [selected, setSelected] = useState<string[]>([])
+    const onCloseRef = useRef(onClose)
+    const logoutRef = useRef(logout)
+    const onQueuedRef = useRef(onQueued)
+
+    useEffect(() => {
+        onCloseRef.current = onClose
+    }, [onClose])
+
+    useEffect(() => {
+        logoutRef.current = logout
+    }, [logout])
+
+    useEffect(() => {
+        onQueuedRef.current = onQueued
+    }, [onQueued])
+
+    useEffect(() => {
+        if (!open || !adminPassword) return
+        let cancelled = false
+        setLoading(true)
+        setError(null)
+        setNote(null)
+        void (async () => {
+            try {
+                const response = await fetch('/api/workflows', {
+                    headers: adminHeaders(adminPassword),
+                })
+                const body = (await response.json()) as {
+                    error?: string
+                    workflowsEnabled?: boolean
+                    workflows?: Array<{ name: string; label: string; enabled: boolean }>
+                }
+                if (response.status === 401) {
+                    logoutRef.current()
+                    onCloseRef.current()
+                    return
+                }
+                if (!response.ok) {
+                    throw new Error(body.error || `Failed to load workflows (${response.status})`)
+                }
+                if (cancelled) return
+                const list = body.workflows ?? []
+                const enabledNames = list.filter((item) => item.enabled).map((item) => item.name)
+                setWorkflows(list)
+                setWorkflowsEnabled(body.workflowsEnabled !== false)
+                setSelected(enabledNames)
+            } catch (reason) {
+                if (!cancelled) {
+                    setError(reason instanceof Error ? reason.message : 'Could not load workflows')
+                }
+            } finally {
+                if (!cancelled) setLoading(false)
+            }
+        })()
+        return () => {
+            cancelled = true
+        }
+    }, [open, adminPassword])
+
+    function toggleWorkflow(name: string) {
+        setSelected((current) =>
+            current.includes(name) ? current.filter((item) => item !== name) : [...current, name]
+        )
+    }
+
+    async function handleRun() {
+        if (!adminPassword) {
+            logout()
+            onClose()
+            return
+        }
+        if (busy) {
+            setError(busyDetail || 'Workflow already in progress for this message')
+            return
+        }
+        if (selected.length === 0) {
+            setError('Select at least one workflow')
+            return
+        }
+        setRunning(true)
+        setError(null)
+        setNote(null)
+        try {
+            const response = await fetch('/api/debug/workflows/reenqueue', {
+                method: 'POST',
+                headers: adminHeaders(adminPassword, true),
+                body: JSON.stringify({
+                    messageId,
+                    workflowNames: selected,
+                }),
+            })
+            const body = (await response.json()) as {
+                error?: string
+                workflowNames?: string[] | null
+            }
+            if (response.status === 401) {
+                logout()
+                onClose()
+                return
+            }
+            if (!response.ok) {
+                throw new Error(body.error || `Run failed (${response.status})`)
+            }
+            const names = body.workflowNames?.length
+                ? body.workflowNames.join(', ')
+                : selected.join(', ')
+            setNote(`Queued: ${names}`)
+            onQueuedRef.current?.()
+            window.setTimeout(() => onClose(), 900)
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'Could not run workflow')
+        } finally {
+            setRunning(false)
+        }
+    }
+
+    if (!open) return null
+
+    const enabledWorkflows = workflows.filter((item) => item.enabled)
+
+    return createPortal(
+        <div
+            className="workflow-debug-overlay"
+            role="presentation"
+            onClick={(event) => {
+                if (event.target === event.currentTarget && !running) onClose()
+            }}
+        >
+            <div
+                className="workflow-debug-dialog run-workflow-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="run-workflow-title"
+                onClick={(event) => event.stopPropagation()}
+            >
+                <header className="workflow-debug-dialog-header">
+                    <div>
+                        <h3 id="run-workflow-title">Run workflow</h3>
+                        <p className="workflow-debug-dialog-summary">
+                            Choose which workflows to run on this message.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        className="workflow-debug-dialog-close"
+                        onClick={onClose}
+                        disabled={running}
+                        aria-label="Close"
+                    >
+                        ×
+                    </button>
+                </header>
+
+                {busy && (
+                    <p className="workflow-debug-warn">
+                        {busyDetail || 'A workflow is already running on this message.'}
+                    </p>
+                )}
+                {error && <p className="workflow-debug-error">{error}</p>}
+                {note && <p className="workflow-debug-note">{note}</p>}
+                {loading && <p className="workflow-debug-note">Loading workflows…</p>}
+
+                {!loading && !workflowsEnabled && (
+                    <p className="workflow-debug-warn">
+                        Workflows are disabled (WORKFLOWS_ENABLED=false).
+                    </p>
+                )}
+
+                {!loading && workflowsEnabled && enabledWorkflows.length === 0 && (
+                    <p className="workflow-debug-warn">
+                        No workflows enabled. Set ENABLED_WORKFLOWS in the server env.
+                    </p>
+                )}
+
+                {!loading && enabledWorkflows.length > 0 && (
+                    <ul className="run-workflow-list" role="listbox" aria-label="Available workflows">
+                        {enabledWorkflows.map((workflow) => {
+                            const checked = selected.includes(workflow.name)
+                            return (
+                                <li key={workflow.name}>
+                                    <label className={`run-workflow-option${checked ? ' is-checked' : ''}`}>
+                                        <input
+                                            type="checkbox"
+                                            checked={checked}
+                                            disabled={running || busy}
+                                            onChange={() => toggleWorkflow(workflow.name)}
+                                        />
+                                        <span className="run-workflow-option-text">
+                                            <strong>{workflow.label}</strong>
+                                            <code>{workflow.name}</code>
+                                        </span>
+                                    </label>
+                                </li>
+                            )
+                        })}
+                    </ul>
+                )}
+
+                <div className="workflow-debug-dialog-actions">
+                    <button
+                        type="button"
+                        className="workflow-debug-cancel"
+                        onClick={onClose}
+                        disabled={running}
+                    >
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        className="workflow-debug-submit"
+                        onClick={() => void handleRun()}
+                        disabled={
+                            running ||
+                            busy ||
+                            loading ||
+                            !workflowsEnabled ||
+                            enabledWorkflows.length === 0 ||
+                            selected.length === 0
+                        }
+                    >
+                        {running ? 'Queuing…' : 'Run'}
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
+    )
+}
+
 function MessageCard({
     message,
+    isAdmin = false,
     onOpenReports,
+    onWorkflowQueued,
 }: {
     message: Message
+    isAdmin?: boolean
     onOpenReports?: () => void
+    onWorkflowQueued?: () => void
 }) {
     const [revealed, setRevealed] = useState(false)
+    const [runOpen, setRunOpen] = useState(false)
+    const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null)
+    const statusWhenQueuedRef = useRef<string | null>(null)
     const canReveal = message.isDeleted && hasStoredContent(message)
+    const serverStatus = message.siteReportStatus ?? null
+    const effectiveStatus = optimisticStatus ?? serverStatus
+    const workflowBusy = isWorkflowInProgress(effectiveStatus)
     const showSiteReportBadge =
         (!message.isDeleted || revealed) &&
-        (message.siteReportExtracted || message.siteReportFailed)
+        (message.siteReportExtracted || message.siteReportFailed || workflowBusy)
     // Album captions live on child media; WhatsApp edits those children, not the album shell.
     const showEdited =
         message.isEdited || (message.albumItems ?? []).some((item) => item.isEdited)
+    const canRunWorkflow = isAdmin && (!message.isDeleted || revealed)
+
+    useEffect(() => {
+        if (!optimisticStatus) return
+        // Keep optimistic "queued" until the server status moves past the pre-queue value
+        // (including terminal outcomes like skipped — which never emit report SSE).
+        if (serverStatus == null) return
+        if (serverStatus === statusWhenQueuedRef.current && !isWorkflowInProgress(serverStatus)) {
+            return
+        }
+        setOptimisticStatus(null)
+        statusWhenQueuedRef.current = null
+    }, [serverStatus, optimisticStatus])
+
+    function handleQueued() {
+        statusWhenQueuedRef.current = serverStatus
+        setOptimisticStatus('queued')
+        onWorkflowQueued?.()
+    }
 
     return (
         <article className={`message-card ${message.isDeleted ? 'deleted' : ''} ${revealed ? 'revealed' : ''}`}>
@@ -1526,7 +1954,16 @@ function MessageCard({
                                 Edited
                             </span>
                         )}
-                        {showSiteReportBadge && (
+                        {showSiteReportBadge && workflowBusy && effectiveStatus && (
+                            <span
+                                className={`site-report-label is-processing status-${effectiveStatus}`}
+                                title={message.siteReportStatusDetail || undefined}
+                            >
+                                <span className="site-report-spinner" aria-hidden="true" />
+                                {workflowInProgressLabel(effectiveStatus)}
+                            </span>
+                        )}
+                        {showSiteReportBadge && !workflowBusy && (
                             <SiteReportTag
                                 messageId={message.messageId}
                                 failed={message.siteReportFailed}
@@ -1535,7 +1972,31 @@ function MessageCard({
                             />
                         )}
                     </span>
-                    <time>{hkDateTime.format(message.timestamp * 1000)}</time>
+                    <span className="message-meta">
+                        <time>{hkDateTime.format(message.timestamp * 1000)}</time>
+                        {canRunWorkflow && (
+                            <button
+                                type="button"
+                                className="message-run-workflow"
+                                title={
+                                    workflowBusy
+                                        ? 'Workflow already in progress'
+                                        : 'Run workflow'
+                                }
+                                aria-label={
+                                    workflowBusy
+                                        ? 'Workflow already in progress'
+                                        : 'Run workflow on this message'
+                                }
+                                disabled={workflowBusy}
+                                onClick={() => setRunOpen(true)}
+                            >
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="M8 5.5v13l11-6.5z" />
+                                </svg>
+                            </button>
+                        )}
+                    </span>
                 </header>
                 {(!message.isDeleted || revealed) && <QuotePreview message={message} />}
                 <div className="message-body-stack">
@@ -1554,6 +2015,18 @@ function MessageCard({
                     <ReactionRow reactions={message.reactions ?? []} />
                 )}
             </div>
+            <RunWorkflowDialog
+                open={runOpen}
+                messageId={message.messageId}
+                busy={workflowBusy}
+                busyDetail={
+                    workflowBusy && effectiveStatus
+                        ? `Already ${workflowInProgressLabel(effectiveStatus)} — wait for it to finish.`
+                        : null
+                }
+                onClose={() => setRunOpen(false)}
+                onQueued={handleQueued}
+            />
         </article>
     )
 }
@@ -1665,6 +2138,7 @@ export default function App() {
     const messageListRef = useRef<HTMLDivElement>(null)
     const scrollRestore = useRef<{ top: number; height: number } | null>(null)
     const nextCursorRef = useRef<string | null>(null)
+    const silentRefreshRef = useRef<() => void>(() => {})
     nextCursorRef.current = nextCursor
 
     const invalidRange = from > to
@@ -1745,19 +2219,41 @@ export default function App() {
     }, [reportsGroupsCollapsed])
 
     useEffect(() => {
-        const source = new EventSource('/api/events/report-processed')
-        source.onmessage = (event) => {
+        const reportSource = new EventSource('/api/events/report-processed')
+        reportSource.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data) as ReportProcessedEvent
                 if (!data?.messageId) return
+                setMessages((current) =>
+                    current.map((message) => applyReportProcessedToMessage(message, data))
+                )
                 setReportToast(data)
                 setReportsLiveTick((tick) => tick + 1)
+                pulseLive()
+                window.setTimeout(() => silentRefreshRef.current(), 0)
+            } catch {
+                // ignore malformed payloads
+            }
+        }
+
+        const workflowSource = new EventSource('/api/events/workflow-status')
+        workflowSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data) as WorkflowStatusEvent
+                if (!data?.messageId || !data.status) return
+                setMessages((current) =>
+                    current.map((message) => applyWorkflowStatusToMessage(message, data))
+                )
                 pulseLive()
             } catch {
                 // ignore malformed payloads
             }
         }
-        return () => source.close()
+
+        return () => {
+            reportSource.close()
+            workflowSource.close()
+        }
     }, [])
 
     useEffect(() => {
@@ -2002,6 +2498,19 @@ export default function App() {
             if ((reason as Error).name === 'AbortError') return
         } finally {
             silentBusy.current = false
+        }
+    }
+
+    useEffect(() => {
+        silentRefreshRef.current = () => {
+            void silentRefresh()
+        }
+    })
+
+    function refreshMessagesAfterWorkflowQueue() {
+        const delays = [800, 2000, 4000, 7000]
+        for (const delay of delays) {
+            window.setTimeout(() => silentRefreshRef.current(), delay)
         }
     }
 
@@ -2660,7 +3169,9 @@ export default function App() {
                                         <MessageCard
                                             message={message}
                                             key={message.messageId}
+                                            isAdmin={isAdmin}
                                             onOpenReports={() => setView('reports')}
+                                            onWorkflowQueued={refreshMessagesAfterWorkflowQueue}
                                         />
                                     ))}
                                     {sortOrder === 'desc' && nextCursor && (

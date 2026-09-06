@@ -41,6 +41,24 @@ function envLogLevel(name: string, fallback: LogLevel): LogLevel {
     return fallback
 }
 
+function parseCsvNames(raw: string): string[] {
+    return [
+        ...new Set(
+            raw
+                .split(',')
+                .map((part) => part.trim())
+                .filter(Boolean)
+        ),
+    ].sort((a, b) => a.localeCompare(b))
+}
+
+/** Keep in sync with agent_workflows/registry.py `_AVAILABLE`. */
+export const AVAILABLE_WORKFLOW_NAMES = ['daily_site_report'] as const
+
+export const WORKFLOW_LABELS: Record<string, string> = {
+    daily_site_report: 'Daily site report',
+}
+
 const GROUP_PATTERN_SOURCE = env('GROUP_PATTERN', '富山邨|錦田')
 
 export const config = {
@@ -81,6 +99,16 @@ export const config = {
     workflowsEnabled: env('WORKFLOWS_ENABLED', 'false') === 'true',
     /** When false, history/catch-up messages are not enqueued (avoids LLM floods). */
     workflowsProcessHistory: env('WORKFLOWS_PROCESS_HISTORY', 'false') === 'true',
+    /**
+     * Workflows the Python worker may run (comma-separated).
+     * Must stay aligned with agent_workflows/registry.py + ENABLED_WORKFLOWS.
+     */
+    enabledWorkflows: parseCsvNames(env('ENABLED_WORKFLOWS', 'daily_site_report')),
+    /**
+     * All registered workflow names (Node-side mirror of registry._AVAILABLE).
+     * Used for admin listing / validation; enablement is still ENABLED_WORKFLOWS.
+     */
+    availableWorkflows: [...AVAILABLE_WORKFLOW_NAMES],
     /** Shared with workflows worker — used by debug UI for model listing / defaults. */
     llmBaseUrl: env('LLM_BASE_URL', 'http://localhost:1234/v1'),
     llmApiKey: env('LLM_API_KEY', '1234'),

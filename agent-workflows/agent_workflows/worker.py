@@ -99,10 +99,47 @@ async def run_worker() -> None:
         message = get_message(message_id)
         results: dict[str, str] = {}
 
-        for workflow in workflows:
+        requested = data.get("workflowNames")
+        if isinstance(requested, list) and requested:
+            requested_names = {str(name).strip() for name in requested if str(name).strip()}
+            selected = [workflow for workflow in workflows if workflow.name in requested_names]
+            if not selected:
+                log.info(
+                    "workflow.skipped_none_selected event=%s message_id=%s requested=%s enabled=%s",
+                    event,
+                    message_id,
+                    sorted(requested_names),
+                    [workflow.name for workflow in workflows],
+                )
+                return {
+                    "messageId": message_id,
+                    "event": event,
+                    "results": results,
+                    "skipped": "no_matching_enabled_workflows",
+                }
+        else:
+            selected = workflows
+
+        for workflow in selected:
             if not workflow.matches(data, message):
+                # Clear a manual "queued" row so the chat UI does not stay stuck.
+                if isinstance(requested, list) and requested:
+                    record_workflow_run(
+                        workflow_name=workflow.name,
+                        message_id=message_id,
+                        event=event,
+                        status="skipped",
+                        detail="did not match job/message",
+                    )
                 continue
             try:
+                record_workflow_run(
+                    workflow_name=workflow.name,
+                    message_id=message_id,
+                    event=event,
+                    status="running",
+                    detail="Processing",
+                )
                 status = await _run_with_llm_retry(
                     workflow_name=workflow.name,
                     message_id=message_id,
