@@ -63,6 +63,7 @@ export async function initDb(): Promise<void> {
         await migrateQuotedMessageType()
         await migrateDocumentFileName()
         await migrateWorkflowTables()
+        await migrateGroupHistoryFloor()
 
         await pool.query(`
         CREATE INDEX IF NOT EXISTS messages_group_timestamp_idx
@@ -128,6 +129,33 @@ export async function initDb(): Promise<void> {
             )
         }
         throw err
+    }
+}
+
+/**
+ * Sticky first-login history floor per group. Set once to
+ * `now - catchupBackfillSeconds` (or backfilled from oldest message for
+ * existing installs) so reconnects do not recompute a rolling window.
+ */
+async function migrateGroupHistoryFloor(): Promise<void> {
+    await pool.query(`
+        ALTER TABLE groups
+        ADD COLUMN IF NOT EXISTS history_floor TIMESTAMPTZ
+    `)
+    const result = await pool.query(
+        `UPDATE groups g
+         SET history_floor = oldest.ts
+         FROM (
+            SELECT group_jid, MIN(timestamp) AS ts
+            FROM messages
+            WHERE timestamp IS NOT NULL
+            GROUP BY group_jid
+         ) oldest
+         WHERE g.jid = oldest.group_jid
+           AND g.history_floor IS NULL`
+    )
+    if (result.rowCount) {
+        log.info({ count: result.rowCount }, 'db.group_history_floor_backfilled')
     }
 }
 
@@ -920,6 +948,38 @@ export async function upsertGroup(jid: string, name: string, tracked: boolean): 
     )
 }
 
+/** Unix seconds of the sticky first-login history floor, if set. */
+export async function getGroupHistoryFloor(groupJid: string): Promise<number | undefined> {
+    const result = await pool.query<{ floor: string | null }>(
+        `SELECT EXTRACT(EPOCH FROM history_floor)::bigint::text AS floor
+         FROM groups WHERE jid = $1`,
+        [groupJid]
+    )
+    const raw = result.rows[0]?.floor
+    if (!raw) return undefined
+    const n = Number(raw)
+    return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+/**
+ * Set history_floor once (never overwrites). Returns the effective floor
+ * in unix seconds — existing value, or the provided floorSeconds after insert.
+ */
+export async function ensureGroupHistoryFloor(
+    groupJid: string,
+    floorSeconds: number
+): Promise<number> {
+    const existing = await getGroupHistoryFloor(groupJid)
+    if (existing !== undefined) return existing
+    await pool.query(
+        `UPDATE groups
+         SET history_floor = to_timestamp($2)
+         WHERE jid = $1 AND history_floor IS NULL`,
+        [groupJid, floorSeconds]
+    )
+    return (await getGroupHistoryFloor(groupJid)) ?? floorSeconds
+}
+
 export async function markGroupDeleted(jid: string): Promise<void> {
     await pool.query(
         `UPDATE groups SET deleted_at = NOW(), tracked = FALSE, updated_at = NOW() WHERE jid = $1`,
@@ -1079,6 +1139,25 @@ export async function getStoredMessageContent(messageId: string): Promise<string
         [messageId]
     )
     return result.rows[0]?.text_content ?? null
+}
+
+/** Fields Baileys needs via `getMessage` for retries and encrypted edit unwrap. */
+export async function getStoredMessageForGetMessage(
+    messageId: string
+): Promise<{ text: string | null; messageSecret: string | null } | undefined> {
+    const result = await pool.query<{
+        text_content: string | null
+        message_secret: string | null
+    }>(
+        'SELECT text_content, message_secret FROM messages WHERE message_id = $1',
+        [messageId]
+    )
+    const row = result.rows[0]
+    if (!row) return undefined
+    return {
+        text: row.text_content,
+        messageSecret: row.message_secret,
+    }
 }
 
 export type LatestGroupMessage = {

@@ -27,7 +27,7 @@ import type { Readable } from 'stream'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
 import pino from 'pino'
 import { startApi } from './api.js'
-import { createCatchup, asCatchupMessage } from './catchup.js'
+import { createCatchup, asCatchupMessage, resolveHistoryFloor } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
 import { noteConnected, noteConnecting, noteDisconnected } from './connection.js'
 import {
@@ -58,8 +58,7 @@ import {
     setSenderDisplayNames,
 } from './cache.js'
 import {
-    getLatestGroupMessage,
-    getStoredMessageContent,
+    getStoredMessageForGetMessage,
     hasMessage,
     initDb,
     insertMessage,
@@ -326,6 +325,7 @@ async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
     await upsertGroup(metadata.id, name || metadata.id, tracked)
     await rememberContacts(metadata.participants)
     if (tracked) {
+        await resolveHistoryFloor(metadata.id)
         await removeSkippedGroup(metadata.id)
         await setGroupMetadata(metadata.id, metadata)
         return true
@@ -378,8 +378,14 @@ function unixSeconds(value: unknown): number {
     return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
 }
 
-function historyCutoffSeconds(): number {
-    return Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
+/**
+ * History ingest bounds use a sticky per-group floor (set once on first track /
+ * first history contact). Never expand older than that floor; reconnect gaps
+ * of any length newer than the floor are accepted.
+ */
+async function shouldIgnoreHistoryTimestamp(groupJid: string, timestamp: number): Promise<boolean> {
+    const floor = await resolveHistoryFloor(groupJid)
+    return timestamp < floor
 }
 
 function secondsFromMillis(value: unknown, fallback: number): number {
@@ -892,7 +898,8 @@ async function resolveGroupMetadata(
 async function processMessage(
     m: WAMessage,
     sock: WASocket,
-    isHistory = false
+    isHistory = false,
+    onTracked?: (groupJid: string) => void
 ): Promise<'ignored' | 'saved' | 'reaction' | 'error' | 'edited'> {
     if (!m.message || !m.key.remoteJid) return 'ignored'
     if (isEditEnvelope(m.message)) return 'ignored'
@@ -905,6 +912,7 @@ async function processMessage(
 
     const groupName = groupMetadata.subject
     if (!matchesGroupPattern(groupName)) return 'ignored'
+    onTracked?.(jid)
 
     const messageId = m.key.id
     const content = contentForIngest(m.message) || m.message
@@ -932,7 +940,7 @@ async function processMessage(
         await setSenderDisplayNames(nameEntries)
     }
     const timestamp = unixSeconds(m.messageTimestamp)
-    if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
+    if (isHistory && (await shouldIgnoreHistoryTimestamp(jid, timestamp))) return 'ignored'
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
     const messageSecret = extractMessageSecret(m.message)
     const alreadyEdited = isEditedWrapper(m.message)
@@ -1011,6 +1019,7 @@ async function processMessage(
         try {
             if (!senderId) return 'ignored'
             await upsertGroup(jid, groupName, true)
+            await resolveHistoryFloor(jid)
             await rememberMessageSender(senderId, altSender, senderName)
             if (emoji) {
                 await upsertReaction({
@@ -1099,6 +1108,7 @@ async function processMessage(
 
     try {
         await upsertGroup(jid, groupName, true)
+        await resolveHistoryFloor(jid)
         if (senderId) await rememberMessageSender(senderId, altSender, senderName)
         const mentioned = mentionedJidsOf(content)
         if (mentioned.length > 0) {
@@ -1250,8 +1260,20 @@ async function connectToWhatsApp() {
         shouldSyncHistoryMessage: () => true,
         getMessage: async (key) => {
             if (!key.id) return undefined
-            const text = await getStoredMessageContent(key.id)
-            return text ? { conversation: text } : undefined
+            const stored = await getStoredMessageForGetMessage(key.id)
+            if (!stored) return undefined
+            const message: proto.IMessage = {}
+            if (stored.text) message.conversation = stored.text
+            if (stored.messageSecret) {
+                try {
+                    message.messageContextInfo = {
+                        messageSecret: new Uint8Array(JSON.parse(stored.messageSecret) as number[]),
+                    }
+                } catch {
+                    // Malformed secret — still return text for send retries.
+                }
+            }
+            return message.conversation || message.messageContextInfo ? message : undefined
         },
     })
     const catchup = createCatchup(sock)
@@ -1334,29 +1356,29 @@ async function connectToWhatsApp() {
             const { messages, contacts, syncType, lidPnMappings } = history
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
-            const latestBefore = new Map<string, number | undefined>()
-            const cutoff = historyCutoffSeconds()
 
             await rememberLidMappings(lidPnMappings)
             await rememberContacts(contacts)
 
             for (const m of messages || []) {
-                if (unixSeconds(m.messageTimestamp) < cutoff) {
+                const groupJid = m.key.remoteJid
+                if (
+                    groupJid &&
+                    isJidGroup(groupJid) &&
+                    (await shouldIgnoreHistoryTimestamp(groupJid, unixSeconds(m.messageTimestamp)))
+                ) {
                     counts.tooOld += 1
                     continue
                 }
-                const groupJid = m.key.remoteJid
-                if (groupJid && !latestBefore.has(groupJid)) {
-                    const latest = await getLatestGroupMessage(groupJid)
-                    latestBefore.set(groupJid, latest?.timestamp)
-                }
-                counts[await processMessage(m, sock, true)] += 1
+                counts[await processMessage(m, sock, true, (groupJid) => {
+                    catchup.setTrackedGroups([groupJid])
+                })] += 1
             }
             for (const m of messages || []) {
                 const result = await applyIncomingEdit(m, true)
                 if (result === 'applied') counts.edited += 1
             }
-            await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
+            await catchup.considerHistoryBatch(messages || [], syncType)
             catchup.noteHistoryChunk(syncType)
             log.info({ syncType, ms: Date.now() - started, ...counts }, 'history.sync.done')
         }
@@ -1389,6 +1411,13 @@ async function connectToWhatsApp() {
         const upsert = events['messages.upsert']
         if (upsert && (upsert.type === 'notify' || upsert.type === 'append')) {
             const isHistory = upsert.type === 'append' || Boolean(upsert.requestId)
+            const track = (groupJid: string) => catchup.setTrackedGroups([groupJid])
+            for (const m of upsert.messages) {
+                const groupJid = m.key.remoteJid
+                if (!groupJid || !isJidGroup(groupJid) || isEditEnvelope(m.message)) continue
+                const meta = await resolveGroupMetadata(groupJid, sock, !isHistory)
+                if (meta && matchesGroupPattern(meta.subject)) track(groupJid)
+            }
             for (const m of upsert.messages) {
                 if (!isEditEnvelope(m.message)) {
                     catchup.noteChatHead(m)
@@ -1399,7 +1428,7 @@ async function connectToWhatsApp() {
                 }
             }
             for (const m of upsert.messages) {
-                await processMessage(m, sock, isHistory)
+                await processMessage(m, sock, isHistory, track)
             }
             for (const m of upsert.messages) {
                 await applyIncomingEdit(m, isHistory)
@@ -1462,7 +1491,14 @@ async function connectToWhatsApp() {
                 continue
             }
             if (event.subject && matchesGroupPattern(event.subject)) {
-                await refreshGroup(sock, event.id, 'groups.update-matched')
+                const metadata = await refreshGroup(sock, event.id, 'groups.update-matched')
+                if (metadata && matchesGroupPattern(metadata.subject)) {
+                    catchup.setTrackedGroups([event.id])
+                    log.info(
+                        { groupJid: event.id, groupName: metadata.subject },
+                        'group.tracked'
+                    )
+                }
                 continue
             }
             await addSkippedGroup(event.id)
