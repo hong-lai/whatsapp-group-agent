@@ -4170,6 +4170,13 @@ h3 {
         0 1px 0 rgba(255, 255, 255, 0.85) inset;
     backdrop-filter: blur(28px) saturate(1.45);
     -webkit-backdrop-filter: blur(28px) saturate(1.45);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.site-report-preview.is-placed {
+    visibility: visible;
+    pointer-events: auto;
     animation: rise-in 180ms var(--ease-out);
 }
 
@@ -4362,6 +4369,15 @@ h3 {
     line-height: 1.4;
 }
 
+.site-report-preview-reason {
+    margin: 0;
+    color: #5c2a22;
+    font-size: 0.74rem;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .site-report-preview-foot {
     margin-top: 8px;
     padding-top: 7px;
@@ -4369,6 +4385,24 @@ h3 {
     color: #6d817a;
     font-size: 0.55rem;
     font-weight: 700;
+}
+
+.site-report-preview-open {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 10px;
+    background: #1f6b57;
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.site-report-preview-open:active {
+    background: #185544;
 }
 
 .site-report-preview-loading {

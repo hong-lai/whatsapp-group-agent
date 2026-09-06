@@ -1482,6 +1482,7 @@ export type DashboardMessage = {
     albumExpectedVideos: number | null
     siteReportExtracted: boolean
     siteReportFailed: boolean
+    siteReportFailureDetail: string | null
 }
 
 type DashboardMessageRow = {
@@ -1507,6 +1508,7 @@ type DashboardMessageRow = {
     album_expected_videos: number | null
     site_report_extracted: boolean
     site_report_workflow_status: string | null
+    site_report_workflow_detail: string | null
 }
 
 const MENTION_RE = /@(\d{8,})/g
@@ -1676,6 +1678,10 @@ function toDashboardMessage(
         siteReportExtracted: row.site_report_extracted,
         siteReportFailed:
             !row.site_report_extracted && row.site_report_workflow_status === 'error',
+        siteReportFailureDetail:
+            !row.site_report_extracted && row.site_report_workflow_status === 'error'
+                ? row.site_report_workflow_detail?.trim() || null
+                : null,
     }
 }
 
@@ -1724,7 +1730,15 @@ export async function listDashboardMessages(
                   AND wr.workflow_name = 'daily_site_report'
                 ORDER BY wr.created_at DESC, wr.id DESC
                 LIMIT 1
-            ) AS site_report_workflow_status
+            ) AS site_report_workflow_status,
+            (
+                SELECT wr.detail
+                FROM workflow_runs wr
+                WHERE wr.message_id = m.message_id
+                  AND wr.workflow_name = 'daily_site_report'
+                ORDER BY wr.created_at DESC, wr.id DESC
+                LIMIT 1
+            ) AS site_report_workflow_detail
          FROM messages m
          LEFT JOIN senders s ON s.jid = m.sender_jid
          WHERE m.group_jid = $1
@@ -1806,7 +1820,15 @@ export async function listDashboardMessages(
                       AND wr.workflow_name = 'daily_site_report'
                     ORDER BY wr.created_at DESC, wr.id DESC
                     LIMIT 1
-                ) AS site_report_workflow_status
+                ) AS site_report_workflow_status,
+                (
+                    SELECT wr.detail
+                    FROM workflow_runs wr
+                    WHERE wr.message_id = m.message_id
+                      AND wr.workflow_name = 'daily_site_report'
+                    ORDER BY wr.created_at DESC, wr.id DESC
+                    LIMIT 1
+                ) AS site_report_workflow_detail
              FROM messages m
              LEFT JOIN senders s ON s.jid = m.sender_jid
              WHERE m.album_parent_id = ANY($1::text[])

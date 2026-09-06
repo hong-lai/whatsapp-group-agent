@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import {
+    useCallback,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+    type FormEvent,
+    type MouseEvent as ReactMouseEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 import { useAdminAuth } from './adminAuth'
 import AlbumView, {
@@ -64,6 +73,7 @@ type Message = {
     albumExpectedVideos?: number | null
     siteReportExtracted: boolean
     siteReportFailed: boolean
+    siteReportFailureDetail?: string | null
 }
 
 type GroupsResponse = {
@@ -1089,21 +1099,29 @@ function joinPreviewList(items: string[]): string {
     return items.length ? items.join('、') : '—'
 }
 
+function canHoverPreview(): boolean {
+    return window.matchMedia('(hover: hover) and (pointer: fine)').matches
+}
+
 function SiteReportTag({
     messageId,
     failed,
+    failureDetail,
     onOpenReports,
 }: {
     messageId: string
     failed: boolean
+    failureDetail?: string | null
     onOpenReports?: () => void
 }) {
     const triggerRef = useRef<HTMLButtonElement>(null)
     const panelRef = useRef<HTMLDivElement>(null)
     const openTimer = useRef<number | null>(null)
     const closeTimer = useRef<number | null>(null)
+    const touchUsedRef = useRef(false)
     const cacheRef = useRef<DailySiteReport | null | undefined>(undefined)
     const [open, setOpen] = useState(false)
+    const [sticky, setSticky] = useState(false)
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [report, setReport] = useState<DailySiteReport | null>(null)
@@ -1112,6 +1130,7 @@ function SiteReportTag({
         left: 0,
         place: 'below',
     })
+    const [placed, setPlaced] = useState(false)
 
     function clearTimers() {
         if (openTimer.current != null) window.clearTimeout(openTimer.current)
@@ -1124,16 +1143,23 @@ function SiteReportTag({
         const trigger = triggerRef.current
         if (!trigger) return
         const rect = trigger.getBoundingClientRect()
-        const width = Math.min(300, window.innerWidth - 24)
-        const estimatedHeight = 280
+        const panel = panelRef.current
+        const width = Math.min(failed ? 280 : 300, window.innerWidth - 24)
+        const height = panel?.offsetHeight || (failed ? 130 : 280)
         const gap = 8
-        const placeBelow = rect.bottom + gap + estimatedHeight <= window.innerHeight - 12
-        const top = placeBelow ? rect.bottom + gap : Math.max(12, rect.top - gap - estimatedHeight)
+        const margin = 12
+        const spaceBelow = window.innerHeight - rect.bottom - gap - margin
+        const spaceAbove = rect.top - gap - margin
+        const placeBelow = spaceBelow >= height || spaceBelow >= spaceAbove
+        const unclampedTop = placeBelow ? rect.bottom + gap : rect.top - gap - height
+        const maxTop = Math.max(margin, window.innerHeight - margin - height)
+        const top = Math.min(Math.max(margin, unclampedTop), maxTop)
         const left = Math.min(
-            Math.max(12, rect.left),
-            Math.max(12, window.innerWidth - width - 12)
+            Math.max(margin, rect.left),
+            Math.max(margin, window.innerWidth - width - margin)
         )
         setCoords({ top, left, place: placeBelow ? 'below' : 'above' })
+        setPlaced(true)
     }
 
     async function loadReport() {
@@ -1166,40 +1192,110 @@ function SiteReportTag({
         }
     }
 
+    function openPreviewNow(asSticky: boolean) {
+        clearTimers()
+        setPlaced(false)
+        setSticky(asSticky)
+        setOpen(true)
+        void loadReport()
+    }
+
     function showPreview() {
+        if (touchUsedRef.current || sticky || !canHoverPreview()) return
         clearTimers()
         openTimer.current = window.setTimeout(() => {
-            placePanel()
+            setPlaced(false)
+            setSticky(false)
             setOpen(true)
             void loadReport()
         }, 220)
     }
 
     function hidePreview() {
+        if (touchUsedRef.current || sticky) return
         clearTimers()
-        closeTimer.current = window.setTimeout(() => setOpen(false), 180)
+        closeTimer.current = window.setTimeout(() => {
+            setOpen(false)
+            setPlaced(false)
+        }, 180)
+    }
+
+    function closePreviewNow() {
+        clearTimers()
+        setSticky(false)
+        setOpen(false)
+        setPlaced(false)
+    }
+
+    function handleTouchStart() {
+        touchUsedRef.current = true
+        clearTimers()
+    }
+
+    function handleClick(event: ReactMouseEvent<HTMLButtonElement>) {
+        // Failed analysis: only show the reason — there is no report to open.
+        if (failed) {
+            event.preventDefault()
+            if (open) closePreviewNow()
+            else openPreviewNow(true)
+            return
+        }
+        // Touch / coarse pointer: toggle a sticky preview; don't navigate on the same tap.
+        if (touchUsedRef.current || !canHoverPreview()) {
+            event.preventDefault()
+            if (open) closePreviewNow()
+            else openPreviewNow(true)
+            return
+        }
+        // Mouse: click opens Reports; suppress any pending hover flash.
+        clearTimers()
+        setSticky(false)
+        setOpen(false)
+        onOpenReports?.()
     }
 
     useEffect(() => () => clearTimers(), [])
+
+    useLayoutEffect(() => {
+        if (!open) return
+        placePanel()
+        const panel = panelRef.current
+        if (!panel || typeof ResizeObserver === 'undefined') return undefined
+        const observer = new ResizeObserver(() => placePanel())
+        observer.observe(panel)
+        return () => observer.disconnect()
+    }, [open, failed, loading, report, error, failureDetail])
 
     useEffect(() => {
         if (!open) return undefined
         function onScrollOrResize() {
             placePanel()
         }
+        function onPointerDown(event: PointerEvent) {
+            if (!sticky) return
+            const target = event.target as Node
+            if (triggerRef.current?.contains(target) || panelRef.current?.contains(target)) return
+            closePreviewNow()
+        }
         window.addEventListener('scroll', onScrollOrResize, true)
         window.addEventListener('resize', onScrollOrResize)
+        document.addEventListener('pointerdown', onPointerDown)
         return () => {
             window.removeEventListener('scroll', onScrollOrResize, true)
             window.removeEventListener('resize', onScrollOrResize)
+            document.removeEventListener('pointerdown', onPointerDown)
         }
-    }, [open])
+    }, [open, sticky])
+
+    const reasonText = failureDetail?.trim() || '工作流程未能抽出報告。'
 
     const preview = open
         ? createPortal(
               <div
                   ref={panelRef}
-                  className={`site-report-preview is-${coords.place}${failed ? ' is-failed' : ''}`}
+                  className={`site-report-preview is-${coords.place}${failed ? ' is-failed' : ''}${
+                      placed ? ' is-placed' : ''
+                  }`}
                   style={{ top: coords.top, left: coords.left }}
                   role="tooltip"
                   onMouseEnter={showPreview}
@@ -1211,9 +1307,7 @@ function SiteReportTag({
                               <strong>工地報告</strong>
                               <span className="site-report-preview-pill is-bad">分析失敗</span>
                           </header>
-                          <p className="site-report-preview-note">
-                              工作流程未能抽出報告。點擊標籤開啟 Reports 查看詳情。
-                          </p>
+                          <p className="site-report-preview-reason">{reasonText}</p>
                       </>
                   ) : loading ? (
                       <div className="site-report-preview-loading" aria-busy="true">
@@ -1284,7 +1378,7 @@ function SiteReportTag({
                                       {joinPreviewList(report.workScopes)}
                                   </dd>
                               </div>
-                              <div className="is-wide">
+                              <div>
                                   <dt>開工人數</dt>
                                   <dd
                                       className={
@@ -1295,6 +1389,12 @@ function SiteReportTag({
                                       }
                                   >
                                       {report.numWorkers ?? '—'}
+                                  </dd>
+                              </div>
+                              <div className="is-wide">
+                                  <dt>工人</dt>
+                                  <dd className={report.workers.length === 0 ? 'is-warn' : undefined}>
+                                      {joinPreviewList(report.workers)}
                                   </dd>
                               </div>
                           </dl>
@@ -1328,7 +1428,20 @@ function SiteReportTag({
                           {report.remarks?.trim() && (
                               <p className="site-report-preview-remarks">{report.remarks.trim()}</p>
                           )}
-                          <footer className="site-report-preview-foot">點擊標籤開啟完整報告</footer>
+                          {sticky ? (
+                              <button
+                                  type="button"
+                                  className="site-report-preview-open"
+                                  onClick={() => {
+                                      closePreviewNow()
+                                      onOpenReports?.()
+                                  }}
+                              >
+                                  開啟完整報告
+                              </button>
+                          ) : (
+                              <footer className="site-report-preview-foot">點擊標籤開啟完整報告</footer>
+                          )}
                       </>
                   )}
               </div>,
@@ -1344,14 +1457,18 @@ function SiteReportTag({
                 className={`site-report-label${failed ? ' is-failed' : ''}`}
                 aria-expanded={open}
                 aria-haspopup="true"
+                title={failed ? reasonText : undefined}
+                onTouchStart={handleTouchStart}
                 onMouseEnter={showPreview}
                 onMouseLeave={hidePreview}
-                onFocus={showPreview}
+                onFocus={() => {
+                    if (!touchUsedRef.current && canHoverPreview()) showPreview()
+                }}
                 onBlur={(event) => {
                     if (panelRef.current?.contains(event.relatedTarget as Node)) return
-                    hidePreview()
+                    if (!touchUsedRef.current && !sticky) hidePreview()
                 }}
-                onClick={() => onOpenReports?.()}
+                onClick={handleClick}
             >
                 {failed ? (
                     '分析失敗'
@@ -1413,6 +1530,7 @@ function MessageCard({
                             <SiteReportTag
                                 messageId={message.messageId}
                                 failed={message.siteReportFailed}
+                                failureDetail={message.siteReportFailureDetail}
                                 onOpenReports={onOpenReports}
                             />
                         )}
