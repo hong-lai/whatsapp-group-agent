@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     concurrency: int = 1
 
+    # When the LLM HTTP server is down, keep retrying site-report jobs until it recovers.
+    llm_retry_min_ms: int = 5_000
+    llm_retry_max_ms: int = 60_000
+
     def enabled_workflow_names(self) -> set[str]:
         return {
             name.strip()

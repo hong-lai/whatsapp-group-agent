@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from bullmq import Worker
 
 from .config import settings
 from .db import get_message, record_workflow_run
+from .llm_errors import is_llm_unavailable
 from .registry import available_workflow_names, load_enabled_workflows
 
 logging.basicConfig(
@@ -16,6 +17,59 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 log = logging.getLogger("agent_workflows")
+
+
+def _llm_retry_delay_ms(failed_attempt: int) -> int:
+    min_ms = max(1, settings.llm_retry_min_ms)
+    max_ms = max(min_ms, settings.llm_retry_max_ms)
+    shift = max(0, failed_attempt - 1)
+    return min(max_ms, min_ms * (2**shift))
+
+
+async def _run_with_llm_retry(
+    *,
+    workflow_name: str,
+    message_id: str,
+    event: str,
+    run: Callable[[], Awaitable[str]],
+) -> str:
+    """Retry indefinitely while the LLM server is unreachable; fail fast otherwise."""
+    llm_attempt = 0
+    last_recorded_at = 0.0
+    record_every_s = 5 * 60
+    while True:
+        try:
+            return await run()
+        except Exception as exc:
+            if not is_llm_unavailable(exc):
+                raise
+            llm_attempt += 1
+            delay_ms = _llm_retry_delay_ms(llm_attempt)
+            now = asyncio.get_running_loop().time()
+            should_record = llm_attempt == 1 or (now - last_recorded_at) >= record_every_s
+            log.warning(
+                "workflow.llm_unavailable name=%s event=%s message_id=%s attempt=%s delay_ms=%s err=%s",
+                workflow_name,
+                event,
+                message_id,
+                llm_attempt,
+                delay_ms,
+                exc,
+            )
+            if should_record:
+                detail = (
+                    f"LLM unavailable (attempt {llm_attempt}); "
+                    f"retrying in {delay_ms}ms; {exc}"
+                )[:2000]
+                record_workflow_run(
+                    workflow_name=workflow_name,
+                    message_id=message_id,
+                    event=event,
+                    status="retrying",
+                    detail=detail,
+                )
+                last_recorded_at = now
+            await asyncio.sleep(delay_ms / 1000)
 
 
 async def run_worker() -> None:
@@ -49,7 +103,12 @@ async def run_worker() -> None:
             if not workflow.matches(data, message):
                 continue
             try:
-                status = await workflow.handle(data, message)
+                status = await _run_with_llm_retry(
+                    workflow_name=workflow.name,
+                    message_id=message_id,
+                    event=event,
+                    run=lambda w=workflow: w.handle(data, message),
+                )
                 results[workflow.name] = status
                 log.info(
                     "workflow.done name=%s event=%s message_id=%s status=%s",

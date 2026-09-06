@@ -23,8 +23,10 @@ function getQueue(): Queue<MessageEventJob> {
             defaultJobOptions: {
                 removeOnComplete: 1000,
                 removeOnFail: 5000,
-                attempts: 3,
-                backoff: { type: 'exponential', delay: 5000 },
+                // High so site-report jobs survive worker restarts while the LLM is down;
+                // the Python worker also retries LLM outages in-process until success.
+                attempts: 100,
+                backoff: { type: 'exponential', delay: 10_000 },
             },
         })
     }

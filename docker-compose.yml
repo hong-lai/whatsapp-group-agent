@@ -101,6 +101,8 @@ services:
       LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0}
       LLM_ENABLE_THINKING: ${LLM_ENABLE_THINKING:-true}
+      LLM_RETRY_MIN_MS: ${LLM_RETRY_MIN_MS:-5000}
+      LLM_RETRY_MAX_MS: ${LLM_RETRY_MAX_MS:-60000}
       DAILY_SITE_REPORT_PROMPTS_DIR: /app/private/daily_site_report
       CONCURRENCY: ${WORKFLOWS_CONCURRENCY:-1}
     volumes:
