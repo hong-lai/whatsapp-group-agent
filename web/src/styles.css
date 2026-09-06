@@ -3453,11 +3453,21 @@ h3 {
     text-align: center;
 }
 
-.album-file-card a {
+.album-file-card .file-download {
     margin-top: 7px;
+    padding: 0;
+    border: 0;
     color: var(--green-dark);
+    background: none;
+    font: inherit;
     font-size: 0.65rem;
+    cursor: pointer;
     text-decoration: none;
+}
+
+.album-file-card .file-download:disabled {
+    cursor: wait;
+    opacity: 0.72;
 }
 
 .file-glyph {
@@ -6547,7 +6557,7 @@ button.document-link {
     }
 
     .lightbox-info button,
-    .lightbox-info a.download-button {
+    .lightbox-info .download-button {
         margin-top: 12px;
     }
 }

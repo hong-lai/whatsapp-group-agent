@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
+import { DownloadButton, DownloadIcon, saveBlob } from './downloadFile'
 import {
     mergeFirstPage,
     useInfiniteScroll,
@@ -316,16 +317,6 @@ export function ToolbarIcon({
     )
 }
 
-function DownloadIcon() {
-    return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 4v12" />
-            <path d="m7 11 5 5 5-5" />
-            <path d="M5 20h14" />
-        </svg>
-    )
-}
-
 function LightboxPreview({ item }: { item: AlbumItem }) {
     if (item.category === 'video') {
         return (
@@ -371,16 +362,7 @@ function LightboxPreview({ item }: { item: AlbumItem }) {
             <span className="file-glyph">{fileExtensionLabel(item.fileName)}</span>
             <strong>{item.fileName || 'Shared document'}</strong>
             <p>This file can't be previewed here.</p>
-            <a
-                href={item.mediaUrl}
-                target="_blank"
-                rel="nofollow noreferrer noopener"
-                download={item.fileName || undefined}
-                className="download-button"
-            >
-                <DownloadIcon />
-                Download
-            </a>
+            <DownloadButton url={item.mediaUrl} fileName={item.fileName} />
         </div>
     )
 }
@@ -447,14 +429,13 @@ function MediaTile({
                         <audio src={item.mediaUrl} controls preload="none" />
                     )}
                     {item.category === 'document' && (
-                        <a
-                            href={item.mediaUrl}
-                            target="_blank"
-                            rel="nofollow noreferrer noopener"
-                            download={item.fileName || undefined}
+                        <DownloadButton
+                            url={item.mediaUrl}
+                            fileName={item.fileName}
+                            className="file-download"
                         >
-                            Download ↗
-                        </a>
+                            Download
+                        </DownloadButton>
                     )}
                 </div>
             )}
@@ -716,14 +697,7 @@ export default function AlbumView({
             const filename =
                 /filename="([^"]+)"/.exec(disposition)?.[1] ||
                 `whatsapp-media_${from}_to_${to}.zip`
-            const objectUrl = URL.createObjectURL(blob)
-            const anchor = document.createElement('a')
-            anchor.href = objectUrl
-            anchor.download = filename
-            document.body.appendChild(anchor)
-            anchor.click()
-            anchor.remove()
-            URL.revokeObjectURL(objectUrl)
+            saveBlob(blob, filename)
         } catch (reason) {
             setError(reason instanceof Error ? reason.message : 'Could not download media')
         } finally {
@@ -1040,16 +1014,7 @@ export default function AlbumView({
                                 )}
                                 {selected.has(lightbox.messageId) ? 'Added' : 'Add'}
                             </button>
-                            <a
-                                href={lightbox.mediaUrl}
-                                target="_blank"
-                                rel="nofollow noreferrer noopener"
-                                download={lightbox.fileName || undefined}
-                                className="download-button"
-                            >
-                                <DownloadIcon />
-                                Download
-                            </a>
+                            <DownloadButton url={lightbox.mediaUrl} fileName={lightbox.fileName} />
                         </div>
                     </div>
                 </div>,

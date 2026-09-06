@@ -23,6 +23,7 @@ import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
 import FilterSheet from './FilterSheet'
 import InstallApp from './InstallApp'
+import { DownloadButton } from './downloadFile'
 import {
     mergeFirstPage,
     useInfiniteScroll,
@@ -653,16 +654,6 @@ function MediaMissing() {
     )
 }
 
-function DownloadIcon() {
-    return (
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 4v12" />
-            <path d="m7 11 5 5 5-5" />
-            <path d="M5 20h14" />
-        </svg>
-    )
-}
-
 function LightboxStage({ item }: { item: Message }) {
     const url = mediaUrl(item.messageId)
     if (isAlbumVideo(item)) {
@@ -709,16 +700,7 @@ function LightboxStage({ item }: { item: Message }) {
             <span className="file-glyph">{fileExtensionLabel(item.fileName, 'FILE')}</span>
             <strong>{item.fileName || 'Shared document'}</strong>
             <p>This file can't be previewed here.</p>
-            <a
-                href={url}
-                target="_blank"
-                rel="nofollow noreferrer noopener"
-                download={item.fileName || undefined}
-                className="download-button"
-            >
-                <DownloadIcon />
-                Download
-            </a>
+            <DownloadButton url={url} fileName={item.fileName} />
         </div>
     )
 }
@@ -838,16 +820,7 @@ function MediaLightbox({
                 )}
                 {item.textContent && <p className="lightbox-copy">{item.textContent}</p>}
                 {item.fileName && <span className="lightbox-meta">{item.fileName}</span>}
-                <a
-                    href={url}
-                    target="_blank"
-                    rel="nofollow noreferrer noopener"
-                    download={item.fileName || undefined}
-                    className="download-button"
-                >
-                    <DownloadIcon />
-                    Download
-                </a>
+                <DownloadButton url={url} fileName={item.fileName} />
             </div>
         </div>,
         document.body
