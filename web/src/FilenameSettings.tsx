@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { adminHeaders, useAdminAuth } from './adminAuth'
 
 export const FILENAME_MEDIA_TYPES = [
     'images',
@@ -150,13 +151,6 @@ async function readJson<T>(response: Response): Promise<T> {
     return body
 }
 
-function adminHeaders(password: string, json = false): HeadersInit {
-    return {
-        'X-Admin-Password': password,
-        ...(json ? { 'Content-Type': 'application/json' } : {}),
-    }
-}
-
 export default function FilenameSettings({
     open,
     onClose,
@@ -164,15 +158,13 @@ export default function FilenameSettings({
     open: boolean
     onClose: () => void
 }) {
+    const { adminPassword, logout } = useAdminAuth()
     const [settings, setSettings] = useState<FilenameFormatSettings | null>(null)
     const [selectedType, setSelectedType] = useState<FilenameMediaType>('images')
-    const [typedPassword, setTypedPassword] = useState('')
-    const [adminPassword, setAdminPassword] = useState<string | null>(null)
     const [loading, setLoading] = useState(false)
     const [saving, setSaving] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [saved, setSaved] = useState(false)
-    const unlocked = Boolean(adminPassword)
 
     useEffect(() => {
         if (!open || !adminPassword) return
@@ -181,14 +173,20 @@ export default function FilenameSettings({
         setError(null)
         setSaved(false)
         void fetch('/api/settings/filename-format', { headers: adminHeaders(adminPassword) })
-            .then((response) => readJson<FilenameFormatSettings>(response))
+            .then(async (response) => {
+                if (response.status === 401) {
+                    logout()
+                    onClose()
+                    throw new Error('Invalid password')
+                }
+                return readJson<FilenameFormatSettings>(response)
+            })
             .then((data) => {
                 if (cancelled) return
                 setSettings(data)
             })
             .catch((err: unknown) => {
                 if (cancelled) return
-                setAdminPassword(null)
                 setError(err instanceof Error ? err.message : 'Failed to load settings')
             })
             .finally(() => {
@@ -197,7 +195,7 @@ export default function FilenameSettings({
         return () => {
             cancelled = true
         }
-    }, [open, adminPassword])
+    }, [open, adminPassword, logout, onClose])
 
     useEffect(() => {
         if (!open) return
@@ -246,44 +244,32 @@ export default function FilenameSettings({
         setSaved(false)
     }
 
-    function unlock(event: FormEvent) {
-        event.preventDefault()
-        const password = typedPassword.trim()
-        if (!password) {
-            setError('Enter the admin password')
-            return
-        }
-        setError(null)
-        setAdminPassword(password)
-    }
-
     async function save() {
         if (!settings || !adminPassword) return
         setSaving(true)
         setError(null)
         try {
-            const savedSettings = await readJson<FilenameFormatSettings>(
-                await fetch('/api/settings/filename-format', {
-                    method: 'PUT',
-                    headers: adminHeaders(adminPassword, true),
-                    body: JSON.stringify(settings),
-                })
-            )
+            const response = await fetch('/api/settings/filename-format', {
+                method: 'PUT',
+                headers: adminHeaders(adminPassword, true),
+                body: JSON.stringify(settings),
+            })
+            if (response.status === 401) {
+                logout()
+                onClose()
+                throw new Error('Invalid password')
+            }
+            const savedSettings = await readJson<FilenameFormatSettings>(response)
             setSettings(savedSettings)
             setSaved(true)
         } catch (err: unknown) {
-            const message = err instanceof Error ? err.message : 'Failed to save settings'
-            if (message === 'Invalid password') {
-                setAdminPassword(null)
-                setSettings(null)
-            }
-            setError(message)
+            setError(err instanceof Error ? err.message : 'Failed to save settings')
         } finally {
             setSaving(false)
         }
     }
 
-    if (!open) return null
+    if (!open || !adminPassword) return null
 
     return (
         <div className="settings-overlay" role="presentation" onClick={onClose}>
@@ -297,11 +283,7 @@ export default function FilenameSettings({
                 <header className="settings-header">
                     <div>
                         <h2 id="filename-settings-title">Filename format</h2>
-                        <p>
-                            {unlocked
-                                ? 'Applies only to incoming media. Existing files keep their current names.'
-                                : 'Enter the admin password to change how incoming files are named.'}
-                        </p>
+                        <p>Applies only to incoming media. Existing files keep their current names.</p>
                     </div>
                     <button type="button" className="settings-close" onClick={onClose} aria-label="Close">
                         ×
@@ -310,30 +292,9 @@ export default function FilenameSettings({
 
                 {error && <p className="settings-error">{error}</p>}
 
-                {!unlocked && (
-                    <form className="settings-unlock" onSubmit={unlock}>
-                        <label className="settings-regex">
-                            <span>Password</span>
-                            <input
-                                type="password"
-                                name="admin-password"
-                                autoComplete="current-password"
-                                autoFocus
-                                value={typedPassword}
-                                onChange={(event) => setTypedPassword(event.target.value)}
-                            />
-                        </label>
-                        <footer className="settings-actions">
-                            <button type="submit" className="settings-save" disabled={loading}>
-                                {loading ? 'Checking…' : 'Continue'}
-                            </button>
-                        </footer>
-                    </form>
-                )}
+                {(loading || !settings) && <p className="settings-status">Loading…</p>}
 
-                {unlocked && !settings && <p className="settings-status">Loading…</p>}
-
-                {unlocked && settings && pattern && (
+                {settings && pattern && (
                     <>
                         <div className="settings-types" role="tablist" aria-label="File type">
                             {FILENAME_MEDIA_TYPES.map((type) => (

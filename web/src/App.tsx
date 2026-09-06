@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { createPortal } from 'react-dom'
+import { useAdminAuth } from './adminAuth'
 import AlbumView, {
     allMediaCategories,
     emptyCounts,
@@ -190,6 +191,9 @@ function Icon({
         | 'filter'
         | 'more'
         | 'report'
+        | 'lock'
+        | 'shield'
+        | 'logout'
 }) {
     const paths = {
         archive: (
@@ -254,6 +258,24 @@ function Icon({
             <>
                 <path d="M7 4h10v16H7z" />
                 <path d="M9 8h6M9 12h6M9 16h4" />
+            </>
+        ),
+        lock: (
+            <>
+                <rect x="5" y="11" width="14" height="10" rx="2" />
+                <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+            </>
+        ),
+        shield: (
+            <>
+                <path d="M12 3 5 6v6c0 4.2 2.8 7.4 7 8.5 4.2-1.1 7-4.3 7-8.5V6z" />
+                <path d="m9.5 12 1.8 1.8 3.7-3.8" />
+            </>
+        ),
+        logout: (
+            <>
+                <path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4" />
+                <path d="M15 16l4-4-4-4M19 12H9" />
             </>
         ),
     }
@@ -1455,6 +1477,8 @@ function SkeletonMessages() {
 }
 
 export default function App() {
+    const { role, login, logout } = useAdminAuth()
+    const isAdmin = role === 'admin'
     const initialParams = new URLSearchParams(window.location.search)
     const today = hongKongDate()
     const [from, setFrom] = useState(initialParams.get('from') || today)
@@ -1503,6 +1527,10 @@ export default function App() {
     const [connectionEvents, setConnectionEvents] = useState<AgentConnectionEvent[]>([])
     const [linkDown, setLinkDown] = useState(typeof navigator !== 'undefined' && !navigator.onLine)
     const [settingsOpen, setSettingsOpen] = useState(false)
+    const [adminLoginOpen, setAdminLoginOpen] = useState(false)
+    const [adminLoginPassword, setAdminLoginPassword] = useState('')
+    const [adminLoginError, setAdminLoginError] = useState<string | null>(null)
+    const [adminLoginBusy, setAdminLoginBusy] = useState(false)
     const [drawerOpen, setDrawerOpen] = useState(false)
     const [filterOpen, setFilterOpen] = useState(false)
     const [overflowOpen, setOverflowOpen] = useState(false)
@@ -2189,15 +2217,51 @@ export default function App() {
                                 <Icon name="sortDesc" />
                             </button>
                         </div>
-                        <button
-                            type="button"
-                            className="settings-toggle"
-                            aria-label="Filename format settings"
-                            title="Filename format"
-                            onClick={() => setSettingsOpen(true)}
-                        >
-                            <Icon name="settings" />
-                        </button>
+                        {isAdmin && (
+                            <button
+                                type="button"
+                                className="settings-toggle"
+                                aria-label="Filename format settings"
+                                title="Filename format"
+                                onClick={() => setSettingsOpen(true)}
+                            >
+                                <Icon name="settings" />
+                            </button>
+                        )}
+                        {isAdmin ? (
+                            <div className="admin-session" title="Signed in as admin">
+                                <span className="admin-session-badge">
+                                    <Icon name="shield" />
+                                    Admin
+                                </span>
+                                <button
+                                    type="button"
+                                    className="settings-toggle admin-logout-btn"
+                                    aria-label="Sign out of admin"
+                                    title="Sign out"
+                                    onClick={() => {
+                                        setSettingsOpen(false)
+                                        logout()
+                                    }}
+                                >
+                                    <Icon name="logout" />
+                                </button>
+                            </div>
+                        ) : (
+                            <button
+                                type="button"
+                                className="settings-toggle admin-lock-btn"
+                                aria-label="Admin sign in"
+                                title="Admin"
+                                onClick={() => {
+                                    setAdminLoginPassword('')
+                                    setAdminLoginError(null)
+                                    setAdminLoginOpen(true)
+                                }}
+                            >
+                                <Icon name="lock" />
+                            </button>
+                        )}
                         <ConnectionStatus
                             state={connectionState}
                             events={connectionEvents}
@@ -2241,17 +2305,53 @@ export default function App() {
                                 >
                                     {sortOrder === 'asc' ? 'Newest first' : 'Oldest first'}
                                 </button>
-                                <button
-                                    type="button"
-                                    className="overflow-item"
-                                    role="menuitem"
-                                    onClick={() => {
-                                        setOverflowOpen(false)
-                                        setSettingsOpen(true)
-                                    }}
-                                >
-                                    Filename settings
-                                </button>
+                                <div className="overflow-role" role="presentation">
+                                    <span className={`overflow-role-badge${isAdmin ? ' is-admin' : ''}`}>
+                                        <Icon name={isAdmin ? 'shield' : 'lock'} />
+                                        {isAdmin ? 'Admin' : 'Guest'}
+                                    </span>
+                                </div>
+                                {isAdmin && (
+                                    <button
+                                        type="button"
+                                        className="overflow-item"
+                                        role="menuitem"
+                                        onClick={() => {
+                                            setOverflowOpen(false)
+                                            setSettingsOpen(true)
+                                        }}
+                                    >
+                                        Filename settings
+                                    </button>
+                                )}
+                                {isAdmin ? (
+                                    <button
+                                        type="button"
+                                        className="overflow-item overflow-item-danger"
+                                        role="menuitem"
+                                        onClick={() => {
+                                            setOverflowOpen(false)
+                                            setSettingsOpen(false)
+                                            logout()
+                                        }}
+                                    >
+                                        Sign out
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        className="overflow-item"
+                                        role="menuitem"
+                                        onClick={() => {
+                                            setOverflowOpen(false)
+                                            setAdminLoginPassword('')
+                                            setAdminLoginError(null)
+                                            setAdminLoginOpen(true)
+                                        }}
+                                    >
+                                        Admin sign in
+                                    </button>
+                                )}
                                 <InstallApp variant="item" />
                                 <ConnectionStatus
                                     state={connectionState}
@@ -2592,7 +2692,108 @@ export default function App() {
                     setDrawerOpen(true)
                 }}
             />
-            <FilenameSettings open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+            <FilenameSettings
+                open={isAdmin && settingsOpen}
+                onClose={() => setSettingsOpen(false)}
+            />
+            {adminLoginOpen &&
+                createPortal(
+                    <div
+                        className="settings-overlay"
+                        role="presentation"
+                        onClick={() => {
+                            if (!adminLoginBusy) setAdminLoginOpen(false)
+                        }}
+                    >
+                        <div
+                            className="settings-panel admin-login-panel"
+                            role="dialog"
+                            aria-modal="true"
+                            aria-labelledby="admin-login-title"
+                            aria-describedby="admin-login-desc"
+                            onClick={(event) => event.stopPropagation()}
+                        >
+                            <button
+                                type="button"
+                                className="settings-close admin-login-close"
+                                aria-label="Close"
+                                disabled={adminLoginBusy}
+                                onClick={() => setAdminLoginOpen(false)}
+                            >
+                                ×
+                            </button>
+                            <div className="admin-login-hero">
+                                <span className="admin-login-mark" aria-hidden="true">
+                                    <Icon name="lock" />
+                                </span>
+                                <h2 id="admin-login-title">Admin access</h2>
+                                <p id="admin-login-desc">
+                                    Unlock settings, report delete, and workflow tools for this tab.
+                                </p>
+                            </div>
+                            {adminLoginError && (
+                                <p className="settings-error admin-login-error" role="alert">
+                                    {adminLoginError}
+                                </p>
+                            )}
+                            <form
+                                className="admin-login-form"
+                                onSubmit={(event: FormEvent) => {
+                                    event.preventDefault()
+                                    void (async () => {
+                                        setAdminLoginBusy(true)
+                                        setAdminLoginError(null)
+                                        try {
+                                            await login(adminLoginPassword)
+                                            setAdminLoginOpen(false)
+                                            setAdminLoginPassword('')
+                                        } catch (reason) {
+                                            setAdminLoginError(
+                                                reason instanceof Error
+                                                    ? reason.message
+                                                    : 'Login failed'
+                                            )
+                                        } finally {
+                                            setAdminLoginBusy(false)
+                                        }
+                                    })()
+                                }}
+                            >
+                                <label className="admin-login-field">
+                                    <span>Password</span>
+                                    <input
+                                        type="password"
+                                        name="admin-password"
+                                        autoComplete="current-password"
+                                        autoFocus
+                                        placeholder="Enter admin password"
+                                        value={adminLoginPassword}
+                                        disabled={adminLoginBusy}
+                                        onChange={(event) => setAdminLoginPassword(event.target.value)}
+                                    />
+                                </label>
+                                <div className="admin-login-actions">
+                                    <button
+                                        type="button"
+                                        className="admin-login-cancel"
+                                        disabled={adminLoginBusy}
+                                        onClick={() => setAdminLoginOpen(false)}
+                                    >
+                                        Cancel
+                                    </button>
+                                    <button
+                                        type="submit"
+                                        className="admin-login-submit"
+                                        disabled={adminLoginBusy || !adminLoginPassword.trim()}
+                                    >
+                                        {adminLoginBusy ? 'Checking…' : 'Unlock'}
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>,
+                    document.body
+                )}
             {reportToast &&
                 createPortal(
                     <div

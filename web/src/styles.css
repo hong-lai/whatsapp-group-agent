@@ -5036,6 +5036,228 @@ button.document-link {
     height: 1.05rem;
 }
 
+.admin-session {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid #cfe4db;
+    border-radius: 999px;
+    background: linear-gradient(180deg, #f4fbf8, #e8f5ef);
+}
+
+.admin-session-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 26px;
+    padding: 0 10px 0 8px;
+    color: var(--green-dark);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+
+.admin-session-badge svg {
+    width: 0.9rem;
+    height: 0.9rem;
+}
+
+.admin-logout-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 999px;
+    color: #5f7a72;
+}
+
+.admin-logout-btn:hover {
+    color: #9a3d3d;
+    background: #f8ecec;
+}
+
+.admin-lock-btn {
+    color: #5f7a72;
+}
+
+.admin-login-panel {
+    position: relative;
+    width: min(400px, 100%);
+    padding: 28px 24px 22px;
+}
+
+.admin-login-close {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+}
+
+.admin-login-hero {
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.admin-login-mark {
+    width: 52px;
+    height: 52px;
+    display: grid;
+    place-items: center;
+    margin-bottom: 4px;
+    border-radius: 16px;
+    color: white;
+    background: linear-gradient(145deg, #21a385, #0b6d58);
+    box-shadow: 0 10px 22px rgba(13, 109, 88, 0.22);
+}
+
+.admin-login-mark svg {
+    width: 1.35rem;
+    height: 1.35rem;
+}
+
+.admin-login-hero h2 {
+    margin: 0;
+    font: 700 1.12rem var(--sans);
+    color: var(--ink);
+}
+
+.admin-login-hero p {
+    margin: 0;
+    max-width: 28ch;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
+}
+
+.admin-login-error {
+    margin: 0 0 12px;
+    text-align: center;
+}
+
+.admin-login-form {
+    display: grid;
+    gap: 14px;
+}
+
+.admin-login-field {
+    display: grid;
+    gap: 6px;
+}
+
+.admin-login-field span {
+    color: var(--muted);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+.admin-login-field input {
+    width: 100%;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    color: var(--ink);
+    background: #f7faf8;
+    font: inherit;
+    font-size: 0.92rem;
+    outline: none;
+    transition: border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out), background 160ms var(--ease-out);
+}
+
+.admin-login-field input:focus {
+    border-color: #9fcbbd;
+    background: white;
+    box-shadow: 0 0 0 3px rgba(22, 134, 111, 0.14);
+}
+
+.admin-login-field input:disabled {
+    opacity: 0.7;
+}
+
+.admin-login-actions {
+    display: grid;
+    grid-template-columns: 1fr 1.35fr;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.admin-login-cancel,
+.admin-login-submit {
+    height: 42px;
+    border-radius: 11px;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.admin-login-cancel {
+    border: 1px solid var(--line);
+    color: #4f6861;
+    background: #f7faf8;
+}
+
+.admin-login-cancel:hover:not(:disabled) {
+    background: #edf3f0;
+}
+
+.admin-login-submit {
+    border: 0;
+    color: white;
+    background: linear-gradient(145deg, #1c9a7f, #0d6655);
+    box-shadow: 0 8px 16px rgba(13, 109, 88, 0.2);
+}
+
+.admin-login-submit:hover:not(:disabled) {
+    filter: brightness(1.04);
+}
+
+.admin-login-submit:disabled,
+.admin-login-cancel:disabled {
+    opacity: 0.65;
+    cursor: default;
+}
+
+.overflow-role {
+    padding: 8px 10px 10px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid #e8efeb;
+}
+
+.overflow-role-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px 0 8px;
+    border-radius: 999px;
+    color: #5f7a72;
+    background: #eef3f0;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.overflow-role-badge svg {
+    width: 0.9rem;
+    height: 0.9rem;
+}
+
+.overflow-role-badge.is-admin {
+    color: var(--green-dark);
+    background: var(--mint);
+}
+
+.overflow-item-danger {
+    color: #9a3d3d;
+}
+
+.overflow-item-danger:hover {
+    background: #f8ecec;
+}
+
 .settings-overlay {
     display: grid;
     position: fixed;

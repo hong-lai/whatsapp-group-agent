@@ -389,6 +389,10 @@ export function createApiApp() {
         response.json(getConnectionStatus())
     })
 
+    app.post('/api/admin/verify', requireAdmin, (_request, response) => {
+        response.json({ ok: true })
+    })
+
     app.get('/api/events/report-processed', (request, response) => {
         handleReportProcessedSse(request, response)
     })

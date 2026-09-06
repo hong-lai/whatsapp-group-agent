@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { adminHeaders, useAdminAuth } from './adminAuth'
 import Drawer from './Drawer'
 import ReportMetricsCharts from './ReportMetricsCharts'
 import { useInfiniteScroll, useVisibleInterval } from './useVisibleInterval'
@@ -763,10 +764,10 @@ function ReportDeleteDialog({
     onClose: () => void
     onDeleted: (id: number) => void
 }) {
-    const [adminPassword, setAdminPassword] = useState('')
+    const { adminPassword, logout } = useAdminAuth()
     const [deleting, setDeleting] = useState(false)
     const [deleteError, setDeleteError] = useState<string | null>(null)
-    const inputRef = useRef<HTMLInputElement>(null)
+    const submitRef = useRef<HTMLButtonElement>(null)
     const deletingRef = useRef(false)
     const onCloseRef = useRef(onClose)
     deletingRef.current = deleting
@@ -774,12 +775,11 @@ function ReportDeleteDialog({
 
     useEffect(() => {
         if (!open) return undefined
-        setAdminPassword('')
         setDeleteError(null)
         setDeleting(false)
         const previous = document.body.style.overflow
         document.body.style.overflow = 'hidden'
-        const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 40)
+        const focusTimer = window.setTimeout(() => submitRef.current?.focus(), 40)
 
         function onKey(event: KeyboardEvent) {
             if (event.key === 'Escape' && !deletingRef.current) onCloseRef.current()
@@ -793,8 +793,9 @@ function ReportDeleteDialog({
     }, [open])
 
     async function handleDelete() {
-        if (!adminPassword.trim()) {
-            setDeleteError('請輸入管理員密碼')
+        if (!adminPassword) {
+            logout()
+            onClose()
             return
         }
         setDeleting(true)
@@ -802,9 +803,14 @@ function ReportDeleteDialog({
         try {
             const response = await fetch(`/api/daily-site-reports/${report.id}`, {
                 method: 'DELETE',
-                headers: { 'x-admin-password': adminPassword.trim() },
+                headers: adminHeaders(adminPassword),
             })
             const body = (await response.json()) as { error?: string }
+            if (response.status === 401) {
+                logout()
+                onClose()
+                return
+            }
             if (!response.ok) {
                 throw new Error(body.error || `Delete failed (${response.status})`)
             }
@@ -856,21 +862,6 @@ function ReportDeleteDialog({
                     此操作<strong>無法復原</strong>。報告將從資料庫永久刪除。
                 </p>
 
-                <label className="report-delete-password">
-                    <span>管理員密碼</span>
-                    <input
-                        ref={inputRef}
-                        type="password"
-                        value={adminPassword}
-                        autoComplete="current-password"
-                        disabled={deleting}
-                        onChange={(event) => setAdminPassword(event.target.value)}
-                        onKeyDown={(event) => {
-                            if (event.key === 'Enter') void handleDelete()
-                        }}
-                    />
-                </label>
-
                 {deleteError && <p className="report-delete-error">{deleteError}</p>}
 
                 <div className="report-delete-actions">
@@ -883,6 +874,7 @@ function ReportDeleteDialog({
                         取消
                     </button>
                     <button
+                        ref={submitRef}
                         type="button"
                         className="report-delete-submit"
                         disabled={deleting}
@@ -908,6 +900,8 @@ function ReportDetail({
     onReran?: () => void
     onModalOpenChange?: (open: boolean) => void
 }) {
+    const { role } = useAdminAuth()
+    const isAdmin = role === 'admin'
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [debugOpen, setDebugOpen] = useState(false)
 
@@ -973,44 +967,50 @@ function ReportDetail({
                     </div>
                 )}
             </dl>
-            <div className="report-detail-actions">
-                <button
-                    type="button"
-                    className="report-debug-trigger"
-                    onClick={() => setDebugOpen(true)}
-                >
-                    Workflow debug
-                </button>
-                <button
-                    type="button"
-                    className="report-delete-trigger"
-                    onClick={() => setDeleteOpen(true)}
-                >
-                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M4 7h16" />
-                        <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                        <path d="M10 11v6" />
-                        <path d="M14 11v6" />
-                        <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
-                    </svg>
-                    刪除報告
-                </button>
-            </div>
-            <WorkflowDebugDialog
-                open={debugOpen}
-                messageId={report.messageId}
-                onClose={() => setDebugOpen(false)}
-                onReran={onReran}
-            />
-            <ReportDeleteDialog
-                open={deleteOpen}
-                report={report}
-                onClose={() => setDeleteOpen(false)}
-                onDeleted={(id) => {
-                    setDeleteOpen(false)
-                    onDeleted(id)
-                }}
-            />
+            {isAdmin && (
+                <div className="report-detail-actions">
+                    <button
+                        type="button"
+                        className="report-debug-trigger"
+                        onClick={() => setDebugOpen(true)}
+                    >
+                        Workflow debug
+                    </button>
+                    <button
+                        type="button"
+                        className="report-delete-trigger"
+                        onClick={() => setDeleteOpen(true)}
+                    >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 7h16" />
+                            <path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                            <path d="M10 11v6" />
+                            <path d="M14 11v6" />
+                            <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+                        </svg>
+                        刪除報告
+                    </button>
+                </div>
+            )}
+            {isAdmin && (
+                <>
+                    <WorkflowDebugDialog
+                        open={debugOpen}
+                        messageId={report.messageId}
+                        onClose={() => setDebugOpen(false)}
+                        onReran={onReran}
+                    />
+                    <ReportDeleteDialog
+                        open={deleteOpen}
+                        report={report}
+                        onClose={() => setDeleteOpen(false)}
+                        onDeleted={(id) => {
+                            setDeleteOpen(false)
+                            onDeleted(id)
+                        }}
+                    />
+                </>
+            )}
         </>
     )
 }
@@ -1063,11 +1063,10 @@ function WorkflowDebugDialog({
     onClose: () => void
     onReran?: () => void
 }) {
+    const { adminPassword, logout } = useAdminAuth()
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [data, setData] = useState<WorkflowDebugResponse | null>(null)
-    const [adminPassword, setAdminPassword] = useState('')
-    const [unlocked, setUnlocked] = useState(false)
     const [llmModel, setLlmModel] = useState('')
     const [classifierPrompt, setClassifierPrompt] = useState('')
     const [extractorPrompt, setExtractorPrompt] = useState('')
@@ -1075,14 +1074,15 @@ function WorkflowDebugDialog({
     const [baselineExtractor, setBaselineExtractor] = useState('')
     const [rerunning, setRerunning] = useState(false)
     const [rerunNote, setRerunNote] = useState<string | null>(null)
-    const inputRef = useRef<HTMLInputElement>(null)
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const busyRef = useRef(false)
     const promptsReadyRef = useRef(false)
     const onCloseRef = useRef(onClose)
     const onReranRef = useRef(onReran)
+    const logoutRef = useRef(logout)
     onCloseRef.current = onClose
     onReranRef.current = onReran
+    logoutRef.current = logout
 
     useEffect(() => {
         busyRef.current = loading || rerunning
@@ -1097,19 +1097,16 @@ function WorkflowDebugDialog({
             setError(null)
             setRerunNote(null)
             setData(null)
-            setUnlocked(false)
             setLlmModel('')
             setClassifierPrompt('')
             setExtractorPrompt('')
             setBaselineClassifier('')
             setBaselineExtractor('')
-            setAdminPassword('')
             promptsReadyRef.current = false
             return
         }
         const previous = document.body.style.overflow
         document.body.style.overflow = 'hidden'
-        const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 40)
 
         function onKey(event: KeyboardEvent) {
             if (event.key === 'Escape' && !busyRef.current) onCloseRef.current()
@@ -1118,7 +1115,6 @@ function WorkflowDebugDialog({
         return () => {
             document.body.style.overflow = previous
             window.removeEventListener('keydown', onKey)
-            window.clearTimeout(focusTimer)
         }
     }, [open])
 
@@ -1128,51 +1124,54 @@ function WorkflowDebugDialog({
         }
     }, [])
 
-    async function loadDebug(password: string) {
-        setLoading(true)
-        setError(null)
-        try {
-            const response = await fetch(
-                `/api/debug/workflows?messageId=${encodeURIComponent(messageId)}&limit=12`,
-                { headers: { 'x-admin-password': password } }
-            )
-            const body = (await response.json()) as WorkflowDebugResponse & { error?: string }
-            if (!response.ok) {
-                throw new Error(body.error || `Request failed (${response.status})`)
+    const loadDebug = useCallback(
+        async (password: string) => {
+            setLoading(true)
+            setError(null)
+            try {
+                const response = await fetch(
+                    `/api/debug/workflows?messageId=${encodeURIComponent(messageId)}&limit=12`,
+                    { headers: adminHeaders(password) }
+                )
+                const body = (await response.json()) as WorkflowDebugResponse & { error?: string }
+                if (response.status === 401) {
+                    logoutRef.current()
+                    onCloseRef.current()
+                    return
+                }
+                if (!response.ok) {
+                    throw new Error(body.error || `Request failed (${response.status})`)
+                }
+                setData(body)
+                setLlmModel((current) => current || body.defaultModel)
+                const nextClassifier = body.prompts.classifierPrompt ?? ''
+                const nextExtractor = body.prompts.extractorPrompt ?? ''
+                setBaselineClassifier(nextClassifier)
+                setBaselineExtractor(nextExtractor)
+                if (!promptsReadyRef.current) {
+                    setClassifierPrompt(nextClassifier)
+                    setExtractorPrompt(nextExtractor)
+                    promptsReadyRef.current = true
+                }
+            } catch (reason) {
+                setError(reason instanceof Error ? reason.message : 'Could not load workflow debug')
+                setData(null)
+            } finally {
+                setLoading(false)
             }
-            setData(body)
-            setUnlocked(true)
-            setLlmModel((current) => current || body.defaultModel)
-            const nextClassifier = body.prompts.classifierPrompt ?? ''
-            const nextExtractor = body.prompts.extractorPrompt ?? ''
-            setBaselineClassifier(nextClassifier)
-            setBaselineExtractor(nextExtractor)
-            if (!promptsReadyRef.current) {
-                setClassifierPrompt(nextClassifier)
-                setExtractorPrompt(nextExtractor)
-                promptsReadyRef.current = true
-            }
-        } catch (reason) {
-            setError(reason instanceof Error ? reason.message : 'Could not load workflow debug')
-            setData(null)
-            setUnlocked(false)
-        } finally {
-            setLoading(false)
-        }
-    }
+        },
+        [messageId]
+    )
 
-    async function handleUnlock(formEvent: { preventDefault(): void }) {
-        formEvent.preventDefault()
-        if (!adminPassword.trim()) {
-            setError('Enter admin password')
-            return
-        }
-        await loadDebug(adminPassword.trim())
-    }
+    useEffect(() => {
+        if (!open || !adminPassword) return
+        void loadDebug(adminPassword)
+    }, [open, adminPassword, loadDebug])
 
     async function handleRerun() {
-        if (!adminPassword.trim()) {
-            setError('Enter admin password')
+        if (!adminPassword) {
+            logout()
+            onClose()
             return
         }
         if (!llmModel.trim()) {
@@ -1186,14 +1185,11 @@ function WorkflowDebugDialog({
         setRerunning(true)
         setError(null)
         setRerunNote(null)
-        const password = adminPassword.trim()
+        const password = adminPassword
         try {
             const response = await fetch('/api/debug/workflows/reenqueue', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-admin-password': password,
-                },
+                headers: adminHeaders(password, true),
                 body: JSON.stringify({
                     messageId,
                     llmModel: llmModel.trim(),
@@ -1204,6 +1200,11 @@ function WorkflowDebugDialog({
             const body = (await response.json()) as {
                 error?: string
                 llmModel?: string
+            }
+            if (response.status === 401) {
+                logout()
+                onClose()
+                return
             }
             if (!response.ok) {
                 throw new Error(body.error || `Re-enqueue failed (${response.status})`)
@@ -1271,39 +1272,12 @@ function WorkflowDebugDialog({
                     </button>
                 </header>
 
-                {!unlocked ? (
-                    <form className="workflow-debug-unlock" onSubmit={handleUnlock}>
-                        <label className="workflow-debug-password">
-                            <span>Admin password</span>
-                            <input
-                                ref={inputRef}
-                                type="password"
-                                value={adminPassword}
-                                autoComplete="current-password"
-                                disabled={loading}
-                                onChange={(change) => setAdminPassword(change.target.value)}
-                            />
-                        </label>
-                        {error && <p className="workflow-debug-error">{error}</p>}
-                        <div className="workflow-debug-dialog-actions">
-                            <button
-                                type="button"
-                                className="workflow-debug-cancel"
-                                disabled={loading}
-                                onClick={() => onCloseRef.current()}
-                            >
-                                Cancel
-                            </button>
-                            <button type="submit" className="workflow-debug-submit" disabled={loading}>
-                                {loading ? 'Loading…' : 'Unlock'}
-                            </button>
-                        </div>
-                    </form>
-                ) : (
-                    <>
-                        {error && <p className="workflow-debug-error">{error}</p>}
-                        {rerunNote && <p className="workflow-debug-note">{rerunNote}</p>}
+                {error && <p className="workflow-debug-error">{error}</p>}
+                {rerunNote && <p className="workflow-debug-note">{rerunNote}</p>}
+                {loading && !data && <p className="workflow-debug-note">Loading…</p>}
 
+                {data && (
+                    <>
                         {message && (
                             <dl className="workflow-debug-meta">
                                 <div>
@@ -1354,11 +1328,11 @@ function WorkflowDebugDialog({
                                 <div>
                                     <dt>config</dt>
                                     <dd>
-                                        workflows={data?.workflowsEnabled ? 'on' : 'off'}
+                                        workflows={data.workflowsEnabled ? 'on' : 'off'}
                                         {' · '}
-                                        history={data?.workflowsProcessHistory ? 'on' : 'off'}
+                                        history={data.workflowsProcessHistory ? 'on' : 'off'}
                                         {' · '}
-                                        reportId={data?.snapshot.reportId ?? '—'}
+                                        reportId={data.snapshot.reportId ?? '—'}
                                     </dd>
                                 </div>
                             </dl>
@@ -1375,7 +1349,7 @@ function WorkflowDebugDialog({
                                 list="workflow-debug-model-options"
                                 value={llmModel}
                                 disabled={rerunning}
-                                placeholder={data?.defaultModel || 'model id'}
+                                placeholder={data.defaultModel || 'model id'}
                                 onChange={(change) => setLlmModel(change.target.value)}
                             />
                             <datalist id="workflow-debug-model-options">
@@ -1408,7 +1382,7 @@ function WorkflowDebugDialog({
                             {!baselineClassifier && !baselineExtractor && (
                                 <p className="workflow-debug-muted">
                                     Prompt files not found
-                                    {data?.prompts.promptsDir
+                                    {data.prompts.promptsDir
                                         ? ` (${data.prompts.promptsDir})`
                                         : ''}
                                     . You can still paste prompts and rerun.
@@ -1442,8 +1416,8 @@ function WorkflowDebugDialog({
                                 <button
                                     type="button"
                                     className="workflow-debug-refresh"
-                                    disabled={loading || rerunning}
-                                    onClick={() => void loadDebug(adminPassword.trim())}
+                                    disabled={loading || rerunning || !adminPassword}
+                                    onClick={() => void loadDebug(adminPassword!)}
                                 >
                                     {loading ? 'Refreshing…' : 'Refresh'}
                                 </button>
@@ -1485,7 +1459,7 @@ function WorkflowDebugDialog({
                             <button
                                 type="button"
                                 className="workflow-debug-submit"
-                                disabled={rerunning || !data?.workflowsEnabled}
+                                disabled={rerunning || !data.workflowsEnabled}
                                 onClick={() => void handleRerun()}
                             >
                                 {rerunning ? 'Queuing…' : 'Rerun'}
@@ -1522,11 +1496,11 @@ function BulkWorkflowRerunDialog({
     onClose: () => void
     onDone?: () => void
 }) {
-    const [adminPassword, setAdminPassword] = useState('')
+    const { adminPassword, logout } = useAdminAuth()
     const [running, setRunning] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [resultNote, setResultNote] = useState<string | null>(null)
-    const inputRef = useRef<HTMLInputElement>(null)
+    const submitRef = useRef<HTMLButtonElement>(null)
     const runningRef = useRef(false)
     const onCloseRef = useRef(onClose)
     runningRef.current = running
@@ -1534,13 +1508,12 @@ function BulkWorkflowRerunDialog({
 
     useEffect(() => {
         if (!open) return undefined
-        setAdminPassword('')
         setError(null)
         setResultNote(null)
         setRunning(false)
         const previous = document.body.style.overflow
         document.body.style.overflow = 'hidden'
-        const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 40)
+        const focusTimer = window.setTimeout(() => submitRef.current?.focus(), 40)
 
         function onKey(event: KeyboardEvent) {
             if (event.key === 'Escape' && !runningRef.current) onCloseRef.current()
@@ -1554,8 +1527,9 @@ function BulkWorkflowRerunDialog({
     }, [open])
 
     async function handleRerun() {
-        if (!adminPassword.trim()) {
-            setError('Enter admin password')
+        if (!adminPassword) {
+            logout()
+            onClose()
             return
         }
         if (total < 1) {
@@ -1568,10 +1542,7 @@ function BulkWorkflowRerunDialog({
         try {
             const response = await fetch('/api/debug/workflows/reenqueue-filtered', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-admin-password': adminPassword.trim(),
-                },
+                headers: adminHeaders(adminPassword, true),
                 body: JSON.stringify({
                     from,
                     to,
@@ -1587,6 +1558,11 @@ function BulkWorkflowRerunDialog({
                 failed?: string[]
                 missing?: string[]
                 maxRows?: number
+            }
+            if (response.status === 401) {
+                logout()
+                onClose()
+                return
             }
             if (!response.ok) {
                 throw new Error(body.error || `Bulk re-enqueue failed (${response.status})`)
@@ -1662,21 +1638,6 @@ function BulkWorkflowRerunDialog({
                     </div>
                 </dl>
 
-                <label className="workflow-debug-password">
-                    <span>Admin password</span>
-                    <input
-                        ref={inputRef}
-                        type="password"
-                        value={adminPassword}
-                        autoComplete="current-password"
-                        disabled={running}
-                        onChange={(change) => setAdminPassword(change.target.value)}
-                        onKeyDown={(event) => {
-                            if (event.key === 'Enter') void handleRerun()
-                        }}
-                    />
-                </label>
-
                 {error && <p className="workflow-debug-error">{error}</p>}
                 {resultNote && <p className="workflow-debug-note">{resultNote}</p>}
 
@@ -1690,6 +1651,7 @@ function BulkWorkflowRerunDialog({
                         {resultNote ? 'Close' : 'Cancel'}
                     </button>
                     <button
+                        ref={submitRef}
                         type="button"
                         className="workflow-debug-submit"
                         disabled={running || total < 1}
@@ -1733,6 +1695,8 @@ export default function DailySiteReportView({
     onOpenGroups?: () => void
     groupsCollapsed?: boolean
 }) {
+    const { role } = useAdminAuth()
+    const isAdmin = role === 'admin'
     const [reports, setReports] = useState<DailySiteReport[]>([])
     const [nextCursor, setNextCursor] = useState<string | null>(null)
     const [total, setTotal] = useState(0)
@@ -1924,14 +1888,16 @@ export default function DailySiteReportView({
                                 </div>
                             </div>
                             <div className="reports-heading-actions">
-                                <button
-                                    type="button"
-                                    className="reports-bulk-rerun"
-                                    disabled={total < 1}
-                                    onClick={() => setBulkRerunOpen(true)}
-                                >
-                                    Rerun
-                                </button>
+                                {isAdmin && (
+                                    <button
+                                        type="button"
+                                        className="reports-bulk-rerun"
+                                        disabled={total < 1}
+                                        onClick={() => setBulkRerunOpen(true)}
+                                    >
+                                        Rerun
+                                    </button>
+                                )}
                                 <a
                                     className="reports-export"
                                     href={exportUrl(from, to, groupJid, query, dateField, sort)}
@@ -2136,7 +2102,7 @@ export default function DailySiteReportView({
                 )}
             </Drawer>
             <BulkWorkflowRerunDialog
-                open={bulkRerunOpen}
+                open={isAdmin && bulkRerunOpen}
                 total={total}
                 from={from}
                 to={to}
