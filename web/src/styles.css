@@ -5113,6 +5113,17 @@ button.document-link {
     color: #5f7a72;
 }
 
+.admin-mobile-btn.is-admin {
+    color: var(--green-dark);
+    background: var(--mint);
+}
+
+.admin-mobile-btn.is-admin:hover,
+.admin-mobile-btn.is-admin:active {
+    color: var(--green-dark);
+    background: #c7e8dc;
+}
+
 .admin-login-panel {
     position: relative;
     width: min(400px, 100%);
@@ -5253,43 +5264,6 @@ button.document-link {
 .admin-login-cancel:disabled {
     opacity: 0.65;
     cursor: default;
-}
-
-.overflow-role {
-    padding: 8px 10px 10px;
-    margin-bottom: 2px;
-    border-bottom: 1px solid #e8efeb;
-}
-
-.overflow-role-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 28px;
-    padding: 0 10px 0 8px;
-    border-radius: 999px;
-    color: #5f7a72;
-    background: #eef3f0;
-    font-size: 0.72rem;
-    font-weight: 700;
-}
-
-.overflow-role-badge svg {
-    width: 0.9rem;
-    height: 0.9rem;
-}
-
-.overflow-role-badge.is-admin {
-    color: var(--green-dark);
-    background: var(--mint);
-}
-
-.overflow-item-danger {
-    color: #9a3d3d;
-}
-
-.overflow-item-danger:hover {
-    background: #f8ecec;
 }
 
 .settings-overlay {

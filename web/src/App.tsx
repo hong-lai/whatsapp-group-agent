@@ -2399,6 +2399,36 @@ export default function App() {
                         <Icon name="filter" />
                         {activeFilterCount > 0 && <span className="filter-badge">{activeFilterCount}</span>}
                     </button>
+                    {isAdmin ? (
+                        <button
+                            type="button"
+                            className="icon-btn mobile-only admin-mobile-btn is-admin"
+                            aria-label="Sign out of admin"
+                            title="Admin · Sign out"
+                            onClick={() => {
+                                setOverflowOpen(false)
+                                setSettingsOpen(false)
+                                logout()
+                            }}
+                        >
+                            <Icon name="logout" />
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            className="icon-btn mobile-only admin-mobile-btn"
+                            aria-label="Admin sign in"
+                            title="Admin"
+                            onClick={() => {
+                                setOverflowOpen(false)
+                                setAdminLoginPassword('')
+                                setAdminLoginError(null)
+                                setAdminLoginOpen(true)
+                            }}
+                        >
+                            <Icon name="lock" />
+                        </button>
+                    )}
                     <div className="overflow-menu mobile-only" ref={overflowRef}>
                         <button
                             type="button"
@@ -2423,12 +2453,6 @@ export default function App() {
                                 >
                                     {sortOrder === 'asc' ? 'Newest first' : 'Oldest first'}
                                 </button>
-                                <div className="overflow-role" role="presentation">
-                                    <span className={`overflow-role-badge${isAdmin ? ' is-admin' : ''}`}>
-                                        <Icon name={isAdmin ? 'shield' : 'lock'} />
-                                        {isAdmin ? 'Admin' : 'Guest'}
-                                    </span>
-                                </div>
                                 {isAdmin && (
                                     <button
                                         type="button"
@@ -2440,34 +2464,6 @@ export default function App() {
                                         }}
                                     >
                                         Filename settings
-                                    </button>
-                                )}
-                                {isAdmin ? (
-                                    <button
-                                        type="button"
-                                        className="overflow-item overflow-item-danger"
-                                        role="menuitem"
-                                        onClick={() => {
-                                            setOverflowOpen(false)
-                                            setSettingsOpen(false)
-                                            logout()
-                                        }}
-                                    >
-                                        Sign out
-                                    </button>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        className="overflow-item"
-                                        role="menuitem"
-                                        onClick={() => {
-                                            setOverflowOpen(false)
-                                            setAdminLoginPassword('')
-                                            setAdminLoginError(null)
-                                            setAdminLoginOpen(true)
-                                        }}
-                                    >
-                                        Admin sign in
                                     </button>
                                 )}
                                 <InstallApp variant="item" />
