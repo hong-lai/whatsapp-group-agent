@@ -1248,7 +1248,48 @@ function hasIngestWork(events: Partial<BaileysEventMap>): boolean {
     )
 }
 
+const RECONNECT_MIN_MS = 2_000
+const RECONNECT_MAX_MS = 60_000
+let reconnectAttempt = 0
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined
+let reconnectInFlight = false
+let lastDisconnectLogKey = ''
+let lastDisconnectLogAt = 0
+let suppressedDisconnectLogs = 0
+
+function disconnectLogKey(statusCode: number | undefined, loggedOut: boolean): string {
+    return `${statusCode ?? 'unknown'}:${loggedOut ? 1 : 0}`
+}
+
+function scheduleReconnect(immediate = false): void {
+    if (reconnectInFlight || reconnectTimer) return
+    const delay = immediate
+        ? 0
+        : Math.min(RECONNECT_MAX_MS, RECONNECT_MIN_MS * 2 ** Math.min(reconnectAttempt, 5))
+    reconnectAttempt += 1
+    if (delay > 0) {
+        log.info({ attempt: reconnectAttempt, delayMs: delay }, 'whatsapp.reconnect_scheduled')
+    }
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined
+        reconnectInFlight = true
+        void connectToWhatsApp()
+            .catch((err) => {
+                log.warn({ err, attempt: reconnectAttempt }, 'whatsapp.reconnect_failed')
+                reconnectInFlight = false
+                scheduleReconnect()
+            })
+            .finally(() => {
+                reconnectInFlight = false
+            })
+    }, delay)
+}
+
 async function connectToWhatsApp() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = undefined
+    }
     noteConnecting()
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir)
 
@@ -1257,7 +1298,6 @@ async function connectToWhatsApp() {
         logger: pino({ level: 'silent' }),
         cachedGroupMetadata: async (jid) => getGroupMetadata(jid),
         syncFullHistory: true,
-        shouldSyncHistoryMessage: () => true,
         getMessage: async (key) => {
             if (!key.id) return undefined
             const stored = await getStoredMessageForGetMessage(key.id)
@@ -1289,32 +1329,60 @@ async function connectToWhatsApp() {
         if (connection === 'connecting') {
             noteConnecting()
         } else if (connection === 'close') {
-            const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode
+            const boom = lastDisconnect?.error as Boom | undefined
+            const statusCode = boom?.output?.statusCode
             const loggedOut = statusCode === DisconnectReason.loggedOut
             const restartRequired = statusCode === DisconnectReason.restartRequired
+            const detail = loggedOut
+                ? 'Logged out'
+                : restartRequired
+                  ? 'Restart required'
+                  : statusCode
+                    ? `Connection closed (${statusCode})`
+                    : 'Connection closed'
+            const key = disconnectLogKey(statusCode, loggedOut)
+            const now = Date.now()
+            const sameAsLast = key === lastDisconnectLogKey
+            const recentlyLogged = now - lastDisconnectLogAt < 30_000
             if (loggedOut) {
                 log.warn({ statusCode, loggedOut }, 'whatsapp.logged_out')
                 clearAuthContents(config.authDir)
+                lastDisconnectLogKey = key
+                lastDisconnectLogAt = now
+                suppressedDisconnectLogs = 0
             } else if (restartRequired) {
                 log.info({ statusCode }, 'whatsapp.restart_required')
-            } else {
+                lastDisconnectLogKey = key
+                lastDisconnectLogAt = now
+                suppressedDisconnectLogs = 0
+            } else if (!sameAsLast || !recentlyLogged) {
                 log.warn(
-                    { statusCode, loggedOut, err: lastDisconnect?.error },
+                    {
+                        statusCode,
+                        detail,
+                        attempt: reconnectAttempt,
+                        ...(suppressedDisconnectLogs > 0
+                            ? { suppressedSinceLastLog: suppressedDisconnectLogs }
+                            : {}),
+                    },
                     'whatsapp.disconnected'
                 )
+                lastDisconnectLogKey = key
+                lastDisconnectLogAt = now
+                suppressedDisconnectLogs = 0
+            } else {
+                suppressedDisconnectLogs += 1
+                log.debug({ statusCode, detail, attempt: reconnectAttempt }, 'whatsapp.disconnected')
             }
-            noteDisconnected(
-                loggedOut
-                    ? 'Logged out'
-                    : restartRequired
-                      ? 'Restart required'
-                      : statusCode
-                        ? `Connection closed (${statusCode})`
-                        : 'Connection closed'
-            )
+            noteDisconnected(detail)
             catchup.stop()
-            void connectToWhatsApp()
+            // restartRequired: reconnect ASAP; otherwise back off so offline phone
+            // does not spin-connect and flood logs.
+            scheduleReconnect(restartRequired || loggedOut)
         } else if (connection === 'open') {
+            reconnectAttempt = 0
+            lastDisconnectLogKey = ''
+            suppressedDisconnectLogs = 0
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
             noteConnected()
             void cacheParticipatingGroups()

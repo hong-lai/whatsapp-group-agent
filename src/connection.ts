@@ -24,7 +24,7 @@ const events: ConnectionEvent[] = []
 function pushEvent(type: ConnectionEventType, detail?: string): void {
     const last = events[0]
     const trimmed = detail?.trim()
-    if (last && last.type === type && last.detail === trimmed && Date.now() - last.at < 1500) {
+    if (last && last.type === type && last.detail === trimmed && Date.now() - last.at < 30_000) {
         return
     }
     events.unshift({ type, at: Date.now(), ...(trimmed ? { detail: trimmed } : {}) })

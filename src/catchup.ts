@@ -93,6 +93,7 @@ export function createCatchup(sock: WASocket) {
     /** Latest known message per chat (full payload when available — needed to ingest the head itself). */
     const chatHeads = new Map<string, WAMessage>()
     let trackedJids: string[] = []
+    /** Wait for RECENT/FULL before mass catchup (or settle timeout). */
     let seenBulkHistory = false
     const startedAt = Date.now()
     let allowingRequests = false
@@ -613,8 +614,8 @@ export function createCatchup(sock: WASocket) {
             if (!previous || timestamp >= previousTs) {
                 chatHeads.set(groupJid, m)
             }
-            if (trackedJids.includes(groupJid) && !finished.has(groupJid)) {
-                if (allowingRequests) void enqueueCatchupForGroup(groupJid)
+            if (trackedJids.includes(groupJid) && !finished.has(groupJid) && allowingRequests) {
+                void enqueueCatchupForGroup(groupJid)
             }
         },
         noteHistoryChunk(syncType?: unknown) {
