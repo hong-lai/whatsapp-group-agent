@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { adminHeaders, useAdminAuth } from './adminAuth'
 
 export const FILENAME_MEDIA_TYPES = [
@@ -165,6 +165,10 @@ export default function FilenameSettings({
     const [saving, setSaving] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [saved, setSaved] = useState(false)
+    const onCloseRef = useRef(onClose)
+    const logoutRef = useRef(logout)
+    onCloseRef.current = onClose
+    logoutRef.current = logout
 
     useEffect(() => {
         if (!open || !adminPassword) return
@@ -175,8 +179,8 @@ export default function FilenameSettings({
         void fetch('/api/settings/filename-format', { headers: adminHeaders(adminPassword) })
             .then(async (response) => {
                 if (response.status === 401) {
-                    logout()
-                    onClose()
+                    logoutRef.current()
+                    onCloseRef.current()
                     throw new Error('Invalid password')
                 }
                 return readJson<FilenameFormatSettings>(response)
@@ -195,16 +199,18 @@ export default function FilenameSettings({
         return () => {
             cancelled = true
         }
-    }, [open, adminPassword, logout, onClose])
+        // Intentionally omit onClose/logout: parent poll re-renders recreate them and would
+        // re-fetch (and flash Loading) every few seconds while the dialog stays open.
+    }, [open, adminPassword])
 
     useEffect(() => {
         if (!open) return
         function onKey(event: KeyboardEvent) {
-            if (event.key === 'Escape') onClose()
+            if (event.key === 'Escape') onCloseRef.current()
         }
         window.addEventListener('keydown', onKey)
         return () => window.removeEventListener('keydown', onKey)
-    }, [open, onClose])
+    }, [open])
 
     const pattern = settings?.[selectedType]
     const preview = useMemo(
@@ -292,7 +298,7 @@ export default function FilenameSettings({
 
                 {error && <p className="settings-error">{error}</p>}
 
-                {(loading || !settings) && <p className="settings-status">Loading…</p>}
+                {loading && !settings && <p className="settings-status">Loading…</p>}
 
                 {settings && pattern && (
                     <>
