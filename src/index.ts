@@ -1042,7 +1042,13 @@ async function processMessage(
     const alreadyEdited = isEditedWrapper(m.message)
     const isForwarded = isForwardedContent(content)
 
-    if (messageType === 'protocolMessage') return 'ignored'
+    if (
+        messageType === 'protocolMessage' ||
+        messageType === 'pinInChatMessage' ||
+        messageType === 'unknown'
+    ) {
+        return 'ignored'
+    }
     if (isLivePhotoMotionVideo(m.message, content)) {
         ingestLog(
             { messageId, groupJid: jid, groupName, isHistory },

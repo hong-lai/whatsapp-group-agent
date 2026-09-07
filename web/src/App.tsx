@@ -1605,6 +1605,26 @@ function workflowInProgressLabel(status: string): string {
     return '分析中'
 }
 
+/** Reports attach to media message IDs; album shells nest those as albumItems. */
+function siteReportBadgeSource(message: Message): Pick<
+    Message,
+    | 'messageId'
+    | 'siteReportExtracted'
+    | 'siteReportFailed'
+    | 'siteReportFailureDetail'
+    | 'siteReportStatus'
+    | 'siteReportStatusDetail'
+> {
+    const candidates = [message, ...(message.albumItems ?? [])]
+    const extracted = candidates.find((item) => item.siteReportExtracted)
+    if (extracted) return extracted
+    const busy = candidates.find((item) => isWorkflowInProgress(item.siteReportStatus))
+    if (busy) return busy
+    const failed = candidates.find((item) => item.siteReportFailed)
+    if (failed) return failed
+    return message
+}
+
 function RunWorkflowDialog({
     open,
     messageId,
@@ -1875,12 +1895,13 @@ function MessageCard({
     const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null)
     const statusWhenQueuedRef = useRef<string | null>(null)
     const canReveal = message.isDeleted && hasStoredContent(message)
-    const serverStatus = message.siteReportStatus ?? null
-    const effectiveStatus = optimisticStatus ?? serverStatus
+    const reportSource = siteReportBadgeSource(message)
+    const badgeStatus = reportSource.siteReportStatus ?? null
+    const effectiveStatus = optimisticStatus ?? badgeStatus
     const workflowBusy = isWorkflowInProgress(effectiveStatus)
     const showSiteReportBadge =
         (!message.isDeleted || revealed) &&
-        (message.siteReportExtracted || message.siteReportFailed || workflowBusy)
+        (reportSource.siteReportExtracted || reportSource.siteReportFailed || workflowBusy)
     // Album captions live on child media; WhatsApp edits those children, not the album shell.
     const showEdited =
         message.isEdited || (message.albumItems ?? []).some((item) => item.isEdited)
@@ -1888,18 +1909,19 @@ function MessageCard({
 
     useEffect(() => {
         if (!optimisticStatus) return
-        // Keep optimistic "queued" until the server status moves past the pre-queue value
-        // (including terminal outcomes like skipped — which never emit report SSE).
-        if (serverStatus == null) return
-        if (serverStatus === statusWhenQueuedRef.current && !isWorkflowInProgress(serverStatus)) {
+        // Clear against this card's own workflow status (album shell id), not a child
+        // report rollup — re-runs are queued on the visible message id.
+        const ownStatus = message.siteReportStatus ?? null
+        if (ownStatus == null) return
+        if (ownStatus === statusWhenQueuedRef.current && !isWorkflowInProgress(ownStatus)) {
             return
         }
         setOptimisticStatus(null)
         statusWhenQueuedRef.current = null
-    }, [serverStatus, optimisticStatus])
+    }, [message.siteReportStatus, optimisticStatus])
 
     function handleQueued() {
-        statusWhenQueuedRef.current = serverStatus
+        statusWhenQueuedRef.current = message.siteReportStatus ?? null
         setOptimisticStatus('queued')
         onWorkflowQueued?.()
     }
@@ -1930,7 +1952,7 @@ function MessageCard({
                         {showSiteReportBadge && workflowBusy && effectiveStatus && (
                             <span
                                 className={`site-report-label is-processing status-${effectiveStatus}`}
-                                title={message.siteReportStatusDetail || undefined}
+                                title={reportSource.siteReportStatusDetail || undefined}
                             >
                                 <span className="site-report-spinner" aria-hidden="true" />
                                 {workflowInProgressLabel(effectiveStatus)}
@@ -1938,9 +1960,9 @@ function MessageCard({
                         )}
                         {showSiteReportBadge && !workflowBusy && (
                             <SiteReportTag
-                                messageId={message.messageId}
-                                failed={message.siteReportFailed}
-                                failureDetail={message.siteReportFailureDetail}
+                                messageId={reportSource.messageId}
+                                failed={reportSource.siteReportFailed}
+                                failureDetail={reportSource.siteReportFailureDetail}
                                 onOpenReports={onOpenReports}
                             />
                         )}

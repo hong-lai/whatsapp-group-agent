@@ -6,6 +6,12 @@ import { publishWorkflowStatus } from './workflowStatusEvents.js'
 
 export const pool = new Pool({ connectionString: config.databaseUrl })
 
+/** Protocol-ish rows that should not surface in the web chat UI. */
+const DASHBOARD_HIDDEN_MESSAGE_TYPES = ['pinInChatMessage', 'unknown'] as const
+const DASHBOARD_HIDDEN_TYPES_SQL = `m.message_type <> ALL(ARRAY[${DASHBOARD_HIDDEN_MESSAGE_TYPES.map(
+    (type) => `'${type}'`
+).join(', ')}]::text[])`
+
 export async function initDb(): Promise<void> {
     try {
         await pool.query(`
@@ -114,6 +120,16 @@ export async function initDb(): Promise<void> {
         )
         if (legacy.rowCount) {
             log.info({ count: legacy.rowCount }, 'db.legacy_reactions_removed')
+        }
+        const hidden = await pool.query(
+            `DELETE FROM messages WHERE message_type = ANY($1::text[])`,
+            [[...DASHBOARD_HIDDEN_MESSAGE_TYPES]]
+        )
+        if (hidden.rowCount) {
+            log.info(
+                { count: hidden.rowCount, types: DASHBOARD_HIDDEN_MESSAGE_TYPES },
+                'db.hidden_message_types_removed'
+            )
         }
         log.info('db.schema_ready')
     } catch (err) {
@@ -1365,6 +1381,7 @@ export async function listDashboardGroups(
            ON m.group_jid = g.jid
           AND m.timestamp >= to_timestamp($1)
           AND m.timestamp < to_timestamp($2)
+          AND ${DASHBOARD_HIDDEN_TYPES_SQL}
          LEFT JOIN LATERAL (
             SELECT timestamp,
                    CASE
@@ -1379,6 +1396,7 @@ export async function listDashboardGroups(
             WHERE group_jid = g.jid
               AND timestamp >= to_timestamp($1)
               AND timestamp < to_timestamp($2)
+              AND message_type <> ALL($4::text[])
             ORDER BY timestamp DESC, message_id DESC
             LIMIT 1
          ) latest ON TRUE
@@ -1390,7 +1408,7 @@ export async function listDashboardGroups(
             (COUNT(m.message_id) > 0) DESC,
             latest.timestamp DESC NULLS LAST,
             g.name ASC`,
-        [fromTimestamp, toTimestamp, groupJids]
+        [fromTimestamp, toTimestamp, groupJids, [...DASHBOARD_HIDDEN_MESSAGE_TYPES]]
     )
 
     const withMentions = await resolveMentionedText(result.rows.map((row) => row.latest_text))
@@ -1703,6 +1721,7 @@ export async function listDashboardMessages(
          WHERE m.group_jid = $1
            AND m.timestamp >= to_timestamp($2)
            AND m.timestamp < to_timestamp($3)
+           AND ${DASHBOARD_HIDDEN_TYPES_SQL}
            AND NOT EXISTS (
                 SELECT 1
                 FROM messages parent
