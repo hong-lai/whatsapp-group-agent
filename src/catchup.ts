@@ -8,28 +8,20 @@ import {
 } from '@whiskeysockets/baileys'
 import { getGroupMetadata } from './cache.js'
 import { config, matchesGroupPattern } from './config.js'
-import {
-    ensureGroupHistoryFloor,
-    getGroupHistoryFloor,
-    getLatestGroupMessage,
-    getOldestGroupMessage,
-    type LatestGroupMessage,
-} from './db.js'
+import { getLatestGroupMessage, getOldestGroupMessage, type LatestGroupMessage } from './db.js'
 import { log } from './log.js'
-import { settleDelayMs, sleep, waitHistoryRequest } from './rateLimit.js'
+import { settleDelayMs, waitHistoryRequest } from './rateLimit.js'
 
-/** Walk older pages until the sticky first-login floor. */
-type CatchupMode = 'initial' | 'gap'
+function isBackfillReason(reason: string): boolean {
+    return reason === 'tracked-backfill' || reason === 'on_demand_continue'
+}
 
 type CatchupJob = {
     groupJid: string
     key: WAMessageKey
     timestamp: number
-    mode: CatchupMode
+    reason: string
 }
-
-const FETCH_RETRY_MAX = 3
-const AWAITING_TIMEOUT_MS = 90_000
 
 function unixSeconds(value: unknown): number {
     const n = Number(value)
@@ -59,8 +51,15 @@ function isMessageHistorySync(syncType: unknown): boolean {
     )
 }
 
-/** WhatsApp push syncs we wait for before starting on-demand catchup. */
 function isBulkHistorySync(syncType: unknown): boolean {
+    const n = historySyncNumber(syncType)
+    return (
+        n === proto.HistorySync.HistorySyncType.FULL ||
+        n === proto.HistorySync.HistorySyncType.RECENT
+    )
+}
+
+function shouldSettleOnSyncStatus(syncType: unknown): boolean {
     const n = historySyncNumber(syncType)
     return (
         n === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
@@ -74,26 +73,16 @@ export function asCatchupMessage(value: { key?: WAMessageKey | null } | null | u
 }
 
 export function createCatchup(sock: WASocket) {
-    const defaultFloor = Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
+    const windowStart = Math.floor(Date.now() / 1000) - config.catchupWindowSeconds
+    const backfillUntil = Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
     const pages = new Map<string, number>()
     const jobs = new Map<string, CatchupJob>()
     const awaitingOnDemand = new Set<string>()
     const pendingPdoOrder: string[] = []
-    const pendingMode = new Map<string, CatchupMode>()
-    const awaitingSince = new Map<string, number>()
-    const fetchAttempts = new Map<string, number>()
-    const incompleteAttempts = new Map<string, number>()
-    /**
-     * For gap-fill: DB latest timestamp when the gap request started.
-     * Paging stops once an on-demand page reaches this watermark.
-     */
-    const gapTargetTs = new Map<string, number>()
-    const floorCache = new Map<string, number>()
-    const finished = new Set<string>()
-    /** Latest known message per chat (full payload when available — needed to ingest the head itself). */
-    const chatHeads = new Map<string, WAMessage>()
+    const backfillFinished = new Set<string>()
+    const pdoAttempts = new Map<string, number>()
+    const chatHeads = new Map<string, { key: WAMessageKey; timestamp: number }>()
     let trackedJids: string[] = []
-    /** Wait for RECENT/FULL before mass catchup (or settle timeout). */
     let seenBulkHistory = false
     const startedAt = Date.now()
     let allowingRequests = false
@@ -101,41 +90,26 @@ export function createCatchup(sock: WASocket) {
     let settleTimer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
 
+    function pageLimit(reason: string): number {
+        return isBackfillReason(reason) ? config.catchupBackfillMaxPages : config.catchupMaxPages
+    }
+
     async function isTrackedGroup(groupJid: string): Promise<boolean> {
         const cached = await getGroupMetadata(groupJid)
         return cached ? matchesGroupPattern(cached.subject) : false
     }
 
-    async function floorFor(groupJid: string): Promise<number> {
-        const cached = floorCache.get(groupJid)
-        if (cached !== undefined) return cached
-        const floor = await ensureGroupHistoryFloor(groupJid, defaultFloor)
-        floorCache.set(groupJid, floor)
-        return floor
-    }
-
-    function clearAwaiting(groupJid: string): void {
+    function finishBackfill(groupJid: string, why: string): void {
         awaitingOnDemand.delete(groupJid)
-        pendingMode.delete(groupJid)
-        awaitingSince.delete(groupJid)
         const index = pendingPdoOrder.indexOf(groupJid)
         if (index >= 0) pendingPdoOrder.splice(index, 1)
+        backfillFinished.add(groupJid)
+        log.info({ groupJid, why }, 'catchup.backfill_complete')
     }
 
-    function finish(groupJid: string, why: string): void {
-        clearAwaiting(groupJid)
-        gapTargetTs.delete(groupJid)
-        fetchAttempts.delete(groupJid)
-        incompleteAttempts.delete(groupJid)
-        finished.add(groupJid)
-        log.info({ groupJid, why }, 'catchup.complete')
-    }
-
-    function rememberPendingPdo(groupJid: string, mode: CatchupMode): void {
+    function rememberPendingPdo(groupJid: string): void {
         if (!awaitingOnDemand.has(groupJid)) pendingPdoOrder.push(groupJid)
         awaitingOnDemand.add(groupJid)
-        pendingMode.set(groupJid, mode)
-        awaitingSince.set(groupJid, Date.now())
     }
 
     function historyKeyFromStored(groupJid: string, stored: LatestGroupMessage): WAMessageKey {
@@ -166,170 +140,103 @@ export function createCatchup(sock: WASocket) {
             void (async () => {
                 if (stopped) return
                 allowingRequests = true
-                await enqueueTrackedCatchup()
+                await enqueueTrackedBackfill()
                 log.info({ pending: jobs.size, reason }, 'catchup.ready')
                 void drain()
             })()
         }, waitMs)
     }
 
-    function releaseStaleAwaiting(): void {
-        const now = Date.now()
-        for (const groupJid of [...awaitingOnDemand]) {
-            const since = awaitingSince.get(groupJid) ?? now
-            if (now - since < AWAITING_TIMEOUT_MS) continue
-            log.warn({ groupJid, waitedMs: now - since }, 'catchup.awaiting_timeout')
-            clearAwaiting(groupJid)
-            finished.delete(groupJid)
-        }
-    }
-
-    function headAnchor(
-        groupJid: string
-    ): { key: WAMessageKey; timestamp: number; message: WAMessage } | undefined {
-        const message = chatHeads.get(groupJid)
-        if (!message?.key.id) return undefined
-        return {
-            key: message.key,
-            timestamp: unixSeconds(message.messageTimestamp),
-            message,
-        }
-    }
-
-    async function enqueueTrackedCatchup(): Promise<void> {
+    async function enqueueTrackedBackfill(): Promise<void> {
         if (!seenBulkHistory && Date.now() - startedAt > 180_000) {
             seenBulkHistory = true
-            log.info('catchup.bulk_history_timeout')
         }
         if (!seenBulkHistory) {
             scheduleSettle('waiting-bulk-history')
             return
         }
-
-        releaseStaleAwaiting()
-
         for (const groupJid of trackedJids) {
-            await enqueueCatchupForGroup(groupJid)
-        }
-    }
-
-    async function enqueueCatchupForGroup(groupJid: string): Promise<void> {
-        if (finished.has(groupJid) || jobs.has(groupJid) || awaitingOnDemand.has(groupJid)) {
-            return
-        }
-        const page = pages.get(groupJid) ?? 0
-        if (page >= config.catchupMaxPages) {
-            finish(groupJid, 'page-limit')
-            return
-        }
-
-        const floor = await floorFor(groupJid)
-        const latest = await getLatestGroupMessage(groupJid)
-        const oldest = await getOldestGroupMessage(groupJid)
-        const head = headAnchor(groupJid)
-
-        // Reconnect / mid-session gap: walk back from head until DB latest.
-        if (
-            head &&
-            latest &&
-            head.timestamp > latest.timestamp + 2 &&
-            head.key.id !== latest.messageId
-        ) {
-            gapTargetTs.set(groupJid, latest.timestamp)
-            enqueue({
-                groupJid,
-                key: head.key,
-                timestamp: head.timestamp,
-                mode: 'gap',
-            })
-            return
-        }
-
-        // First login (or incomplete first login): deepen until sticky floor.
-        if (oldest?.messageId && oldest.timestamp > floor) {
+            if (backfillFinished.has(groupJid) || jobs.has(groupJid) || awaitingOnDemand.has(groupJid)) {
+                continue
+            }
+            const attempts = pdoAttempts.get(groupJid) ?? 0
+            if (attempts >= config.catchupBackfillMaxPages) continue
+            const page = pages.get(groupJid) ?? 0
+            if (page >= config.catchupBackfillMaxPages) continue
+            const oldest = await getOldestGroupMessage(groupJid)
+            const latest = await getLatestGroupMessage(groupJid)
+            const head = chatHeads.get(groupJid)
+            if (
+                head?.key.id &&
+                head.timestamp > backfillUntil &&
+                (!latest || head.timestamp > latest.timestamp + 2)
+            ) {
+                enqueue({
+                    groupJid,
+                    key: head.key,
+                    timestamp: head.timestamp,
+                    reason: 'tracked-backfill',
+                })
+                continue
+            }
+            if (!oldest?.messageId) continue
+            if (oldest.timestamp <= backfillUntil) {
+                finishBackfill(
+                    groupJid,
+                    latest && latest.timestamp < backfillUntil ? 'inactive' : 'already-covers-window'
+                )
+                continue
+            }
             enqueue({
                 groupJid,
                 key: historyKeyFromStored(groupJid, oldest),
                 timestamp: oldest.timestamp,
-                mode: 'initial',
+                reason: 'tracked-backfill',
             })
-            return
-        }
-
-        // Head exists but no DB rows yet — pull older from head toward floor.
-        if (head && !latest) {
-            if (head.timestamp <= floor) {
-                finish(groupJid, 'head-before-floor')
-                return
-            }
-            enqueue({
-                groupJid,
-                key: head.key,
-                timestamp: head.timestamp,
-                mode: 'initial',
-            })
-            return
-        }
-
-        if (oldest && oldest.timestamp <= floor) {
-            finish(
-                groupJid,
-                latest && latest.timestamp < floor ? 'inactive' : 'initial-floor-reached'
-            )
         }
     }
 
     async function requestFromAnchor(job: CatchupJob): Promise<'done' | 'retry'> {
-        const { groupJid, key, timestamp, mode } = job
+        const { groupJid, key, timestamp, reason } = job
+        const outsideNotifyWindow = !isBackfillReason(reason) && timestamp < windowStart
         const page = pages.get(groupJid) ?? 0
-        if (!key.id) return 'done'
-        if (page >= config.catchupMaxPages) return 'done'
-        const floor = await floorFor(groupJid)
-        if (mode === 'initial' && timestamp <= floor) return 'done'
+        if (!key.id || outsideNotifyWindow) return 'done'
+        if (page >= pageLimit(reason)) return 'done'
+        if (isBackfillReason(reason) && timestamp <= backfillUntil) return 'done'
 
         try {
-            if (mode === 'gap') {
-                const latest = await getLatestGroupMessage(groupJid)
-                if (latest && latest.timestamp >= timestamp - 2) return 'done'
-                if (!gapTargetTs.has(groupJid) && latest) {
-                    gapTargetTs.set(groupJid, latest.timestamp)
-                }
-            }
+            const latest = await getLatestGroupMessage(groupJid)
+            const coversAnchor = Boolean(latest && latest.timestamp >= timestamp - 2)
+            if (coversAnchor && !isBackfillReason(reason)) return 'done'
 
             const waitedMs = await waitHistoryRequest()
             if (stopped) return 'done'
             if (!allowingRequests) return 'retry'
 
             await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
-            fetchAttempts.delete(groupJid)
-            rememberPendingPdo(groupJid, mode)
+            if (isBackfillReason(reason)) {
+                rememberPendingPdo(groupJid)
+                if (reason === 'tracked-backfill') {
+                    pdoAttempts.set(groupJid, (pdoAttempts.get(groupJid) ?? 0) + 1)
+                }
+            } else {
+                pages.set(groupJid, page + 1)
+            }
             log.info(
                 {
                     groupJid,
                     messageId: key.id,
                     page: page + 1,
-                    mode,
+                    reason,
                     waitedMs,
-                    floor,
-                    gapTarget: gapTargetTs.get(groupJid),
+                    backfillUntil,
                     fromMe: key.fromMe,
                 },
                 'catchup.history_requested'
             )
             return 'done'
         } catch (err) {
-            const attempts = (fetchAttempts.get(groupJid) ?? 0) + 1
-            fetchAttempts.set(groupJid, attempts)
-            log.warn(
-                { err, groupJid, messageId: key.id, mode, attempts },
-                'catchup.history_request_failed'
-            )
-            if (attempts < FETCH_RETRY_MAX) {
-                await sleep(Math.min(30_000, 2000 * attempts))
-                if (stopped) return 'done'
-                return 'retry'
-            }
-            finish(groupJid, 'fetch-failed')
+            log.warn({ err, groupJid, messageId: key.id, reason }, 'catchup.history_request_failed')
             return 'done'
         }
     }
@@ -342,11 +249,7 @@ export function createCatchup(sock: WASocket) {
                 const next = jobs.values().next().value as CatchupJob | undefined
                 if (!next) break
                 const result = await requestFromAnchor(next)
-                if (result === 'retry') {
-                    // Keep job queued; pause drain until settle / next allow.
-                    if (!allowingRequests) break
-                    continue
-                }
+                if (result === 'retry') break
                 if (jobs.get(next.groupJid) === next) jobs.delete(next.groupJid)
             }
         } finally {
@@ -357,125 +260,40 @@ export function createCatchup(sock: WASocket) {
 
     function enqueue(job: CatchupJob): void {
         if (stopped || !job.key.id) return
+        if (!isBackfillReason(job.reason) && job.timestamp < windowStart) return
+        if (isBackfillReason(job.reason) && job.timestamp <= backfillUntil) return
         const page = pages.get(job.groupJid) ?? 0
-        if (page >= config.catchupMaxPages) return
-        const existing = jobs.get(job.groupJid)
-        if (existing?.mode === 'gap' && job.mode === 'initial') return
+        if (page >= pageLimit(job.reason)) return
         jobs.set(job.groupJid, job)
         if (allowingRequests) void drain()
     }
 
-    async function continueOrFinishIncomplete(
-        groupJid: string,
-        oldestMsg: WAMessage,
-        oldestTs: number,
-        mode: CatchupMode,
-        why: string
-    ): Promise<void> {
-        const floor = await floorFor(groupJid)
-        const stillNeedGap =
-            mode === 'gap' &&
-            gapTargetTs.has(groupJid) &&
-            oldestTs > (gapTargetTs.get(groupJid) ?? 0) + 2
-        const stillNeedInitial = mode === 'initial' && oldestTs > floor
-        if (!stillNeedGap && !stillNeedInitial) {
-            finish(groupJid, why)
-            return
-        }
-
-        const attempts = (incompleteAttempts.get(groupJid) ?? 0) + 1
-        incompleteAttempts.set(groupJid, attempts)
-        if (attempts >= FETCH_RETRY_MAX) {
-            finish(groupJid, `${why}-gave-up`)
-            return
-        }
-
-        log.warn(
-            { groupJid, oldestTs, floor, target: gapTargetTs.get(groupJid), why, attempts },
-            'catchup.incomplete_retry'
-        )
-        finished.delete(groupJid)
-        const head = headAnchor(groupJid)
-        const key = stillNeedGap && head ? head.key : oldestMsg.key!
-        const ts = stillNeedGap && head ? head.timestamp : oldestTs
-        enqueue({
-            groupJid,
-            key,
-            timestamp: ts,
-            mode: stillNeedGap ? 'gap' : 'initial',
-        })
-        scheduleSettle('incomplete-retry')
-    }
-
-    /** Live / notify / chat-head: fill from this message back to DB latest (or floor if empty). */
-    async function considerMessage(m: WAMessage, _reason: string): Promise<void> {
+    async function considerMessage(m: WAMessage, reason: string): Promise<void> {
         const groupJid = m.key.remoteJid
         if (stopped || !groupJid || !isJidGroup(groupJid) || !m.key.id) return
         if (!(await isTrackedGroup(groupJid))) return
 
         const timestamp = unixSeconds(m.messageTimestamp)
+        if (timestamp < windowStart) return
+
         const previous = await getLatestGroupMessage(groupJid)
         if (previous && previous.messageId === m.key.id) return
         if (previous && previous.timestamp >= timestamp - 2) return
 
-        finished.delete(groupJid)
-        pages.delete(groupJid)
-
-        if (!previous) {
-            // Cold group: treat as initial deepen toward sticky floor.
-            await floorFor(groupJid)
-            enqueue({
-                groupJid,
-                key: m.key,
-                timestamp,
-                mode: 'initial',
-            })
-            return
-        }
-
-        gapTargetTs.set(groupJid, previous.timestamp)
-        enqueue({
-            groupJid,
-            key: m.key,
-            timestamp,
-            mode: 'gap',
-        })
+        enqueue({ groupJid, key: m.key, timestamp, reason })
     }
 
-    async function considerHistoryBatch(messages: WAMessage[], syncType: unknown): Promise<void> {
+    async function considerHistoryBatch(
+        messages: WAMessage[],
+        syncType: unknown,
+        latestBefore: Map<string, number | undefined>
+    ): Promise<void> {
         if (stopped || !isMessageHistorySync(syncType)) return
         const onDemand =
             historySyncNumber(syncType) === proto.HistorySync.HistorySyncType.ON_DEMAND
         if (onDemand && messages.length === 0) {
             const groupJid = pendingPdoOrder[0]
-            if (groupJid && awaitingOnDemand.has(groupJid)) {
-                const mode = pendingMode.get(groupJid) ?? 'initial'
-                clearAwaiting(groupJid)
-                const head = headAnchor(groupJid)
-                const oldest = await getOldestGroupMessage(groupJid)
-                if (head) {
-                    await continueOrFinishIncomplete(
-                        groupJid,
-                        head.message,
-                        head.timestamp,
-                        mode,
-                        'empty-on-demand'
-                    )
-                } else if (oldest?.messageId) {
-                    await continueOrFinishIncomplete(
-                        groupJid,
-                        {
-                            key: historyKeyFromStored(groupJid, oldest),
-                            messageTimestamp: oldest.timestamp,
-                        } as WAMessage,
-                        oldest.timestamp,
-                        mode,
-                        'empty-on-demand'
-                    )
-                } else {
-                    finish(groupJid, 'empty-on-demand')
-                }
-            }
+            if (groupJid) finishBackfill(groupJid, 'empty-on-demand')
             return
         }
         if (messages.length === 0) return
@@ -490,119 +308,52 @@ export function createCatchup(sock: WASocket) {
         }
 
         for (const [groupJid, list] of byGroup) {
-            const mode = pendingMode.get(groupJid) ?? 'initial'
             if (onDemand) {
-                clearAwaiting(groupJid)
+                awaitingOnDemand.delete(groupJid)
+                const pendingIndex = pendingPdoOrder.indexOf(groupJid)
+                if (pendingIndex >= 0) pendingPdoOrder.splice(pendingIndex, 1)
                 pages.set(groupJid, (pages.get(groupJid) ?? 0) + 1)
             }
             if (!(await isTrackedGroup(groupJid))) continue
-
             list.sort(
                 (left, right) => unixSeconds(left.messageTimestamp) - unixSeconds(right.messageTimestamp)
             )
-            const oldestMsg = list[0]
-            if (!oldestMsg?.key.id) continue
-            const oldestTs = unixSeconds(oldestMsg.messageTimestamp)
-            const shortPage = list.length < config.catchupPageSize
-            const floor = await floorFor(groupJid)
-
+            const oldest = list[0]
+            if (!oldest?.key.id) continue
+            const oldestTs = unixSeconds(oldest.messageTimestamp)
             if (onDemand) {
-                if (mode === 'gap') {
-                    const target = gapTargetTs.get(groupJid)
-                    if (target !== undefined && oldestTs <= target + 2) {
-                        finish(groupJid, 'gap-closed')
-                        continue
-                    }
-                    if (shortPage) {
-                        await continueOrFinishIncomplete(
-                            groupJid,
-                            oldestMsg,
-                            oldestTs,
-                            'gap',
-                            'short-page'
-                        )
-                        continue
-                    }
-                    enqueue({
-                        groupJid,
-                        key: oldestMsg.key,
-                        timestamp: oldestTs,
-                        mode: 'gap',
-                    })
-                    continue
-                }
-                // initial
-                if (oldestTs <= floor) {
-                    finish(groupJid, 'initial-floor-reached')
-                    continue
-                }
-                if (shortPage) {
-                    await continueOrFinishIncomplete(
-                        groupJid,
-                        oldestMsg,
-                        oldestTs,
-                        'initial',
-                        'short-page'
-                    )
+                const reachedWindow = oldestTs <= backfillUntil
+                const lastPage = list.length < config.catchupPageSize
+                if (reachedWindow || lastPage) {
+                    finishBackfill(groupJid, reachedWindow ? 'reached-window' : 'short-page')
                     continue
                 }
                 enqueue({
                     groupJid,
-                    key: oldestMsg.key,
+                    key: oldest.key,
                     timestamp: oldestTs,
-                    mode: 'initial',
+                    reason: 'on_demand_continue',
                 })
                 continue
             }
-
-            // Bulk history: gap or deepen toward sticky floor.
-            const latest = await getLatestGroupMessage(groupJid)
-            const head = headAnchor(groupJid)
-            if (
-                head &&
-                latest &&
-                head.timestamp > latest.timestamp + 2 &&
-                head.key.id !== latest.messageId
-            ) {
-                gapTargetTs.set(groupJid, latest.timestamp)
-                enqueue({
-                    groupJid,
-                    key: head.key,
-                    timestamp: head.timestamp,
-                    mode: 'gap',
-                })
-                continue
-            }
-            if (oldestTs > floor) {
-                enqueue({
-                    groupJid,
-                    key: oldestMsg.key,
-                    timestamp: oldestTs,
-                    mode: 'initial',
-                })
-            }
+            if (oldestTs < windowStart) continue
+            const previousTs = latestBefore.get(groupJid)
+            if (previousTs !== undefined && previousTs >= oldestTs) continue
+            enqueue({
+                groupJid,
+                key: oldest.key,
+                timestamp: oldestTs,
+                reason: 'history.gap',
+            })
         }
     }
 
     return {
+        windowStart,
         setTrackedGroups(jids: string[]) {
-            const fresh = jids.filter((jid) => !trackedJids.includes(jid))
             trackedJids = [...new Set([...trackedJids, ...jids])]
-            for (const jid of jids) {
-                finished.delete(jid)
-                void ensureGroupHistoryFloor(jid, defaultFloor).then((floor) => {
-                    floorCache.set(jid, floor)
-                })
-            }
-            if (allowingRequests) void enqueueTrackedCatchup()
-            else if (fresh.length > 0) scheduleSettle('tracked')
         },
         noteConnected() {
-            finished.clear()
-            pages.clear()
-            gapTargetTs.clear()
-            fetchAttempts.clear()
-            incompleteAttempts.clear()
             scheduleSettle('connected')
         },
         noteChatHead(m: WAMessage) {
@@ -610,22 +361,24 @@ export function createCatchup(sock: WASocket) {
             if (!groupJid || !isJidGroup(groupJid) || !m.key.id) return
             const timestamp = unixSeconds(m.messageTimestamp)
             const previous = chatHeads.get(groupJid)
-            const previousTs = previous ? unixSeconds(previous.messageTimestamp) : 0
-            if (!previous || timestamp >= previousTs) {
-                chatHeads.set(groupJid, m)
-            }
-            if (trackedJids.includes(groupJid) && !finished.has(groupJid) && allowingRequests) {
-                void enqueueCatchupForGroup(groupJid)
+            if (!previous || timestamp >= previous.timestamp) {
+                chatHeads.set(groupJid, { key: m.key, timestamp })
             }
         },
         noteHistoryChunk(syncType?: unknown) {
-            if (!isBulkHistorySync(syncType)) return
-            seenBulkHistory = true
-            scheduleSettle('history.chunk')
+            if (isBulkHistorySync(syncType)) seenBulkHistory = true
+            const n = historySyncNumber(syncType)
+            if (
+                n === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
+                n === proto.HistorySync.HistorySyncType.FULL ||
+                n === proto.HistorySync.HistorySyncType.RECENT
+            ) {
+                scheduleSettle('history.chunk')
+            }
         },
         noteHistoryStatus(syncType: unknown, status?: string) {
-            if (!isBulkHistorySync(syncType)) return
-            seenBulkHistory = true
+            if (!shouldSettleOnSyncStatus(syncType)) return
+            if (isBulkHistorySync(syncType)) seenBulkHistory = true
             scheduleSettle(status === 'paused' ? 'history.paused' : 'history.complete')
         },
         considerMessage,
@@ -637,12 +390,4 @@ export function createCatchup(sock: WASocket) {
             clearSettleTimer()
         },
     }
-}
-
-/** Re-export for ingest cutoff helpers. */
-export async function resolveHistoryFloor(groupJid: string): Promise<number> {
-    const existing = await getGroupHistoryFloor(groupJid)
-    if (existing !== undefined) return existing
-    const floor = Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
-    return ensureGroupHistoryFloor(groupJid, floor)
 }

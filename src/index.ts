@@ -27,7 +27,7 @@ import type { Readable } from 'stream'
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
 import pino from 'pino'
 import { startApi } from './api.js'
-import { createCatchup, asCatchupMessage, resolveHistoryFloor } from './catchup.js'
+import { createCatchup, asCatchupMessage } from './catchup.js'
 import { config, matchesGroupPattern } from './config.js'
 import { noteConnected, noteConnecting, noteDisconnected } from './connection.js'
 import {
@@ -58,8 +58,9 @@ import {
     setSenderDisplayNames,
 } from './cache.js'
 import {
+    getLatestGroupMessage,
+    getMessageMediaState,
     getStoredMessageForGetMessage,
-    hasMessage,
     initDb,
     insertMessage,
     markGroupDeleted,
@@ -325,7 +326,6 @@ async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
     await upsertGroup(metadata.id, name || metadata.id, tracked)
     await rememberContacts(metadata.participants)
     if (tracked) {
-        await resolveHistoryFloor(metadata.id)
         await removeSkippedGroup(metadata.id)
         await setGroupMetadata(metadata.id, metadata)
         return true
@@ -378,14 +378,8 @@ function unixSeconds(value: unknown): number {
     return n > 1e12 ? Math.floor(n / 1000) : Math.floor(n)
 }
 
-/**
- * History ingest bounds use a sticky per-group floor (set once on first track /
- * first history contact). Never expand older than that floor; reconnect gaps
- * of any length newer than the floor are accepted.
- */
-async function shouldIgnoreHistoryTimestamp(groupJid: string, timestamp: number): Promise<boolean> {
-    const floor = await resolveHistoryFloor(groupJid)
-    return timestamp < floor
+function historyCutoffSeconds(): number {
+    return Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
 }
 
 function secondsFromMillis(value: unknown, fallback: number): number {
@@ -681,10 +675,42 @@ function isRetryableMediaError(err: unknown): boolean {
     const error = mediaErrorText(err)
     return (
         isTimeoutMediaError(err) ||
-        /ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ECONNRESET|ECONNREFUSED|UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|socket hang up/i.test(
+        /ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ECONNRESET|ECONNREFUSED|EPIPE|ECONNABORTED|UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|socket hang up|Connection Closed|connection closed|Stream Errored|aborted|Premature close/i.test(
             error
         )
     )
+}
+
+/** Bumped on every WhatsApp disconnect so in-flight media retries stop using a dead socket. */
+let mediaSocketGeneration = 0
+/** Messages waiting for a successful media download (survives reconnect). */
+const pendingMediaDownloads = new Map<string, { m: WAMessage; meta: MediaStoreMeta }>()
+/** Prevents concurrent downloads for the same message id. */
+const inFlightMediaDownloads = new Set<string>()
+
+function bumpMediaSocketGeneration(): void {
+    mediaSocketGeneration += 1
+    // Aborted retries must not block recovery on the new socket.
+    inFlightMediaDownloads.clear()
+}
+
+function rememberPendingMedia(m: WAMessage, meta: MediaStoreMeta): void {
+    pendingMediaDownloads.set(meta.messageId, { m, meta })
+}
+
+function forgetPendingMedia(messageId: string): void {
+    pendingMediaDownloads.delete(messageId)
+}
+
+function releaseMediaInFlight(messageId: string, sockGeneration: number): void {
+    if (sockGeneration === mediaSocketGeneration) {
+        inFlightMediaDownloads.delete(messageId)
+    }
+}
+
+async function mediaAlreadyStored(messageId: string): Promise<boolean> {
+    const state = await getMessageMediaState(messageId)
+    return Boolean(state?.mediaPath)
 }
 
 function removePartialMedia(fileName: string): void {
@@ -790,12 +816,29 @@ async function retryMediaDownload(
     sock: WASocket,
     meta: MediaStoreMeta,
     fileName: string,
-    firstErr: unknown
+    firstErr: unknown,
+    sockGeneration: number
 ): Promise<void> {
     const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
     let err = firstErr
+
+    const abortedByReconnect = (attempt: number): boolean => {
+        if (sockGeneration === mediaSocketGeneration) return false
+        log.info(
+            {
+                messageId: meta.messageId,
+                groupJid: meta.groupJid,
+                attempt,
+            },
+            'media.retry_aborted_reconnect'
+        )
+        return true
+    }
+
     for (let failedAttempt = 1; failedAttempt < maxAttempts; failedAttempt++) {
+        if (abortedByReconnect(failedAttempt)) return
         if (!isRetryableMediaError(err)) {
+            forgetPendingMedia(meta.messageId)
             logMediaDownloadFailure(err, meta, failedAttempt)
             return
         }
@@ -817,9 +860,16 @@ async function retryMediaDownload(
             'media.download_retry'
         )
         await sleep(delayMs)
+        // Disconnect may have happened during backoff — re-check before touching the socket.
+        if (abortedByReconnect(failedAttempt)) return
+        if (await mediaAlreadyStored(meta.messageId)) {
+            forgetPendingMedia(meta.messageId)
+            return
+        }
         try {
             await downloadMediaOnce(m, sock, fileName)
             const storedPath = await persistMediaPath(meta.messageId, fileName)
+            forgetPendingMedia(meta.messageId)
             enqueueMediaReady(meta, storedPath)
             log.info(
                 {
@@ -837,6 +887,8 @@ async function retryMediaDownload(
             err = nextErr
         }
     }
+    if (sockGeneration !== mediaSocketGeneration) return
+    forgetPendingMedia(meta.messageId)
     logMediaDownloadFailure(err, meta, maxAttempts)
 }
 
@@ -848,29 +900,73 @@ async function storeMediaFile(
     const fallbackExt = fileTypes[meta.messageType]
     if (!fallbackExt) return null
     if (isLivePhotoMotionVideo(m.message, contentForIngest(m.message))) return null
-    const fileName = await mediaDestPath(m, meta, fallbackExt)
+    if (await mediaAlreadyStored(meta.messageId)) {
+        forgetPendingMedia(meta.messageId)
+        return null
+    }
+    if (inFlightMediaDownloads.has(meta.messageId)) {
+        // Refresh the WAMessage so reconnect recovery uses the latest payload.
+        rememberPendingMedia(m, meta)
+        return null
+    }
+
+    inFlightMediaDownloads.add(meta.messageId)
+    rememberPendingMedia(m, meta)
+    const sockGeneration = mediaSocketGeneration
+    let handoffToRetry = false
     try {
-        await downloadMediaOnce(m, sock, fileName)
-        const storedPath = await persistMediaPath(meta.messageId, fileName)
-        enqueueMediaReady(meta, storedPath)
-        return storedPath
-    } catch (err) {
-        const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
-        if (isRetryableMediaError(err) && maxAttempts > 1) {
-            void retryMediaDownload(m, sock, meta, fileName, err).catch((retryErr) => {
-                log.warn(
-                    {
-                        err: retryErr,
-                        messageId: meta.messageId,
-                        groupJid: meta.groupJid,
-                    },
-                    'media.retry_loop_failed'
-                )
-            })
+        const fileName = await mediaDestPath(m, meta, fallbackExt)
+        try {
+            await downloadMediaOnce(m, sock, fileName)
+            const storedPath = await persistMediaPath(meta.messageId, fileName)
+            forgetPendingMedia(meta.messageId)
+            enqueueMediaReady(meta, storedPath)
+            return storedPath
+        } catch (err) {
+            const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
+            if (isRetryableMediaError(err) && maxAttempts > 1) {
+                handoffToRetry = true
+                void retryMediaDownload(m, sock, meta, fileName, err, sockGeneration)
+                    .catch((retryErr) => {
+                        log.warn(
+                            {
+                                err: retryErr,
+                                messageId: meta.messageId,
+                                groupJid: meta.groupJid,
+                            },
+                            'media.retry_loop_failed'
+                        )
+                    })
+                    .finally(() => {
+                        releaseMediaInFlight(meta.messageId, sockGeneration)
+                    })
+                return null
+            }
+            forgetPendingMedia(meta.messageId)
+            logMediaDownloadFailure(err, meta, 1)
             return null
         }
-        logMediaDownloadFailure(err, meta, 1)
-        return null
+    } finally {
+        if (!handoffToRetry) releaseMediaInFlight(meta.messageId, sockGeneration)
+    }
+}
+
+async function recoverPendingMediaDownloads(sock: WASocket): Promise<void> {
+    if (config.skipMediaDownload || pendingMediaDownloads.size === 0) return
+    const pending = [...pendingMediaDownloads.values()]
+    log.info({ count: pending.length }, 'media.recover_pending')
+    for (const { m, meta } of pending) {
+        if (await mediaAlreadyStored(meta.messageId)) {
+            forgetPendingMedia(meta.messageId)
+            continue
+        }
+        if (inFlightMediaDownloads.has(meta.messageId)) continue
+        void storeMediaFile(m, sock, { ...meta, isHistory: true }).catch((err) => {
+            log.warn(
+                { err, messageId: meta.messageId, groupJid: meta.groupJid },
+                'media.recover_failed'
+            )
+        })
     }
 }
 
@@ -940,7 +1036,7 @@ async function processMessage(
         await setSenderDisplayNames(nameEntries)
     }
     const timestamp = unixSeconds(m.messageTimestamp)
-    if (isHistory && (await shouldIgnoreHistoryTimestamp(jid, timestamp))) return 'ignored'
+    if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
     const messageSecret = extractMessageSecret(m.message)
     const alreadyEdited = isEditedWrapper(m.message)
@@ -954,59 +1050,87 @@ async function processMessage(
         )
         return 'ignored'
     }
-    if (messageId && (await hasMessage(messageId))) {
-        await rememberMessageSecret(messageId, messageSecret)
-        const association = albumAssociationOf(m.message, content)
-        if (association.parentId) {
-            // Native WhatsApp MEDIA_ALBUM association — trust parentMessageKey as-is.
-            await updateAlbumLink(messageId, association.parentId, association.index)
-        } else if (isAlbumMediaType(messageType) && isHistory) {
-            // History sync often strips messageAssociation; fall back to nearby attach.
-            const albumParentId = await resolveAlbumParent({
-                groupJid: jid,
-                senderJid: senderId || null,
-                timestamp,
-                messageType,
-                explicitParentId: null,
-                isHistory,
-            })
-            if (albumParentId) {
-                await updateAlbumLink(messageId, albumParentId, null)
-            }
-        }
-        if (messageType === 'albumMessage') {
-            const expected = albumExpectedOf(m.message, content)
-            await updateAlbumExpected(messageId, expected.images, expected.videos)
-            if (isHistory) {
-                try {
-                    await attachNearbyAlbumMedia({
-                        parentId: messageId,
-                        groupJid: jid,
-                        senderJid: senderId || null,
-                        timestamp,
-                        expectedImages: expected.images,
-                        expectedVideos: expected.videos,
-                    })
-                } catch (err) {
-                    log.warn(
-                        { err, messageId, groupJid: jid, senderJid: senderId },
-                        'album.nearby_attach_failed'
-                    )
-                }
-            }
-        }
-        if (isForwarded) await markMessageForwarded(messageId)
-        if (alreadyEdited) {
-            const editedText = textFromMessage(m.message)
-            if (editedText != null) {
-                const result = await applyPlaintextEdit(messageId, editedText, {
+    if (messageId) {
+        const existing = await getMessageMediaState(messageId)
+        if (existing) {
+            await rememberMessageSecret(messageId, messageSecret)
+            const association = albumAssociationOf(m.message, content)
+            if (association.parentId) {
+                // Native WhatsApp MEDIA_ALBUM association — trust parentMessageKey as-is.
+                await updateAlbumLink(messageId, association.parentId, association.index)
+            } else if (isAlbumMediaType(messageType) && isHistory) {
+                // History sync often strips messageAssociation; fall back to nearby attach.
+                const albumParentId = await resolveAlbumParent({
                     groupJid: jid,
+                    senderJid: senderId || null,
+                    timestamp,
+                    messageType,
+                    explicitParentId: null,
                     isHistory,
                 })
-                if (result === 'applied') return 'edited'
+                if (albumParentId) {
+                    await updateAlbumLink(messageId, albumParentId, null)
+                }
             }
+            if (messageType === 'albumMessage') {
+                const expected = albumExpectedOf(m.message, content)
+                await updateAlbumExpected(messageId, expected.images, expected.videos)
+                if (isHistory) {
+                    try {
+                        await attachNearbyAlbumMedia({
+                            parentId: messageId,
+                            groupJid: jid,
+                            senderJid: senderId || null,
+                            timestamp,
+                            expectedImages: expected.images,
+                            expectedVideos: expected.videos,
+                        })
+                    } catch (err) {
+                        log.warn(
+                            { err, messageId, groupJid: jid, senderJid: senderId },
+                            'album.nearby_attach_failed'
+                        )
+                    }
+                }
+            }
+            if (isForwarded) await markMessageForwarded(messageId)
+            if (alreadyEdited) {
+                const editedText = textFromMessage(m.message)
+                if (editedText != null) {
+                    const result = await applyPlaintextEdit(messageId, editedText, {
+                        groupJid: jid,
+                        isHistory,
+                    })
+                    if (result === 'applied') return 'edited'
+                }
+            }
+            // Message already saved, but media may still be missing after a disconnect mid-download.
+            const needsMedia = Boolean(fileTypes[messageType])
+            if (
+                needsMedia &&
+                !config.skipMediaDownload &&
+                !existing.mediaPath &&
+                !existing.isDeleted
+            ) {
+                const mediaMeta = {
+                    messageId,
+                    groupJid: jid,
+                    groupName,
+                    messageType,
+                    timestamp,
+                    isHistory,
+                    senderName,
+                    albumIndex: association.index ?? null,
+                }
+                ingestLog(
+                    { messageId, groupJid: jid, groupName, messageType, isHistory },
+                    'media.retry_missing'
+                )
+                if (isHistory) void storeMediaFile(m, sock, mediaMeta)
+                else await storeMediaFile(m, sock, mediaMeta)
+            }
+            if (messageType !== 'reactionMessage') return 'ignored'
         }
-        if (messageType !== 'reactionMessage') return 'ignored'
     }
 
     const reaction = content.reactionMessage
@@ -1019,7 +1143,6 @@ async function processMessage(
         try {
             if (!senderId) return 'ignored'
             await upsertGroup(jid, groupName, true)
-            await resolveHistoryFloor(jid)
             await rememberMessageSender(senderId, altSender, senderName)
             if (emoji) {
                 await upsertReaction({
@@ -1108,7 +1231,6 @@ async function processMessage(
 
     try {
         await upsertGroup(jid, groupName, true)
-        await resolveHistoryFloor(jid)
         if (senderId) await rememberMessageSender(senderId, altSender, senderName)
         const mentioned = mentionedJidsOf(content)
         if (mentioned.length > 0) {
@@ -1376,6 +1498,7 @@ async function connectToWhatsApp() {
             }
             noteDisconnected(detail)
             catchup.stop()
+            bumpMediaSocketGeneration()
             // restartRequired: reconnect ASAP; otherwise back off so offline phone
             // does not spin-connect and flood logs.
             scheduleReconnect(restartRequired || loggedOut)
@@ -1386,6 +1509,7 @@ async function connectToWhatsApp() {
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
             noteConnected()
             void cacheParticipatingGroups()
+            void recoverPendingMediaDownloads(sock)
         }
     }
 
@@ -1424,29 +1548,31 @@ async function connectToWhatsApp() {
             const { messages, contacts, syncType, lidPnMappings } = history
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
+            const latestBefore = new Map<string, number | undefined>()
+            const cutoff = historyCutoffSeconds()
 
             await rememberLidMappings(lidPnMappings)
             await rememberContacts(contacts)
 
             for (const m of messages || []) {
-                const groupJid = m.key.remoteJid
-                if (
-                    groupJid &&
-                    isJidGroup(groupJid) &&
-                    (await shouldIgnoreHistoryTimestamp(groupJid, unixSeconds(m.messageTimestamp)))
-                ) {
+                if (unixSeconds(m.messageTimestamp) < cutoff) {
                     counts.tooOld += 1
                     continue
                 }
-                counts[await processMessage(m, sock, true, (groupJid) => {
-                    catchup.setTrackedGroups([groupJid])
+                const groupJid = m.key.remoteJid
+                if (groupJid && !latestBefore.has(groupJid)) {
+                    const latest = await getLatestGroupMessage(groupJid)
+                    latestBefore.set(groupJid, latest?.timestamp)
+                }
+                counts[await processMessage(m, sock, true, (trackedJid) => {
+                    catchup.setTrackedGroups([trackedJid])
                 })] += 1
             }
             for (const m of messages || []) {
                 const result = await applyIncomingEdit(m, true)
                 if (result === 'applied') counts.edited += 1
             }
-            await catchup.considerHistoryBatch(messages || [], syncType)
+            await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
             catchup.noteHistoryChunk(syncType)
             log.info({ syncType, ms: Date.now() - started, ...counts }, 'history.sync.done')
         }

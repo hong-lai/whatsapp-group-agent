@@ -85,14 +85,15 @@ export const config = {
     mediaRetryMaxMs: envInt('MEDIA_RETRY_MAX_MS', 60_000),
     /** When true, save message rows but skip downloading media files (faster text-only ingest). */
     skipMediaDownload: env('SKIP_MEDIA_DOWNLOAD', 'false') === 'true',
-    /**
-     * First QR login only: keep/fetch at most this many seconds of history.
-     * After that, reconnect gap-fill has no time window (only a page safety cap).
-     */
-    catchupBackfillSeconds: envInt('CATCHUP_BACKFILL_SECONDS', 24 * 60 * 60),
+    /** Reconnect catchup: only fill gaps newer than now - this many seconds. */
+    catchupWindowSeconds: envInt('CATCHUP_WINDOW_SECONDS', 15 * 60),
+    /** First login / deep backfill: keep/fetch at most this many seconds of history. */
+    catchupBackfillSeconds: envInt('CATCHUP_BACKFILL_SECONDS', 2 * 24 * 60 * 60),
     catchupPageSize: envInt('CATCHUP_PAGE_SIZE', 50),
-    /** Safety cap on on-demand history pages per group per connection (gap + initial). */
-    catchupMaxPages: envInt('CATCHUP_MAX_PAGES', 200),
+    /** Max on-demand pages per group for reconnect window catchup. */
+    catchupMaxPages: envInt('CATCHUP_MAX_PAGES', 3),
+    /** Max on-demand pages per group for first-login / deep backfill. */
+    catchupBackfillMaxPages: envInt('CATCHUP_BACKFILL_MAX_PAGES', 40),
     logLevel: envLogLevel('LOG_LEVEL', 'info'),
     adminPassword: env('ADMIN_PASSWORD', 'laiwaihong'),
     /** Enqueue message events for external Python workflow workers (BullMQ). */
