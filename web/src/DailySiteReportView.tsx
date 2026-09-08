@@ -145,12 +145,12 @@ const REPORT_TABLE_COLUMNS: ReportTableColumn[] = [
     { id: 'rss', className: 'col-rss', label: 'RSS' },
     { id: 'workers', className: 'col-workers', label: '工人' },
     { id: 'numWorkers', className: 'col-num', label: '開工', title: '開工人數' },
-    { id: 'workScopes', className: 'col-scope', label: '工作內容' },
     { id: 'trench', className: 'col-metric', label: '開坑', title: '累計開坑長度' },
-    { id: 'coring', className: 'col-metric', label: 'Coring', title: '累計Coring長度' },
-    { id: 'cable', className: 'col-metric', label: '拉線', title: '累計拉線長度' },
     { id: 'conduit', className: 'col-metric', label: '放筒', title: '累計放筒長度' },
+    { id: 'cable', className: 'col-metric', label: '拉線', title: '累計拉線長度' },
     { id: 'trialPit', className: 'col-metric', label: '探窿', title: '累計探窿數量' },
+    { id: 'coring', className: 'col-metric', label: 'Coring', title: '累計Coring長度' },
+    { id: 'workScopes', className: 'col-scope', label: '工作內容' },
     { id: 'remarks', className: 'col-remarks', label: '備註' },
     { id: 'status', className: 'col-status', label: '狀態', defaultVisible: false },
     { id: 'flags', className: 'col-flags', label: '訊息' },
@@ -673,10 +673,10 @@ function MessageFlags({ report, compact = false }: { report: DailySiteReport; co
 const REPORT_MOBILE_METRICS: { label: string; title: string; key: keyof DailySiteReport }[] = [
     { label: '開工', title: '開工人數', key: 'numWorkers' },
     { label: '開坑', title: '累計開坑長度', key: 'trenchLength' },
-    { label: 'Coring', title: '累計Coring長度', key: 'coringLength' },
-    { label: '拉線', title: '累計拉線長度', key: 'cablePullingLength' },
     { label: '放筒', title: '累計放筒長度', key: 'conduitLayingLength' },
+    { label: '拉線', title: '累計拉線長度', key: 'cablePullingLength' },
     { label: '探窿', title: '累計探窿數量', key: 'trialPitCount' },
+    { label: 'Coring', title: '累計Coring長度', key: 'coringLength' },
 ]
 
 function ReportMobileCard({
@@ -719,8 +719,6 @@ function ReportMobileCard({
                 </p>
             )}
 
-            {scope && <p className="report-mobile-card-scope">{scope}</p>}
-
             <div className="report-mobile-card-metrics" aria-label="Report metrics">
                 {REPORT_MOBILE_METRICS.map((metric) => {
                     const raw = report[metric.key]
@@ -738,6 +736,8 @@ function ReportMobileCard({
                     )
                 })}
             </div>
+
+            {scope && <p className="report-mobile-card-scope">{scope}</p>}
 
             <div className="report-mobile-card-foot">
                 <WorkersDropdown workers={report.workers} />
@@ -932,12 +932,12 @@ function ReportDetail({
             value: report.numWorkers?.toString() ?? '—',
             warn: report.numWorkers == null || hasIssue(report, 'workers_over'),
         },
-        { label: '工作內容', value: joinList(report.workScopes), warn: report.workScopes.length === 0 },
         { label: '累計開坑長度', value: `${report.trenchLength} 米` },
-        { label: '累計Coring長度', value: `${report.coringLength} 米` },
-        { label: '累計拉線長度', value: `${report.cablePullingLength} 米` },
         { label: '累計放筒長度', value: `${report.conduitLayingLength} 米` },
+        { label: '累計拉線長度', value: `${report.cablePullingLength} 米` },
         { label: '累計探窿數量', value: `${report.trialPitCount} 個` },
+        { label: '累計Coring長度', value: `${report.coringLength} 米` },
+        { label: '工作內容', value: joinList(report.workScopes), warn: report.workScopes.length === 0 },
         { label: '備註', value: report.remarks || '—' },
         { label: '最後更新', value: formatHktDateTime(report.updatedAt) },
     ]

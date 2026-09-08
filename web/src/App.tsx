@@ -1483,12 +1483,6 @@ function SiteReportTag({
                                       {joinPreviewList(report.refNumbers)}
                                   </dd>
                               </div>
-                              <div className="is-wide">
-                                  <dt>工作內容</dt>
-                                  <dd className={report.workScopes.length === 0 ? 'is-warn' : undefined}>
-                                      {joinPreviewList(report.workScopes)}
-                                  </dd>
-                              </div>
                               <div>
                                   <dt>開工人數</dt>
                                   <dd
@@ -1508,6 +1502,12 @@ function SiteReportTag({
                                       {joinPreviewList(report.workers)}
                                   </dd>
                               </div>
+                              <div className="is-wide">
+                                  <dt>工作內容</dt>
+                                  <dd className={report.workScopes.length === 0 ? 'is-warn' : undefined}>
+                                      {joinPreviewList(report.workScopes)}
+                                  </dd>
+                              </div>
                           </dl>
                           <div className="site-report-preview-metrics" aria-label="工程數量">
                               <span>
@@ -1516,9 +1516,9 @@ function SiteReportTag({
                                   <em>開坑</em>
                               </span>
                               <span>
-                                  <strong>{report.coringLength}</strong>
+                                  <strong>{report.conduitLayingLength}</strong>
                                   <small>m</small>
-                                  <em>Coring</em>
+                                  <em>放筒</em>
                               </span>
                               <span>
                                   <strong>{report.cablePullingLength}</strong>
@@ -1526,14 +1526,14 @@ function SiteReportTag({
                                   <em>拉線</em>
                               </span>
                               <span>
-                                  <strong>{report.conduitLayingLength}</strong>
-                                  <small>m</small>
-                                  <em>放筒</em>
-                              </span>
-                              <span>
                                   <strong>{report.trialPitCount}</strong>
                                   <small>pcs</small>
                                   <em>探窿</em>
+                              </span>
+                              <span>
+                                  <strong>{report.coringLength}</strong>
+                                  <small>m</small>
+                                  <em>Coring</em>
                               </span>
                           </div>
                           {report.remarks?.trim() && (

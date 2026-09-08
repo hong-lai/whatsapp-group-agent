@@ -28,7 +28,7 @@ export async function writeDailySiteReportCsvForMessageDate(
         fromDate: messageDate,
         toDate: messageDate,
         dateField: 'message',
-        sortBy: 'messageDate',
+        sortBy: 'po',
         sortDir: 'asc',
         maxRows: 5000,
     })

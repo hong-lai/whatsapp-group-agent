@@ -9,12 +9,12 @@ export const DAILY_SITE_REPORT_CSV_HEADER = [
     'RSS',
     '工人',
     '開工人數',
-    '工作內容',
     '累計開坑長度',
-    '累計Coring長度',
-    '累計拉線長度',
     '累計放筒長度',
+    '累計拉線長度',
     '累計探窿數量',
+    '累計Coring長度',
+    '工作內容',
 ] as const
 
 export function csvCell(value: string | number | null | undefined): string {
@@ -33,12 +33,12 @@ export function dailySiteReportCsvRow(report: DailySiteReport): string {
         report.rss,
         report.workers.join(', '),
         report.numWorkers,
-        report.workScopes.join(', '),
         report.trenchLength,
-        report.coringLength,
-        report.cablePullingLength,
         report.conduitLayingLength,
+        report.cablePullingLength,
         report.trialPitCount,
+        report.coringLength,
+        report.workScopes.join(', '),
     ]
         .map(csvCell)
         .join(',')

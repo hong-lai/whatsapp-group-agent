@@ -44,10 +44,10 @@ type MetricConfig = {
 
 const METRICS: MetricConfig[] = [
     { key: 'trenchLength', label: '累計開坑長度', unit: '米', color: '#16866f' },
-    { key: 'coringLength', label: '累計Coring長度', unit: '米', color: '#2f7bd6' },
-    { key: 'cablePullingLength', label: '累計拉線長度', unit: '米', color: '#c47a1a' },
     { key: 'conduitLayingLength', label: '累計放筒長度', unit: '米', color: '#7a5cc7' },
+    { key: 'cablePullingLength', label: '累計拉線長度', unit: '米', color: '#c47a1a' },
     { key: 'trialPitCount', label: '累計探窿數量', unit: '個', color: '#c24b5a' },
+    { key: 'coringLength', label: '累計Coring長度', unit: '米', color: '#2f7bd6' },
 ]
 
 function formatAxisDate(value: string): string {
