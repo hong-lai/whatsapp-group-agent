@@ -2,6 +2,36 @@ import { basename, extname } from 'node:path'
 
 const HONG_KONG_OFFSET_MS = 8 * 60 * 60 * 1000
 
+export type HktParts = {
+    date: string
+    time: string
+}
+
+/** Calendar date / clock parts in Asia/Hong_Kong for a unix-seconds or ms timestamp. */
+export function hktParts(timestamp: number, unit: 'seconds' | 'ms' = 'seconds'): HktParts {
+    const ms = unit === 'ms' ? timestamp : timestamp * 1000
+    const date = new Date(ms + HONG_KONG_OFFSET_MS)
+    const year = date.getUTCFullYear()
+    const month = String(date.getUTCMonth() + 1).padStart(2, '0')
+    const day = String(date.getUTCDate()).padStart(2, '0')
+    const hour = date.getUTCHours()
+    const minute = date.getUTCMinutes()
+    const second = date.getUTCSeconds()
+    return {
+        date: `${year}-${month}-${day}`,
+        time: [
+            String(hour).padStart(2, '0'),
+            String(minute).padStart(2, '0'),
+            String(second).padStart(2, '0'),
+        ].join('-'),
+    }
+}
+
+/** Today's calendar date in Asia/Hong_Kong (`YYYY-MM-DD`). */
+export function hktToday(nowMs = Date.now()): string {
+    return hktParts(nowMs, 'ms').date
+}
+
 export function safePathSegment(value: string, fallback: string): string {
     const sanitized = value
         .normalize('NFKC')
@@ -13,18 +43,8 @@ export function safePathSegment(value: string, fallback: string): string {
 }
 
 export function hktStamp(timestamp: number): { date: string; time: string } {
-    const date = new Date(timestamp * 1000 + HONG_KONG_OFFSET_MS)
-    const parts = [
-        date.getUTCFullYear(),
-        String(date.getUTCMonth() + 1).padStart(2, '0'),
-        String(date.getUTCDate()).padStart(2, '0'),
-    ]
-    const time = [
-        String(date.getUTCHours()).padStart(2, '0'),
-        String(date.getUTCMinutes()).padStart(2, '0'),
-        String(date.getUTCSeconds()).padStart(2, '0'),
-    ]
-    return { date: parts.join('-'), time: time.join('-') }
+    const parts = hktParts(timestamp, 'seconds')
+    return { date: parts.date, time: parts.time }
 }
 
 export function mediaExtension(nameOrPath: string, fallback = 'bin'): string {

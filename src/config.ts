@@ -119,6 +119,10 @@ export const config = {
         'DAILY_SITE_REPORT_PROMPTS_DIR',
         './agent-workflows/private/daily_site_report'
     ),
+    /** On-disk daily site report CSV root (`{dir}/{messageDate}/daily_site_report.csv`). */
+    reportsDir: env('REPORTS_DIR', './reports'),
+    /** Debounce before writing today's message-day CSV after the last report change. */
+    dailySiteReportFileDebounceMs: envInt('DAILY_SITE_REPORT_FILE_DEBOUNCE_MS', 30_000),
 }
 
 export function matchesGroupPattern(name: string | undefined | null): boolean {

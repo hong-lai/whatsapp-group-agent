@@ -1111,6 +1111,22 @@ export async function getStoredMessageContent(messageId: string): Promise<string
     return result.rows[0]?.text_content ?? null
 }
 
+/** Message calendar date in Asia/Hong_Kong (`YYYY-MM-DD`), or null if missing. */
+export async function getMessageHktDate(messageId: string): Promise<string | null> {
+    const result = await pool.query<{ timestamp: string | null }>(
+        `SELECT EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE message_id = $1
+         LIMIT 1`,
+        [messageId]
+    )
+    const raw = result.rows[0]?.timestamp
+    if (raw == null) return null
+    const epoch = Number(raw)
+    if (!Number.isFinite(epoch)) return null
+    return hktStamp(epoch).date
+}
+
 /** Fields Baileys needs via `getMessage` for retries and encrypted edit unwrap. */
 export async function getStoredMessageForGetMessage(
     messageId: string

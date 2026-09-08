@@ -21,7 +21,53 @@ export type ReportChangePayload = {
 }
 
 const clients = new Set<Response>()
+const listeners = new Set<(payload: ReportChangePayload) => void>()
 let subscriber: Redis | null = null
+
+function parsePayload(message: string): ReportChangePayload | null {
+    try {
+        const parsed = JSON.parse(message) as Partial<ReportChangePayload>
+        if (
+            parsed.action !== 'extracted' &&
+            parsed.action !== 'updated' &&
+            parsed.action !== 'deleted'
+        ) {
+            return null
+        }
+        if (typeof parsed.messageId !== 'string' || !parsed.messageId) return null
+        return {
+            action: parsed.action,
+            messageId: parsed.messageId,
+            groupJid: typeof parsed.groupJid === 'string' ? parsed.groupJid : null,
+            poNumber: typeof parsed.poNumber === 'string' ? parsed.poNumber : null,
+            date: typeof parsed.date === 'string' ? parsed.date : null,
+            contractor: typeof parsed.contractor === 'string' ? parsed.contractor : null,
+            reportId:
+                typeof parsed.reportId === 'number' && Number.isFinite(parsed.reportId)
+                    ? parsed.reportId
+                    : null,
+            at: typeof parsed.at === 'string' ? parsed.at : new Date().toISOString(),
+        }
+    } catch {
+        return null
+    }
+}
+
+function fanOut(message: string): void {
+    const frame = `data: ${message}\n\n`
+    for (const client of clients) {
+        client.write(frame)
+    }
+    const payload = parsePayload(message)
+    if (!payload) return
+    for (const listener of listeners) {
+        try {
+            listener(payload)
+        } catch (error) {
+            log.warn({ err: String(error) }, 'report_processed.listener_error')
+        }
+    }
+}
 
 function ensureSubscriber(): void {
     if (subscriber) return
@@ -37,11 +83,19 @@ function ensureSubscriber(): void {
     })
     subscriber.on('message', (channel, message) => {
         if (channel !== REPORT_PROCESSED_CHANNEL) return
-        const frame = `data: ${message}\n\n`
-        for (const client of clients) {
-            client.write(frame)
-        }
+        fanOut(message)
     })
+}
+
+/** Register a listener for report create/update/delete events. Starts Redis subscribe. */
+export function onReportChange(
+    listener: (payload: ReportChangePayload) => void
+): () => void {
+    listeners.add(listener)
+    ensureSubscriber()
+    return () => {
+        listeners.delete(listener)
+    }
 }
 
 export async function publishReportChange(

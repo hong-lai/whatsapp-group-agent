@@ -6,6 +6,8 @@ auth_info_baileys/
 .DS_Store
 whatsapp_messages.db
 downloads/
+reports/*
+!reports/.gitkeep
 .cursor/
 
 # Confidential company prompts / local Python venv for agent workflows

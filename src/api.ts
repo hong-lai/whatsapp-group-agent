@@ -19,6 +19,7 @@ import {
     uniqueArchivePath,
 } from './hkt.js'
 import { log } from './log.js'
+import { startDailySiteReportFileGenerator } from './dailySiteReportFile.js'
 import { handleReportProcessedSse, publishReportChange } from './reportProcessedEvents.js'
 import { handleWorkflowStatusSse } from './workflowStatusEvents.js'
 import {
@@ -1178,6 +1179,7 @@ export function createApiApp() {
 }
 
 export function startApi(): void {
+    startDailySiteReportFileGenerator()
     createApiApp().listen(config.webPort, '0.0.0.0', () => {
         log.info({ port: config.webPort }, 'dashboard.listening')
     })

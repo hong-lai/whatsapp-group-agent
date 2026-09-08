@@ -71,9 +71,11 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-1234}
       LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
       DAILY_SITE_REPORT_PROMPTS_DIR: /app/agent-workflows/private/daily_site_report
+      REPORTS_DIR: /app/reports
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
       - ./downloads:/app/downloads
+      - ./reports:/app/reports
       - ./agent-workflows/private:/app/agent-workflows/private:ro
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
