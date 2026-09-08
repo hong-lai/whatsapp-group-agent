@@ -2131,7 +2131,7 @@ export async function getAlbumMediaForDownload(
     }))
 }
 
-export type DailySiteReportDateField = 'report' | 'created'
+export type DailySiteReportDateField = 'report' | 'created' | 'message'
 
 export type DailySiteReportSortBy =
     | 'reportDate'
@@ -2213,12 +2213,31 @@ const DAILY_SITE_REPORT_SORT_SPECS: Record<
     updatedAt: { sql: 'r.updated_at', type: 'timestamptz' },
 }
 
+function dailySiteReportDateExpr(dateField: DailySiteReportDateField): string {
+    if (dateField === 'created') {
+        return `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date`
+    }
+    if (dateField === 'message') {
+        return `(m.timestamp AT TIME ZONE 'Asia/Hong_Kong')::date`
+    }
+    return 'r.report_date'
+}
+
+function dailySiteReportDateFilterSql(dateField: DailySiteReportDateField): string {
+    const dateExpr = dailySiteReportDateExpr(dateField)
+    return `${dateExpr} >= $1::date AND ${dateExpr} <= $2::date`
+}
+
+function dailySiteReportNeedsMessagesJoin(dateField: DailySiteReportDateField): boolean {
+    return dateField === 'message'
+}
+
 export function defaultDailySiteReportSort(
     dateField: DailySiteReportDateField
 ): { sortBy: DailySiteReportSortBy; sortDir: DailySiteReportSortDir } {
-    return dateField === 'created'
-        ? { sortBy: 'createdAt', sortDir: 'desc' }
-        : { sortBy: 'reportDate', sortDir: 'desc' }
+    if (dateField === 'created') return { sortBy: 'createdAt', sortDir: 'desc' }
+    if (dateField === 'message') return { sortBy: 'messageDate', sortDir: 'desc' }
+    return { sortBy: 'reportDate', sortDir: 'desc' }
 }
 
 export function isDailySiteReportSortBy(value: unknown): value is DailySiteReportSortBy {
@@ -2563,12 +2582,11 @@ export async function listDailySiteReports(options: {
     const sortBy = options.sortBy ?? defaults.sortBy
     const sortDir = options.sortDir ?? defaults.sortDir
     const sortSpec = DAILY_SITE_REPORT_SORT_SPECS[sortBy]
-    const dateFilterSql =
-        dateField === 'created'
-            ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date >= $1::date
-               AND (r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date <= $2::date`
-            : `r.report_date >= $1::date AND r.report_date <= $2::date`
+    const dateFilterSql = dailySiteReportDateFilterSql(dateField)
     const orderSql = `${sortSpec.sql} ${sortDir.toUpperCase()} NULLS LAST, r.id ${sortDir.toUpperCase()}`
+    const countJoinSql = dailySiteReportNeedsMessagesJoin(dateField)
+        ? `LEFT JOIN messages m ON m.message_id = r.message_id`
+        : ''
 
     const search = dailySiteReportSearchSql(options.query, 4)
     const cursor = options.cursor
@@ -2608,6 +2626,7 @@ export async function listDailySiteReports(options: {
         pool.query<{ count: string }>(
             `SELECT COUNT(*)::text AS count
              FROM daily_site_reports r
+             ${countJoinSql}
              WHERE ${whereSql}`,
             baseParams
         ),
@@ -2696,11 +2715,10 @@ export async function listDailySiteReportMessageIds(options: {
     }
 
     const dateField = options.dateField ?? 'report'
-    const dateFilterSql =
-        dateField === 'created'
-            ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date >= $1::date
-               AND (r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date <= $2::date`
-            : `r.report_date >= $1::date AND r.report_date <= $2::date`
+    const dateFilterSql = dailySiteReportDateFilterSql(dateField)
+    const messagesJoinSql = dailySiteReportNeedsMessagesJoin(dateField)
+        ? `LEFT JOIN messages m ON m.message_id = r.message_id`
+        : ''
     const search = dailySiteReportSearchSql(options.query, 4)
     const params: Array<string | number | string[]> = [
         options.fromDate,
@@ -2717,12 +2735,14 @@ export async function listDailySiteReportMessageIds(options: {
         pool.query<{ count: string }>(
             `SELECT COUNT(*)::text AS count
              FROM daily_site_reports r
+             ${messagesJoinSql}
              WHERE ${whereSql}`,
             params
         ),
         pool.query<{ message_id: string }>(
             `SELECT r.message_id
              FROM daily_site_reports r
+             ${messagesJoinSql}
              WHERE ${whereSql}
              ORDER BY r.id ASC
              LIMIT $${params.length + 1}`,
@@ -2757,14 +2777,11 @@ export async function listDailySiteReportMetricsSeries(options: {
     if (groupJids.length === 0) return []
 
     const dateField = options.dateField ?? 'report'
-    const dateExpr =
-        dateField === 'created'
-            ? `(r.created_at AT TIME ZONE 'Asia/Hong_Kong')::date`
-            : `r.report_date`
-    const dateFilterSql =
-        dateField === 'created'
-            ? `${dateExpr} >= $1::date AND ${dateExpr} <= $2::date`
-            : `r.report_date >= $1::date AND r.report_date <= $2::date`
+    const dateExpr = dailySiteReportDateExpr(dateField)
+    const dateFilterSql = dailySiteReportDateFilterSql(dateField)
+    const messagesJoinSql = dailySiteReportNeedsMessagesJoin(dateField)
+        ? `LEFT JOIN messages m ON m.message_id = r.message_id`
+        : ''
     const search = dailySiteReportSearchSql(options.query, 4)
     const params: Array<string | string[]> = [
         options.fromDate,
@@ -2796,6 +2813,7 @@ export async function listDailySiteReportMetricsSeries(options: {
             COALESCE(SUM(r.trial_pit_count), 0)::text AS trial_pit_count,
             COUNT(*)::text AS report_count
          FROM daily_site_reports r
+         ${messagesJoinSql}
          WHERE ${whereSql}
          GROUP BY ${dateExpr}
          ORDER BY ${dateExpr} ASC`,

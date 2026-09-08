@@ -9,7 +9,7 @@ import {
     YAxis,
 } from 'recharts'
 
-type DailySiteReportDateField = 'report' | 'created'
+type DailySiteReportDateField = 'report' | 'created' | 'message'
 
 export type MetricsSeriesPoint = {
     date: string

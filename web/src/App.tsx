@@ -17,7 +17,10 @@ import AlbumView, {
     type AlbumScope,
     type MediaCategory,
 } from './AlbumView'
-import DailySiteReportView, { type DailySiteReport } from './DailySiteReportView'
+import DailySiteReportView, {
+    type DailySiteReport,
+    type DailySiteReportDateField,
+} from './DailySiteReportView'
 import DateRangePicker from './DateRangePicker'
 import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
@@ -2088,8 +2091,12 @@ export default function App() {
     )
     const [albumQuery, setAlbumQuery] = useState(initialParams.get('q') || '')
     const [reportsQuery, setReportsQuery] = useState(initialParams.get('rq') || '')
-    const [reportsDateField, setReportsDateField] = useState<'report' | 'created'>(
-        initialParams.get('dateField') === 'created' ? 'created' : 'report'
+    const [reportsDateField, setReportsDateField] = useState<DailySiteReportDateField>(
+        initialParams.get('dateField') === 'created'
+            ? 'created'
+            : initialParams.get('dateField') === 'message'
+              ? 'message'
+              : 'report'
     )
     const [reportsGroupsCollapsed, setReportsGroupsCollapsed] = useState(
         () =>
@@ -2203,7 +2210,7 @@ export default function App() {
         }
         if (view === 'reports') {
             if (reportsQuery.trim()) params.set('rq', reportsQuery.trim())
-            if (reportsDateField === 'created') params.set('dateField', 'created')
+            if (reportsDateField !== 'report') params.set('dateField', reportsDateField)
         }
         window.history.replaceState(null, '', `${window.location.pathname}?${params}`)
     }, [from, to, selectedJid, view, albumScope, albumGroupJids, albumTypes, albumQuery, reportsQuery, reportsDateField, showEmptyGroups, sortOrder])

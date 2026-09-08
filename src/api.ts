@@ -320,7 +320,8 @@ function decodeReportCursor(value: unknown): DailySiteReportCursor | undefined {
 }
 
 function parseReportDateField(value: unknown): DailySiteReportDateField {
-    return value === 'created' ? 'created' : 'report'
+    if (value === 'created' || value === 'message') return value
+    return 'report'
 }
 
 function parseReportSort(

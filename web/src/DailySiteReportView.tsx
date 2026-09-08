@@ -10,7 +10,7 @@ export type DailySiteReportIssue = {
     label: string
 }
 
-export type DailySiteReportDateField = 'report' | 'created'
+export type DailySiteReportDateField = 'report' | 'created' | 'message'
 
 export type DailySiteReport = {
     id: number
@@ -170,9 +170,15 @@ const REPORT_TABLE_DEFAULT_VISIBLE_IDS = REPORT_TABLE_COLUMNS.filter(
 const REPORT_SORT_BY_IDS: ReportSortBy[] = [...REPORT_TABLE_COLUMN_IDS, 'createdAt']
 
 function defaultReportSort(dateField: DailySiteReportDateField): ReportSortState {
-    return dateField === 'created'
-        ? { sortBy: 'createdAt', sortDir: 'desc' }
-        : { sortBy: 'reportDate', sortDir: 'desc' }
+    if (dateField === 'created') return { sortBy: 'createdAt', sortDir: 'desc' }
+    if (dateField === 'message') return { sortBy: 'messageDate', sortDir: 'desc' }
+    return { sortBy: 'reportDate', sortDir: 'desc' }
+}
+
+function dateFieldLabel(dateField: DailySiteReportDateField): string {
+    if (dateField === 'created') return '建立日期'
+    if (dateField === 'message') return '訊息日期'
+    return '報告日期'
 }
 
 function readReportSort(dateField: DailySiteReportDateField): ReportSortState {
@@ -1621,7 +1627,12 @@ function BulkWorkflowRerunDialog({
                         <dt>Range</dt>
                         <dd>
                             {from} → {to} (
-                            {dateField === 'created' ? 'created date' : 'report date'})
+                            {dateField === 'created'
+                                ? 'created date'
+                                : dateField === 'message'
+                                  ? 'message date'
+                                  : 'report date'}
+                            )
                         </dd>
                     </div>
                     <div>
@@ -1852,7 +1863,9 @@ export default function DailySiteReportView({
     const dateRangeHint =
         dateField === 'created'
             ? '以建立日期篩選 — 可對照報告日期找出填錯日期的記錄'
-            : '以報告日期篩選'
+            : dateField === 'message'
+              ? '以訊息日期篩選 — 可對照報告日期找出填錯日期的記錄'
+              : '以報告日期篩選'
 
     return (
         <section className="reports-panel">
@@ -1883,7 +1896,7 @@ export default function DailySiteReportView({
                                         {total} report{total === 1 ? '' : 's'}
                                     </span>
                                     <span className="reports-meta-hint" title={dateRangeHint}>
-                                        {dateField === 'created' ? '建立日期' : '報告日期'}
+                                        {dateFieldLabel(dateField)}
                                     </span>
                                 </div>
                             </div>
@@ -1949,6 +1962,14 @@ export default function DailySiteReportView({
                                     onClick={() => onDateFieldChange('created')}
                                 >
                                     建立日期
+                                </button>
+                                <button
+                                    type="button"
+                                    className={dateField === 'message' ? 'active' : ''}
+                                    aria-pressed={dateField === 'message'}
+                                    onClick={() => onDateFieldChange('message')}
+                                >
+                                    訊息日期
                                 </button>
                             </div>
                             {viewMode === 'table' && (
