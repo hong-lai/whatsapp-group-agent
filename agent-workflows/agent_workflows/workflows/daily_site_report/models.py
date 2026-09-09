@@ -13,19 +13,34 @@ class ClassifiedResult(BaseModel):
 
 class CumulativeMetrics(BaseModel):
     trench_length: float = Field(
-        description="The cumulative length of the trench in meters."
+        description=(
+            "Cumulative trench length in meters. "
+            "If written as a sum of parts (e.g. 26.3（A）+7.5（B）), output the total (33.8)."
+        )
     )
     coring_length: float = Field(
-        description="The cumulative length of the coring in meters."
+        description=(
+            "Cumulative coring length in meters. "
+            "If written as a sum of parts, output the total."
+        )
     )
     cable_pulling_length: float = Field(
-        description="The cumulative length of cable pulling in meters."
+        description=(
+            "Cumulative cable-pulling length in meters. "
+            "If written as a sum of parts, output the total."
+        )
     )
     conduit_laying_length: float = Field(
-        description="The cumulative length of conduit laying in meters."
+        description=(
+            "Cumulative conduit-laying length in meters. "
+            "If written as a sum of parts, output the total."
+        )
     )
     trial_pit_count: int = Field(
-        description="The cumulative count of trial pits excavated."
+        description=(
+            "Cumulative trial-pit count. "
+            "If written as a sum of parts, output the total."
+        )
     )
 
 
@@ -63,8 +78,7 @@ class DailySiteReport(BaseModel):
     )
     cumulative_metrics: CumulativeMetrics = Field(
         description=(
-            "The aggregated metric measurements tracking construction progress "
-            "for each contractor."
+            "Aggregated progress metrics. When a metric value is written as a sum "
         )
     )
     remarks: Optional[str] = Field(
