@@ -9,6 +9,7 @@ Extract fields matching the DailySiteReport schema and normalize dates/numbers.
 HARD CONSTRAINTS
 - 人手 not 入手 / 人で (manual labour OCR mistakes).
 - Spaced digits are not decimals: join digit gaps before units; only a real decimal point is fractional.
+- Spaces in Chinese dates are digit gaps, not a split: 2026年9月1 2號 → 2026-09-12 (not 2026-09-01).
 - num_workers comes only from the 開工人數 label; never count workers/rss names to set it.
 
 workers

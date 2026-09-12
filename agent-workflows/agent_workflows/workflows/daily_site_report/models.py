@@ -50,7 +50,13 @@ RefNumberStr = Annotated[
 
 
 class DailySiteReport(BaseModel):
-    date: str = Field(description="The date of the report in YYYY-MM-DD format.")
+    date: str = Field(
+        description=(
+            "The date of the report in YYYY-MM-DD format. "
+            "Spaces between digits in 年/月/日/號 are wrap/OCR gaps: join them "
+            "(e.g. 2026年9月1 2號 → 2026-09-12, not 2026-09-01)."
+        )
+    )
     po_number: str = Field(description="The Purchase Order (PO) identification number.")
     ref_number: List[RefNumberStr] = Field(
         description="A list of reference numbers associated with the project."
