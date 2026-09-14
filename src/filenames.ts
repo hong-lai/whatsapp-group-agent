@@ -1,14 +1,10 @@
 import { basename, extname } from 'node:path'
+import sanitize from 'sanitize-filename'
 import { hktStamp } from './hkt.js'
 
-export function safePathSegment(value: string, fallback: string): string {
-    const sanitized = value
-        .normalize('NFKC')
-        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
-        .replace(/\.+$/g, '')
-        .trim()
-        .slice(0, 100)
-    return sanitized || fallback
+/** Sanitize a single path segment / filename stem; use fallback if nothing remains. */
+export function sanitizeFilename(value: string, fallback: string): string {
+    return sanitize(value.normalize('NFKC'), { replacement: '_' }) || fallback
 }
 
 export function mediaExtension(nameOrPath: string, fallback = 'bin'): string {
@@ -28,7 +24,7 @@ export function mediaExtension(nameOrPath: string, fallback = 'bin'): string {
 export function fileStem(name: string, fallback: string): string {
     const extension = extname(name)
     const stem = extension ? basename(name, extension) : basename(name)
-    return safePathSegment(stem, fallback)
+    return sanitizeFilename(stem, fallback)
 }
 
 export const DELETED_FILENAME_SUFFIX = '_deleted'
@@ -73,7 +69,7 @@ export function hktFilename(
     if (source) {
         return `${stamp.date}_${stamp.time}_${fileStem(source, 'document')}${extension}`
     }
-    return `${stamp.date}_${stamp.time}_${safePathSegment(messageId, 'media')}${extension}`
+    return `${stamp.date}_${stamp.time}_${sanitizeFilename(messageId, 'media')}${extension}`
 }
 
 export function storedDownloadName(storedPath: string, timestamp: number, messageId: string): string {

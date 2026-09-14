@@ -14,7 +14,7 @@ import {
 } from './filenameFormat.js'
 import {
     contentDisposition,
-    safePathSegment,
+    sanitizeFilename,
     storedDownloadName,
     uniqueArchivePath,
 } from './filenames.js'
@@ -1081,7 +1081,7 @@ export function createApiApp() {
                 const archivePath = uniqueArchivePath(
                     groupJids?.length === 1
                         ? filename
-                        : `${safePathSegment(item.groupName, item.groupJid)}/${filename}`,
+                        : `${sanitizeFilename(item.groupName, item.groupJid)}/${filename}`,
                     usedPaths
                 )
                 archive.append(createReadStream(item.resolvedPath), { name: archivePath })

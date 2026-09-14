@@ -7,7 +7,7 @@ import {
     fileStem,
     firstAvailableName,
     mediaExtension,
-    safePathSegment,
+    sanitizeFilename,
 } from './filenames.js'
 import { hktStamp } from './hkt.js'
 import { log } from './log.js'
@@ -96,7 +96,7 @@ export function filenameTypeForMessage(messageType: string): FilenameMediaType |
 export function extractGroupNameToken(groupName: string, regexSource: string): string | null {
     const trimmed = regexSource.trim()
     if (!trimmed) {
-        const sanitized = safePathSegment(groupName, '')
+        const sanitized = sanitizeFilename(groupName, '')
         return sanitized || null
     }
 
@@ -119,7 +119,7 @@ export function extractGroupNameToken(groupName: string, regexSource: string): s
         }
     }
     if (captures.length === 0) return null
-    const sanitized = safePathSegment(captures.join('_'), '')
+    const sanitized = sanitizeFilename(captures.join('_'), '')
     return sanitized || null
 }
 
@@ -134,7 +134,7 @@ function resolveToken(
             return `${stamp.date}_${stamp.time}`
         }
         case 'messageId':
-            return safePathSegment(ctx.messageId, '') || null
+            return sanitizeFilename(ctx.messageId, '') || null
         case 'filename': {
             const source = ctx.originalName?.trim() || ''
             if (!source) return null
@@ -148,7 +148,7 @@ function resolveToken(
         case 'senderName': {
             const name = ctx.senderName?.trim() || ''
             if (!name) return null
-            return safePathSegment(name, '') || null
+            return sanitizeFilename(name, '') || null
         }
     }
 }
@@ -163,7 +163,7 @@ export function buildMediaFilename(typePattern: FilenameTypePattern, ctx: Filena
         if (value) parts.push(value)
     }
     if (parts.length === 0) {
-        parts.push(safePathSegment(ctx.messageId, 'media'))
+        parts.push(sanitizeFilename(ctx.messageId, 'media'))
     }
 
     let stem = parts.join('_')

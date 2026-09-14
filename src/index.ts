@@ -37,7 +37,7 @@ import {
     loadFilenameFormatSettings,
     uniqueMediaPath,
 } from './filenameFormat.js'
-import { firstAvailableName, safePathSegment, withDeletedSuffix } from './filenames.js'
+import { firstAvailableName, sanitizeFilename, withDeletedSuffix } from './filenames.js'
 import { hktStamp } from './hkt.js'
 import { log } from './log.js'
 import {
@@ -729,7 +729,7 @@ async function mediaDestPath(
     fallbackExt: string
 ): Promise<string> {
     const { date: hktDate } = hktStamp(meta.timestamp)
-    const safeFolderName = safePathSegment(meta.groupName, meta.groupJid)
+    const safeFolderName = sanitizeFilename(meta.groupName, meta.groupJid)
     const folderPath = `${config.downloadDir}/${safeFolderName}/${hktDate}`
     if (!existsSync(folderPath)) {
         mkdirSync(folderPath, { recursive: true })
