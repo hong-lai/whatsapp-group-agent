@@ -37,7 +37,8 @@ import {
     loadFilenameFormatSettings,
     uniqueMediaPath,
 } from './filenameFormat.js'
-import { firstAvailableName, hktStamp, safePathSegment, withDeletedSuffix } from './hkt.js'
+import { firstAvailableName, safePathSegment, withDeletedSuffix } from './filenames.js'
+import { hktStamp } from './hkt.js'
 import { log } from './log.js'
 import {
     addSkippedGroup,

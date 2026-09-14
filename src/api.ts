@@ -17,7 +17,7 @@ import {
     safePathSegment,
     storedDownloadName,
     uniqueArchivePath,
-} from './hkt.js'
+} from './filenames.js'
 import { log } from './log.js'
 import { startDailySiteReportFileGenerator } from './dailySiteReportFile.js'
 import { handleReportProcessedSse, publishReportChange } from './reportProcessedEvents.js'

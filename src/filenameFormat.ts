@@ -6,10 +6,10 @@ import { getAppSetting, setAppSetting } from './db.js'
 import {
     fileStem,
     firstAvailableName,
-    hktStamp,
     mediaExtension,
     safePathSegment,
-} from './hkt.js'
+} from './filenames.js'
+import { hktStamp } from './hkt.js'
 import { log } from './log.js'
 
 export const FILENAME_FORMAT_KEY = 'filename-format'
