@@ -419,14 +419,6 @@ function resolveMediaPath(storedPath: string): string | undefined {
     return isWithin(root, candidate) ? candidate : undefined
 }
 
-function asyncRoute(
-    handler: (request: Request, response: Response, next: NextFunction) => Promise<void>
-) {
-    return (request: Request, response: Response, next: NextFunction) => {
-        void handler(request, response, next).catch(next)
-    }
-}
-
 function adminPasswordMatches(provided: string | undefined): boolean {
     const expected = Buffer.from(config.adminPassword)
     const actual = Buffer.from(provided ?? '')
@@ -477,7 +469,7 @@ export function createApiApp() {
 
     app.get(
         '/api/groups',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const range = getDateRange(request)
             const groups = await listDashboardGroups(range.fromTimestamp, range.toTimestamp)
             response.json({
@@ -488,12 +480,12 @@ export function createApiApp() {
                 },
                 groups,
             })
-        })
+        }
     )
 
     app.get(
         '/api/groups/:jid/messages',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const jid = getRouteParam(request.params.jid)
             if (!(await groupMatchesPattern(jid))) {
                 response.status(404).json({ error: 'Group is outside the configured name pattern' })
@@ -514,12 +506,12 @@ export function createApiApp() {
                 messages: page.messages,
                 nextCursor: encodeCursor(page.nextCursor),
             })
-        })
+        }
     )
 
     app.get(
         '/api/album',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const range = getDateRange(request)
             const fileNameQuery = parseFileNameQuery(request.query.q)
             const categories = parseMediaCategories(request.query.types)
@@ -556,12 +548,12 @@ export function createApiApp() {
                 })),
                 nextCursor: encodeCursor(page.nextCursor),
             })
-        })
+        }
     )
 
     app.get(
         '/api/daily-site-reports',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const range = getDateRange(request)
             const groupJid =
                 typeof request.query.group === 'string' && request.query.group
@@ -599,12 +591,12 @@ export function createApiApp() {
                 reports: page.reports,
                 nextCursor: encodeReportCursor(page.nextCursor),
             })
-        })
+        }
     )
 
     app.get(
         '/api/daily-site-reports/by-message/:messageId',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const messageId = getRouteParam(request.params.messageId)
             const report = await getDailySiteReportByMessageId(messageId)
             if (!report) {
@@ -612,12 +604,12 @@ export function createApiApp() {
                 return
             }
             response.json({ report })
-        })
+        }
     )
 
     app.get(
         '/api/daily-site-reports/export.csv',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const range = getDateRange(request)
             const groupJid =
                 typeof request.query.group === 'string' && request.query.group
@@ -651,12 +643,12 @@ export function createApiApp() {
                 .setHeader('Content-Disposition', `attachment; filename="${filename}"`)
                 .setHeader('Cache-Control', 'no-store')
                 .send(buildDailySiteReportsCsv(reports))
-        })
+        }
     )
 
     app.get(
         '/api/daily-site-reports/metrics-series',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const range = getDateRange(request)
             const groupJid =
                 typeof request.query.group === 'string' && request.query.group
@@ -679,13 +671,13 @@ export function createApiApp() {
                 dateField,
                 points,
             })
-        })
+        }
     )
 
     app.delete(
         '/api/daily-site-reports/:id',
         requireAdmin,
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const id = Number.parseInt(String(request.params.id), 10)
             if (!Number.isSafeInteger(id) || id < 1) {
                 throw new Error('Invalid report id')
@@ -705,13 +697,13 @@ export function createApiApp() {
                 reportId: deleted.id,
             })
             response.json({ ok: true })
-        })
+        }
     )
 
     app.get(
         '/api/workflows',
         requireAdmin,
-        asyncRoute(async (_request, response) => {
+        async (_request, response) => {
             const enabled = new Set(config.enabledWorkflows)
             response.json({
                 workflowsEnabled: config.workflowsEnabled,
@@ -724,13 +716,13 @@ export function createApiApp() {
                     enabled: enabled.has(name),
                 })),
             })
-        })
+        }
     )
 
     app.get(
         '/api/debug/workflows',
         requireAdmin,
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const messageId =
                 typeof request.query.messageId === 'string' ? request.query.messageId.trim() : ''
             if (!messageId) throw new Error('messageId is required')
@@ -758,14 +750,14 @@ export function createApiApp() {
                 prompts,
                 snapshot,
             })
-        })
+        }
     )
 
     app.post(
         '/api/debug/workflows/reenqueue',
         requireAdmin,
         express.json({ limit: '256kb' }),
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             if (!config.workflowsEnabled) {
                 response.status(503).json({ error: 'Workflows are disabled (WORKFLOWS_ENABLED=false)' })
                 return
@@ -853,14 +845,14 @@ export function createApiApp() {
                 classifierPromptOverride: Boolean(classifierPrompt),
                 extractorPromptOverride: Boolean(extractorPrompt),
             })
-        })
+        }
     )
 
     app.post(
         '/api/debug/workflows/reenqueue-filtered',
         requireAdmin,
         express.json({ limit: '256kb' }),
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             if (!config.workflowsEnabled) {
                 response.status(503).json({ error: 'Workflows are disabled (WORKFLOWS_ENABLED=false)' })
                 return
@@ -1004,13 +996,13 @@ export function createApiApp() {
                 groupJid: groupJid ?? null,
                 query: query ?? null,
             })
-        })
+        }
     )
 
     app.post(
         '/api/album/download',
         express.json({ limit: '64kb' }),
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const range = getDateRange(request)
             const fileNameQuery = parseFileNameQuery(request.query.q)
             const categories = parseMediaCategories(request.query.types)
@@ -1095,31 +1087,31 @@ export function createApiApp() {
                 archive.append(createReadStream(item.resolvedPath), { name: archivePath })
             }
             await archive.finalize()
-        })
+        }
     )
 
     app.get(
         '/api/settings/filename-format',
         requireAdmin,
-        asyncRoute(async (_request, response) => {
+        async (_request, response) => {
             response.json(await getFilenameFormatSettings())
-        })
+        }
     )
 
     app.put(
         '/api/settings/filename-format',
         requireAdmin,
         express.json({ limit: '32kb' }),
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const parsed = parseFilenameFormatSettings(request.body)
             const saved = await saveFilenameFormatSettings(parsed)
             response.json(saved)
-        })
+        }
     )
 
     app.get(
         '/api/media/:messageId',
-        asyncRoute(async (request, response) => {
+        async (request, response) => {
             const media = await getDashboardMedia(getRouteParam(request.params.messageId))
             if (!media) {
                 response.status(404).json({ error: 'Media not found' })
@@ -1138,7 +1130,7 @@ export function createApiApp() {
                     'Content-Disposition': contentDisposition(basename(mediaPath)),
                 },
             })
-        })
+        }
     )
 
     const webDist = fileURLToPath(new URL('../web/dist', import.meta.url))
