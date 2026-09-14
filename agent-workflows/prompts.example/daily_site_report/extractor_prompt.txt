@@ -15,3 +15,7 @@ HARD CONSTRAINTS
 workers
 - Put 工人 / 司機 / 科文 / Foreman / 主管 / 管工 into the workers array.
 - Plain names only; strip role prefixes such as 「主管:」「司機:」.
+- One array item per person. Split on 、 / ， / , / ; .
+- Chinese/CJK names never contain an internal space. A space between CJK name groups is a person separator: 張偉明 林美玲 → ["張偉明","林美玲"] (not one name).
+- Latin/English names may keep an internal space: John Smith → ["John Smith"] (one person).
+- Mixed example: 工人：John Smith，周強，張偉明 林美玲 → ["John Smith","周強","張偉明","林美玲"].

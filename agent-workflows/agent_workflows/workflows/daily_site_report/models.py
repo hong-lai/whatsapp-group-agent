@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ClassifiedResult(BaseModel):
@@ -44,9 +45,35 @@ class CumulativeMetrics(BaseModel):
     )
 
 
-RefNumberStr = Annotated[
-    str, Field(pattern=r"^[A-Z]{4,5}-\d{5,6}-\d{3,4}[A-Z]?$")
-]
+# RefNumberStr = Annotated[
+#     str, Field(pattern=r"^[A-Z]{4,5}-\d{5,6}-\d{3,4}[A-Z]?$")
+# ]
+
+# Punctuation between people. CJK runs have no internal space; Latin names may.
+_WORKER_SEP = re.compile(r"[,，、;/；]+")
+_WORKER_TOKEN = re.compile(
+    r"[A-Za-z][A-Za-z'.\-]*(?:\s+[A-Za-z][A-Za-z'.\-]*)*"
+    r"|[\u3400-\u9FFF\uF900-\uFAFF]+"
+)
+
+
+def split_worker_names(names: List[str]) -> List[str]:
+    """Split merged worker entries so spaced CJK names become separate people.
+
+    Latin given+family names ("John Smith") stay one item. A space between CJK
+    runs ("張偉明 林美玲") is a person separator.
+    """
+    split: List[str] = []
+    for raw in names:
+        if not isinstance(raw, str):
+            continue
+        for chunk in _WORKER_SEP.split(raw):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            tokens = [match.group(0).strip() for match in _WORKER_TOKEN.finditer(chunk)]
+            split.extend(tokens or [chunk])
+    return split
 
 
 class DailySiteReport(BaseModel):
@@ -58,7 +85,7 @@ class DailySiteReport(BaseModel):
         )
     )
     po_number: str = Field(description="The Purchase Order (PO) identification number.")
-    ref_number: List[RefNumberStr] = Field(
+    ref_number: List[str] = Field(
         description="A list of reference numbers associated with the project."
     )
     contractor: str = Field(description="The name of the contractor company.")
@@ -69,7 +96,10 @@ class DailySiteReport(BaseModel):
     workers: List[str] = Field(
         description=(
             "All on-site people from 工人 / 司機 / 科文 / Foreman / 主管 / 管工. "
-            "Plain names only, no role prefixes. Do not omit 主管, 司機, or Foreman."
+            "Plain names only, no role prefixes. Do not omit 主管, 司機, or Foreman. "
+            "One array item per person. Chinese/CJK names have no internal space: "
+            "'張偉明 林美玲' is two people. Latin names may keep an internal space: "
+            "'John Smith' is one person."
         )
     )
     num_workers: int = Field(
@@ -94,3 +124,8 @@ class DailySiteReport(BaseModel):
             "null if missing/empty."
         ),
     )
+
+    @field_validator("workers", mode="after")
+    @classmethod
+    def _split_spaced_cjk_names(cls, names: List[str]) -> List[str]:
+        return split_worker_names(names)
