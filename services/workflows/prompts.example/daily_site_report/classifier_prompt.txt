@@ -1,0 +1,7 @@
+# PLACEHOLDER — replace with your company classifier prompt.
+# Copy to: private/daily_site_report/classifier_prompt.txt
+#
+# Real prompts are confidential and must live under private/ (gitignored).
+
+You are a binary classifier. Decide if the message is a daily site report.
+Return relevant=true only for that report type.

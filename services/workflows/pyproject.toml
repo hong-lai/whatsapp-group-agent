@@ -1,0 +1,25 @@
+[project]
+name = "whatsapp-agent-workflows"
+version = "0.1.0"
+description = "Private pluggable BullMQ workers for WhatsApp message workflows"
+requires-python = ">=3.11"
+dependencies = [
+    "bullmq>=2.9.0",
+    "langchain-openai>=0.3.0",
+    "langchain-core>=0.3.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "psycopg[binary]>=3.2",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+agent-workflows = "agent_workflows.worker:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent_workflows*"]
