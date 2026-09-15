@@ -148,6 +148,17 @@ async function connectToWhatsApp() {
     })
     const catchup = createCatchup(sock)
     const runIngest = createSerialQueue()
+    let participatingReady: Promise<void> | undefined
+
+    async function ensureParticipatingGroups(): Promise<void> {
+        if (!participatingReady) {
+            participatingReady = cacheParticipatingGroups().catch((err) => {
+                participatingReady = undefined
+                throw err
+            })
+        }
+        await participatingReady
+    }
 
     function handleConnectionUpdate(update: BaileysEventMap['connection.update']): void {
         const { connection, lastDisconnect, qr } = update
@@ -216,7 +227,7 @@ async function connectToWhatsApp() {
             suppressedDisconnectLogs = 0
             log.info({ jid: ownJid(sock) }, 'whatsapp.connected')
             void noteConnected()
-            void cacheParticipatingGroups()
+            void runIngest(() => ensureParticipatingGroups())
             void recoverPendingMediaDownloads(sock)
         }
     }
@@ -253,6 +264,7 @@ async function connectToWhatsApp() {
     async function ingestEvents(events: Partial<BaileysEventMap>): Promise<void> {
         const history = events['messaging-history.set']
         if (history) {
+            await ensureParticipatingGroups()
             const { messages, contacts, syncType, lidPnMappings } = history
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
