@@ -5,13 +5,15 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "tsx src/index.ts",
-    "web:dev": "vite --config web/vite.config.ts",
-    "build:web": "vite build --config web/vite.config.ts",
+    "start": "concurrently -n ingest,api -c cyan,magenta \"npm run start:ingest\" \"npm run start:api\"",
+    "start:ingest": "tsx services/ingest/src/index.ts",
+    "start:api": "tsx services/api/src/index.ts",
+    "web:dev": "vite --config apps/web/vite.config.ts",
+    "build:web": "vite build --config apps/web/vite.config.ts",
     "build": "npm run typecheck && npm run build:web",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p web/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p apps/web/tsconfig.json",
     "test": "npm run typecheck",
-    "workflows:seed-prompts": "bash agent-workflows/scripts/seed-prompts.sh"
+    "workflows:seed-prompts": "bash services/workflows/scripts/seed-prompts.sh"
   },
   "keywords": [],
   "author": "",
@@ -25,6 +27,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^6.1.0",
+    "concurrently": "^9.2.4",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2",
     "vite": "^8.2.2"

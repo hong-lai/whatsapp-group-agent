@@ -1,4 +1,4 @@
-# Scan the first-login QR from: docker compose logs -f app
+# Scan the first-login QR from: docker compose logs -f ingest
 services:
   postgres:
     image: postgres:16
@@ -29,8 +29,9 @@ services:
       timeout: 5s
       retries: 10
 
-  app:
+  ingest:
     build: .
+    command: ["npx", "tsx", "services/ingest/src/index.ts"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,12 +40,6 @@ services:
     environment:
       DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
       REDIS_URL: redis://redis:6379
-      WEB_PORT: 3000
-      DASHBOARD_PAGE_SIZE: ${DASHBOARD_PAGE_SIZE:-50}
-      DASHBOARD_MAX_PAGE_SIZE: ${DASHBOARD_MAX_PAGE_SIZE:-100}
-      ALBUM_PAGE_SIZE: ${ALBUM_PAGE_SIZE:-60}
-      ALBUM_MAX_PAGE_SIZE: ${ALBUM_MAX_PAGE_SIZE:-120}
-      ALBUM_MAX_BATCH_SIZE: ${ALBUM_MAX_BATCH_SIZE:-500}
       AUTH_DIR: /app/auth_info_baileys
       DOWNLOAD_DIR: /app/downloads
       GROUP_PATTERN: "${GROUP_PATTERN:-Hello|World}"
@@ -64,42 +59,68 @@ services:
       CATCHUP_MAX_PAGES: ${CATCHUP_MAX_PAGES:-3}
       CATCHUP_BACKFILL_MAX_PAGES: ${CATCHUP_BACKFILL_MAX_PAGES:-40}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # Enqueue BullMQ jobs for the workflows worker (LM Studio stays on the host).
       WORKFLOWS_ENABLED: ${WORKFLOWS_ENABLED:-true}
       WORKFLOWS_PROCESS_HISTORY: ${WORKFLOWS_PROCESS_HISTORY:-false}
-      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
-      LLM_API_KEY: ${LLM_API_KEY:-1234}
-      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
-      DAILY_SITE_REPORT_PROMPTS_DIR: /app/agent-workflows/private/daily_site_report
-      REPORTS_DIR: /app/reports
+      ENABLED_WORKFLOWS: ${ENABLED_WORKFLOWS:-daily_site_report}
     volumes:
       - ./auth_info_baileys:/app/auth_info_baileys
       - ./downloads:/app/downloads
-      - ./reports:/app/reports
-      - ./agent-workflows/private:/app/agent-workflows/private:ro
-    ports:
-      - "${WEB_HOST_PORT:-3000}:3000"
     stdin_open: true
     tty: true
     restart: unless-stopped
 
-  # Python BullMQ worker. LM Studio must run on the host (not in Docker).
-  # Prompts are bind-mounted from ./agent-workflows/private (gitignored).
-  workflows:
-    build: ./agent-workflows
+  api:
+    build: .
+    command: ["npx", "tsx", "services/api/src/index.ts"]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      app:
-        condition: service_started
+    environment:
+      DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
+      REDIS_URL: redis://redis:6379
+      WEB_PORT: 3000
+      DASHBOARD_PAGE_SIZE: ${DASHBOARD_PAGE_SIZE:-50}
+      DASHBOARD_MAX_PAGE_SIZE: ${DASHBOARD_MAX_PAGE_SIZE:-100}
+      ALBUM_PAGE_SIZE: ${ALBUM_PAGE_SIZE:-60}
+      ALBUM_MAX_PAGE_SIZE: ${ALBUM_MAX_PAGE_SIZE:-120}
+      ALBUM_MAX_BATCH_SIZE: ${ALBUM_MAX_BATCH_SIZE:-500}
+      DOWNLOAD_DIR: /app/downloads
+      GROUP_PATTERN: "${GROUP_PATTERN:-Hello|World}"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      WORKFLOWS_ENABLED: ${WORKFLOWS_ENABLED:-true}
+      WORKFLOWS_PROCESS_HISTORY: ${WORKFLOWS_PROCESS_HISTORY:-false}
+      ENABLED_WORKFLOWS: ${ENABLED_WORKFLOWS:-daily_site_report}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-1234}
+      LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
+      DAILY_SITE_REPORT_PROMPTS_DIR: /app/private/daily_site_report
+      REPORTS_DIR: /app/reports
+    volumes:
+      - ./downloads:/app/downloads:ro
+      - ./reports:/app/reports
+      - ./services/workflows/private:/app/private:ro
+    ports:
+      - "${WEB_HOST_PORT:-3000}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  # Python BullMQ worker. LM Studio must run on the host (not in Docker).
+  # Prompts are bind-mounted from ./services/workflows/private (gitignored).
+  workflows:
+    build: ./services/workflows
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgres://whatsapp:whatsapp@postgres:5432/whatsapp
       REDIS_URL: redis://redis:6379
       MESSAGE_EVENTS_QUEUE: message-events
       ENABLED_WORKFLOWS: ${ENABLED_WORKFLOWS:-daily_site_report}
-      # Reach LM Studio on the host machine
       LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:1234/v1}
       LLM_API_KEY: ${LLM_API_KEY:-1234}
       LLM_MODEL: ${LLM_MODEL:-google/gemma-4-e2b}
@@ -110,14 +131,14 @@ services:
       DAILY_SITE_REPORT_PROMPTS_DIR: /app/private/daily_site_report
       CONCURRENCY: ${WORKFLOWS_CONCURRENCY:-1}
     volumes:
-      - ./agent-workflows/private:/app/private:ro
+      - ./services/workflows/private:/app/private:ro
       - ./downloads:/app/downloads:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
   # Stable public URL. Needs a domain in Cloudflare + CLOUDFLARE_TUNNEL_TOKEN.
-  # Origin in the dashboard must be http://app:3000
+  # Origin in the dashboard must be http://api:3000
   # docker compose --profile tunnel up -d
   tunnel:
     image: cloudflare/cloudflared:latest
@@ -127,7 +148,7 @@ services:
     environment:
       TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
     depends_on:
-      - app
+      - api
 
   # No domain required. URL is https://….trycloudflare.com and changes on restart.
   # docker compose --profile quick-tunnel up -d
@@ -136,10 +157,11 @@ services:
     image: cloudflare/cloudflared:latest
     profiles: ["quick-tunnel"]
     restart: unless-stopped
-    command: tunnel --no-autoupdate --url http://app:3000
+    command: tunnel --no-autoupdate --url http://api:3000
     depends_on:
-      - app
+      - api
 
 volumes:
   postgres_data:
   redis_data:
+
