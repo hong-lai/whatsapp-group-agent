@@ -79,9 +79,13 @@ def split_worker_names(names: List[str]) -> List[str]:
 class DailySiteReport(BaseModel):
     date: str = Field(
         description=(
-            "The date of the report in YYYY-MM-DD format. "
-            "Spaces between digits in 年/月/日/號 are wrap/OCR gaps: join them "
-            "(e.g. 2026年9月1 2號 → 2026-09-12, not 2026-09-01)."
+            "Report date from this message's 日期 value, YYYY-MM-DD. "
+            "Scan left to right: all digits until 年 are YEAR, until 月 are MONTH, "
+            "until 日/號/号 are DAY. Spaces or line breaks between digits are ignored "
+            "and must be concatenated, not treated as the end of the number. "
+            "DAY is every digit before 日/號/号, never only the first: "
+            "1 2號 → day 12 (not 01); 1 5號 → day 15 (not 01). "
+            "Then zero-pad month and day. Discard 星期 and weekday text."
         )
     )
     po_number: str = Field(description="The Purchase Order (PO) identification number.")
