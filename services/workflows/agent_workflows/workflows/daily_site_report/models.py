@@ -76,15 +76,73 @@ def split_worker_names(names: List[str]) -> List[str]:
     return split
 
 
+_DATE_LABEL = re.compile(r"日期\s*[：:]")
+
+
+def parse_labeled_report_date(text: str) -> str | None:
+    """Join spaced/wrapped digits in a 日期 value into YYYY-MM-DD.
+
+    2026年09月1 6日（星期三） → 2026-09-16
+    """
+    match = _DATE_LABEL.search(text)
+    if not match:
+        return None
+    rest = text[match.end() :]
+    year, rest = _digits_until(rest, "年")
+    month, rest = _digits_until(rest, "月")
+    day, _ = _digits_until(rest, "日號号")
+    if day is None:
+        day = _leading_digits(rest)
+    if not year or not month or not day or len(year) != 4:
+        return None
+    try:
+        year_n, month_n, day_n = int(year), int(month), int(day)
+    except ValueError:
+        return None
+    if not (1 <= month_n <= 12 and 1 <= day_n <= 31):
+        return None
+    return f"{year_n:04d}-{month_n:02d}-{day_n:02d}"
+
+
+def _digits_until(s: str, stops: str) -> tuple[str | None, str]:
+    digits: list[str] = []
+    for i, ch in enumerate(s):
+        if ch in stops:
+            return ("".join(digits) or None, s[i + 1 :])
+        if ch.isdigit():
+            digits.append(ch)
+        elif ch.isspace() or ch == "\u3000":
+            continue
+        elif digits:
+            return ("".join(digits), s[i:])
+    return ("".join(digits) or None, "")
+
+
+def _leading_digits(s: str) -> str:
+    digits: list[str] = []
+    started = False
+    for ch in s:
+        if ch.isdigit():
+            digits.append(ch)
+            started = True
+        elif ch.isspace() or ch == "\u3000":
+            continue
+        elif started:
+            break
+    return "".join(digits)
+
+
 class DailySiteReport(BaseModel):
     date: str = Field(
         description=(
             "Report date from this message's 日期 value, YYYY-MM-DD. "
             "Scan left to right: all digits until 年 are YEAR, until 月 are MONTH, "
-            "until 日/號/号 are DAY. Spaces or line breaks between digits are ignored "
-            "and must be concatenated, not treated as the end of the number. "
+            "until 日/號/号 are DAY. Spaces or line breaks between digits JOIN "
+            "(do not apply worker name-splitting to dates). "
             "DAY is every digit before 日/號/号, never only the first: "
+            "2026年09月1 6日（星期三） → 2026-09-16 (not 2026-09-01); "
             "1 2號 → day 12 (not 01); 1 5號 → day 15 (not 01). "
+            "Zero-padded months (09月) and weekday text are ignored after the day. "
             "Then zero-pad month and day. Discard 星期 and weekday text."
         )
     )
@@ -95,15 +153,19 @@ class DailySiteReport(BaseModel):
     contractor: str = Field(description="The name of the contractor company.")
     project_name: str = Field(description="The name or location code of the project.")
     rss: str = Field(
-        description="The name of the Resident Site Staff (RSS) overseeing the project."
+        description=(
+            "Name from the RSS line only. Not 主管 / 管工 / Foreman — those belong in workers."
+        )
     )
     workers: List[str] = Field(
         description=(
-            "All on-site people from 工人 / 司機 / 科文 / Foreman / 主管 / 管工. "
-            "Plain names only, no role prefixes. Do not omit 主管, 司機, or Foreman. "
-            "One array item per person. Chinese/CJK names have no internal space: "
-            "'張偉明 林美玲' is two people. Latin names may keep an internal space: "
-            "'John Smith' is one person."
+            "Union of names from every 工人 / 司機 / 科文 / Foreman / 主管 / 管工 / 棚架工 "
+            "line in the message, not only the 工人 line. A standalone 主管： line is a "
+            "worker even when it appears above RSS and even when 工人/司機 also exist. "
+            "主管 is not RSS. Exclude only the RSS person. Plain names only, no role "
+            "prefixes. Do not omit 主管, 司機, or Foreman. One array item per person. "
+            "Chinese/CJK names have no internal space: '張偉明 林美玲' is two people. "
+            "Latin names may keep an internal space: 'John Smith' is one person."
         )
     )
     num_workers: int = Field(

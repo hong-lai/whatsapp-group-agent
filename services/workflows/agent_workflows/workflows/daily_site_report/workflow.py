@@ -7,7 +7,7 @@ from ...config import settings
 from ...db import connect, record_workflow_run
 from ...events import publish_report_change
 from .chain import build_chain
-from .models import DailySiteReport
+from .models import DailySiteReport, parse_labeled_report_date
 
 # Daily site reports are long structured messages; skip LLM for short chat noise.
 MIN_REPORT_TEXT_LENGTH = 30
@@ -141,6 +141,10 @@ class DailySiteReportWorkflow(Workflow):
             )
             self._notify_hard_deleted(message_id, removed)
             return "irrelevant"
+
+        parsed_date = parse_labeled_report_date(text)
+        if parsed_date:
+            result.date = parsed_date
 
         if not result.po_number or not result.contractor:
             removed = self._hard_delete(message_id)
