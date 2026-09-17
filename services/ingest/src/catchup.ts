@@ -71,11 +71,17 @@ function shouldSettleOnSyncStatus(syncType: unknown): boolean {
     )
 }
 
-export function asCatchupMessage(value: { key?: WAMessageKey | null } | null | undefined): WAMessage | undefined {
-    return value?.key ? (value as WAMessage) : undefined
+export function asCatchupMessage(value: unknown): WAMessage | undefined {
+    if (!value || typeof value !== 'object') return undefined
+    const record = value as { key?: WAMessageKey | null; message?: { key?: WAMessageKey | null } }
+    if (record.key?.id) return record as WAMessage
+    if (record.message && typeof record.message === 'object' && record.message.key?.id) {
+        return record.message as WAMessage
+    }
+    return undefined
 }
 
-export function createCatchup(sock: WASocket) {
+export function createCatchup(sock: WASocket, opts: { existingSession?: boolean } = {}) {
     const pages = new Map<string, number>()
     const jobs = new Map<string, CatchupJob>()
     const awaitingOnDemand = new Set<string>()
@@ -85,8 +91,10 @@ export function createCatchup(sock: WASocket) {
     const fetchAttempts = new Map<string, number>()
     const awaitingSince = new Map<string, number>()
     const chatHeads = new Map<string, { key: WAMessageKey; timestamp: number }>()
+    const storedAtConnect = new Map<string, number>()
     let trackedJids: string[] = []
     let seenBulkHistory = false
+    const existingSession = Boolean(opts.existingSession)
     const startedAt = Date.now()
     let allowingRequests = false
     let draining = false
@@ -131,6 +139,16 @@ export function createCatchup(sock: WASocket) {
         awaitingSince.set(groupJid, Date.now())
     }
 
+    function rememberChatHead(m: WAMessage): void {
+        const groupJid = m.key.remoteJid
+        if (!groupJid || !isJidGroup(groupJid) || !m.key.id) return
+        const timestamp = unixSeconds(m.messageTimestamp)
+        const previous = chatHeads.get(groupJid)
+        if (!previous || timestamp >= previous.timestamp) {
+            chatHeads.set(groupJid, { key: m.key, timestamp })
+        }
+    }
+
     function releaseStaleAwaiting(): void {
         const now = Date.now()
         for (const groupJid of [...awaitingOnDemand]) {
@@ -159,9 +177,16 @@ export function createCatchup(sock: WASocket) {
         }
     }
 
+    function isReconnectSession(): boolean {
+        return existingSession
+    }
+
     function scheduleSettle(reason: string): void {
         if (stopped) return
-        allowingRequests = false
+        const keepDraining =
+            isReconnectSession() &&
+            (reason === 'waiting-bulk-history' || reason === 'waiting-chat-heads')
+        if (!keepDraining) allowingRequests = false
         clearSettleTimer()
         const waitMs = settleDelayMs()
         log.debug({ waitMs, reason, pending: jobs.size }, 'catchup.settling')
@@ -170,18 +195,21 @@ export function createCatchup(sock: WASocket) {
                 if (stopped) return
                 allowingRequests = true
                 await enqueueTrackedBackfill()
-                log.info(
-                    {
-                        pending: jobs.size,
-                        reason,
-                        backfillUntil: backfillFloor(),
-                        backfillSeconds: config.catchupBackfillSeconds,
-                    },
-                    'catchup.ready'
-                )
+                if (reason !== 'waiting-bulk-history' && reason !== 'waiting-chat-heads') {
+                    log.info(
+                        {
+                            pending: jobs.size,
+                            reason,
+                            backfillUntil: backfillFloor(),
+                            backfillSeconds: config.catchupBackfillSeconds,
+                        },
+                        'catchup.ready'
+                    )
+                }
                 void drain()
             })()
         }, waitMs)
+        if (keepDraining && allowingRequests) void drain()
     }
 
     async function enqueueTrackedBackfill(): Promise<void> {
@@ -189,12 +217,17 @@ export function createCatchup(sock: WASocket) {
             seenBulkHistory = true
             log.info('catchup.bulk_history_timeout')
         }
+        if (!seenBulkHistory && isReconnectSession()) {
+            seenBulkHistory = true
+            log.info('catchup.reconnect_skip_bulk_wait')
+        }
         if (!seenBulkHistory) {
             scheduleSettle('waiting-bulk-history')
             return
         }
         releaseStaleAwaiting()
         const until = backfillFloor()
+        let waitingForHeads = false
         for (const groupJid of trackedJids) {
             if (backfillFinished.has(groupJid) || jobs.has(groupJid) || awaitingOnDemand.has(groupJid)) {
                 continue
@@ -212,11 +245,13 @@ export function createCatchup(sock: WASocket) {
             const oldest = await getOldestGroupMessage(groupJid)
             const latest = await getLatestGroupMessage(groupJid)
             const head = chatHeads.get(groupJid)
-            if (
-                head?.key.id &&
+            const knownAtConnect = storedAtConnect.get(groupJid) ?? 0
+            const reconnectHole =
+                knownAtConnect > 0 &&
+                Boolean(head?.key.id) &&
                 head.timestamp > until &&
-                (!latest || head.timestamp > latest.timestamp + 2)
-            ) {
+                head.timestamp > knownAtConnect + 2
+            if (reconnectHole && head?.key.id) {
                 enqueue({
                     groupJid,
                     key: head.key,
@@ -239,10 +274,15 @@ export function createCatchup(sock: WASocket) {
                 continue
             }
             if (oldest.timestamp <= until) {
-                finishBackfill(
-                    groupJid,
-                    latest && latest.timestamp < until ? 'inactive' : 'already-covers-window'
-                )
+                if (latest && latest.timestamp < until) {
+                    finishBackfill(groupJid, 'inactive')
+                    continue
+                }
+                if (head?.key.id || Date.now() - startedAt >= 180_000 || !isReconnectSession()) {
+                    finishBackfill(groupJid, 'already-covers-window')
+                    continue
+                }
+                waitingForHeads = true
                 continue
             }
             enqueue({
@@ -252,6 +292,7 @@ export function createCatchup(sock: WASocket) {
                 reason: 'tracked-backfill',
             })
         }
+        if (waitingForHeads) scheduleSettle('waiting-chat-heads')
     }
 
     async function requestFromAnchor(job: CatchupJob): Promise<'done' | 'retry'> {
@@ -338,12 +379,19 @@ export function createCatchup(sock: WASocket) {
         if (!(await isTrackedGroup(groupJid))) return
 
         const timestamp = unixSeconds(m.messageTimestamp)
-        const needsBackfill = !backfillFinished.has(groupJid)
-        if (needsBackfill ? timestamp <= backfillFloor() : timestamp < notifyFloor()) return
+        if (timestamp <= backfillFloor()) return
 
         const previous = await getLatestGroupMessage(groupJid)
         if (previous && previous.messageId === m.key.id) return
         if (previous && previous.timestamp >= timestamp - 2) return
+
+        const jumpSeconds = previous ? timestamp - previous.timestamp : Number.POSITIVE_INFINITY
+        const reconnectGap = jumpSeconds > config.catchupWindowSeconds
+        const needsBackfill = !backfillFinished.has(groupJid) || reconnectGap
+        if (!needsBackfill && timestamp < notifyFloor()) return
+
+        const existing = jobs.get(groupJid)
+        if (existing && existing.timestamp >= timestamp) return
 
         enqueue({
             groupJid,
@@ -395,13 +443,21 @@ export function createCatchup(sock: WASocket) {
                 (left, right) => unixSeconds(left.messageTimestamp) - unixSeconds(right.messageTimestamp)
             )
             const oldest = list[0]
+            const newest = list[list.length - 1]
             if (!oldest?.key.id) continue
+            if (newest) rememberChatHead(newest)
             const oldestTs = unixSeconds(oldest.messageTimestamp)
             if (onDemand) {
+                const knownAtConnect = storedAtConnect.get(groupJid) ?? 0
                 const reachedWindow = oldestTs <= until
+                const caughtUpToStored = oldestTs <= knownAtConnect + 2
                 const lastPage = list.length < config.catchupPageSize
-                if (reachedWindow || lastPage) {
-                    finishBackfill(groupJid, reachedWindow ? 'reached-window' : 'short-page')
+                if (reachedWindow || caughtUpToStored) {
+                    finishBackfill(groupJid, reachedWindow ? 'reached-window' : 'caught-up')
+                    continue
+                }
+                if (lastPage && knownAtConnect <= 0) {
+                    finishBackfill(groupJid, 'short-page')
                     continue
                 }
                 enqueue({
@@ -409,6 +465,18 @@ export function createCatchup(sock: WASocket) {
                     key: oldest.key,
                     timestamp: oldestTs,
                     reason: 'on_demand_continue',
+                })
+                continue
+            }
+            const previousTs = latestBefore.get(groupJid)
+            const holeBeforeBatch =
+                previousTs !== undefined && previousTs + 2 < oldestTs && oldestTs > until
+            if (holeBeforeBatch) {
+                enqueue({
+                    groupJid,
+                    key: oldest.key,
+                    timestamp: oldestTs,
+                    reason: 'tracked-backfill',
                 })
                 continue
             }
@@ -423,7 +491,6 @@ export function createCatchup(sock: WASocket) {
                 continue
             }
             if (oldestTs < notifyFloor()) continue
-            const previousTs = latestBefore.get(groupJid)
             if (previousTs !== undefined && previousTs >= oldestTs) continue
             enqueue({
                 groupJid,
@@ -441,17 +508,18 @@ export function createCatchup(sock: WASocket) {
         setTrackedGroups(jids: string[]) {
             trackedJids = [...new Set([...trackedJids, ...jids])]
         },
+        async snapshotStoredAnchors() {
+            for (const groupJid of trackedJids) {
+                if (storedAtConnect.has(groupJid)) continue
+                const latest = await getLatestGroupMessage(groupJid)
+                storedAtConnect.set(groupJid, latest?.timestamp ?? 0)
+            }
+        },
         noteConnected() {
             scheduleSettle('connected')
         },
         noteChatHead(m: WAMessage) {
-            const groupJid = m.key.remoteJid
-            if (!groupJid || !isJidGroup(groupJid) || !m.key.id) return
-            const timestamp = unixSeconds(m.messageTimestamp)
-            const previous = chatHeads.get(groupJid)
-            if (!previous || timestamp >= previous.timestamp) {
-                chatHeads.set(groupJid, { key: m.key, timestamp })
-            }
+            rememberChatHead(m)
         },
         noteHistoryChunk(syncType?: unknown) {
             if (isBulkHistorySync(syncType)) seenBulkHistory = true

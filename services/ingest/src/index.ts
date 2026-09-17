@@ -43,7 +43,14 @@ import {
     applyIncomingEdit,
     isEditEnvelope,
 } from './edits.js'
-import { forgetGroup, mergeDefined, ownJid, persistMatchingGroup, refreshGroup } from './groups.js'
+import {
+    forgetGroup,
+    mergeDefined,
+    metadataFromHistoryChat,
+    ownJid,
+    persistMatchingGroup,
+    refreshGroup,
+} from './groups.js'
 import {
     bumpMediaSocketGeneration,
     markDeletedAndRenameMedia,
@@ -123,11 +130,13 @@ async function connectToWhatsApp() {
     void noteConnecting()
     const { state, saveCreds } = await useMultiFileAuthState(config.authDir)
 
+    const existingSession = (state.creds.accountSyncCounter ?? 0) > 0
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
         cachedGroupMetadata: async (jid) => getGroupMetadata(jid),
         syncFullHistory: true,
+        shouldSyncHistoryMessage: () => true,
         getMessage: async (key) => {
             if (!key.id) return undefined
             const stored = await getStoredMessageForGetMessage(key.id)
@@ -146,7 +155,7 @@ async function connectToWhatsApp() {
             return message.conversation || message.messageContextInfo ? message : undefined
         },
     })
-    const catchup = createCatchup(sock)
+    const catchup = createCatchup(sock, { existingSession })
     const runIngest = createSerialQueue()
     let participatingReady: Promise<void> | undefined
 
@@ -235,7 +244,12 @@ async function connectToWhatsApp() {
     async function cacheParticipatingGroups(): Promise<void> {
         await clearSkippedGroups()
         await clearParticipatingMeta()
-        const response = await sock.groupFetchAllParticipating()
+        let response: Record<string, GroupMetadata | undefined> = {}
+        try {
+            response = await sock.groupFetchAllParticipating()
+        } catch (err) {
+            log.warn({ err }, 'groups.fetch_participating_failed')
+        }
         let cached = 0
         const trackedJids: string[] = []
         for (const key in response) {
@@ -250,11 +264,13 @@ async function connectToWhatsApp() {
             }
         }
         catchup.setTrackedGroups(trackedJids)
+        await catchup.snapshotStoredAnchors()
         log.info(
             {
                 matchingGroups: cached,
                 pattern: config.groupPatternSource,
                 catchupBackfillSeconds: config.catchupBackfillSeconds,
+                existingSession,
             },
             'groups.cached'
         )
@@ -264,16 +280,44 @@ async function connectToWhatsApp() {
     async function ingestEvents(events: Partial<BaileysEventMap>): Promise<void> {
         const history = events['messaging-history.set']
         if (history) {
-            await ensureParticipatingGroups()
-            const { messages, contacts, syncType, lidPnMappings } = history
+            const { messages, contacts, chats, syncType, lidPnMappings } = history
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
             const latestBefore = new Map<string, number | undefined>()
             const cutoff = historyCutoffSeconds()
+            log.info(
+                {
+                    syncType,
+                    messages: (messages || []).length,
+                    chats: (chats || []).length,
+                },
+                'history.sync.start'
+            )
 
             await rememberLidMappings(lidPnMappings)
             await rememberContacts(contacts)
 
+            for (const contact of contacts || []) {
+                const metadata = metadataFromHistoryChat({
+                    id: contact.id,
+                    name: contact.name || contact.notify,
+                })
+                if (metadata && isJidGroup(metadata.id)) {
+                    if (await persistMatchingGroup(metadata)) {
+                        catchup.setTrackedGroups([metadata.id])
+                    }
+                }
+            }
+            for (const chat of chats || []) {
+                const metadata = metadataFromHistoryChat(chat)
+                if (metadata && isJidGroup(metadata.id)) {
+                    if (await persistMatchingGroup(metadata)) {
+                        catchup.setTrackedGroups([metadata.id])
+                    }
+                }
+                const last = asCatchupMessage(chat.messages?.[0])
+                if (last) catchup.noteChatHead(last)
+            }
             for (const m of messages || []) {
                 if (unixSeconds(m.messageTimestamp) < cutoff) {
                     counts.tooOld += 1
@@ -308,14 +352,14 @@ async function connectToWhatsApp() {
         }
 
         for (const chat of events['chats.upsert'] || []) {
-            const last = asCatchupMessage(chat.messages?.[0]?.message)
+            const last = asCatchupMessage(chat.messages?.[0])
             if (last) {
                 catchup.noteChatHead(last)
                 await catchup.considerMessage(last, 'chat.upsert')
             }
         }
         for (const chat of events['chats.update'] || []) {
-            const last = asCatchupMessage(chat.messages?.[0]?.message)
+            const last = asCatchupMessage(chat.messages?.[0])
             if (last) {
                 catchup.noteChatHead(last)
                 await catchup.considerMessage(last, 'chat.update')
@@ -469,7 +513,11 @@ async function connectToWhatsApp() {
             handleConnectionUpdate(events['connection.update'])
         }
         if (hasIngestWork(events)) {
-            void runIngest(() => ingestEvents(events))
+            void runIngest(() =>
+                ingestEvents(events).catch((err) => {
+                    log.error({ err }, 'ingest.events_failed')
+                })
+            )
         }
     })
 }

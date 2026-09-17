@@ -33,6 +33,23 @@ export function ownJid(sock: WASocket): string | undefined {
     return id ? jidNormalizedUser(id) : undefined
 }
 
+export function metadataFromHistoryChat(chat: {
+    id?: string | null
+    name?: string | null
+    displayName?: string | null
+}): GroupMetadata | undefined {
+    const id = chat.id
+    if (!id) return undefined
+    const subject = (chat.name || chat.displayName || '').trim()
+    if (!subject) return undefined
+    return {
+        id,
+        subject,
+        owner: undefined,
+        participants: [],
+    }
+}
+
 export async function persistMatchingGroup(metadata: GroupMetadata): Promise<boolean> {
     await setParticipatingMeta(metadata.id, metadata)
     const name = metadata.subject
