@@ -56,8 +56,8 @@ const DAILY_SITE_REPORT_SORT_SPECS: Record<
     },
     createdAt: { sql: 'r.created_at', type: 'timestamptz' },
     messageDate: {
-        sql: `(m.timestamp AT TIME ZONE 'Asia/Hong_Kong')::date`,
-        type: 'date',
+        sql: 'm.timestamp',
+        type: 'timestamptz',
     },
     po: { sql: 'r.po_number', type: 'text' },
     ref: { sql: `array_to_string(r.ref_numbers, '、')`, type: 'text' },
@@ -130,7 +130,7 @@ function dailySiteReportSortValue(
         case 'messageDate':
             return row.message_timestamp == null
                 ? null
-                : hktStamp(Number(row.message_timestamp)).date
+                : new Date(Number(row.message_timestamp) * 1000).toISOString()
         case 'po':
             return row.po_number
         case 'ref':

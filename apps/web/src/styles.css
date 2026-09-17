@@ -1821,6 +1821,10 @@ h3 {
     min-width: 108px;
 }
 
+.reports-table--modern .col-datetime {
+    min-width: 148px;
+}
+
 .reports-table--modern .col-po {
     min-width: 88px;
 }
@@ -2227,6 +2231,19 @@ h3 {
 .report-mobile-card-head .message-flags {
     margin-left: auto;
     flex-shrink: 0;
+}
+
+.report-mobile-card-sent {
+    margin-left: auto;
+    color: #6f857c;
+    font-size: 0.72rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.report-mobile-card-sent + .message-flags {
+    margin-left: 0;
 }
 
 .report-mobile-card-date--warn {

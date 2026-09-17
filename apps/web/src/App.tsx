@@ -18,6 +18,7 @@ import AlbumView, {
     type MediaCategory,
 } from './AlbumView'
 import DailySiteReportView, {
+    formatMessageSentAt,
     type DailySiteReport,
     type DailySiteReportDateField,
 } from './DailySiteReportView'
@@ -1458,6 +1459,10 @@ function SiteReportTag({
                                   <dd className={!report.reportDate ? 'is-warn' : undefined}>
                                       {report.reportDate || '—'}
                                   </dd>
+                              </div>
+                              <div>
+                                  <dt>訊息時間</dt>
+                                  <dd>{formatMessageSentAt(report)}</dd>
                               </div>
                               <div>
                                   <dt>PO</dt>

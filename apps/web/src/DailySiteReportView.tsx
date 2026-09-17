@@ -95,6 +95,7 @@ function TruncatedText({
 }
 
 const REPORT_TABLE_COLUMNS_STORAGE_KEY = 'reportsTableColumns'
+const REPORT_TABLE_MESSAGE_TIME_MIGRATION_KEY = 'reportsTableColumns.addedMessageTime'
 const REPORT_TABLE_SORT_STORAGE_KEY = 'reportsTableSort'
 
 type ReportTableColumnId =
@@ -136,7 +137,7 @@ type ReportTableColumn = {
 const REPORT_TABLE_COLUMNS: ReportTableColumn[] = [
     { id: 'reportDate', className: 'col-date', label: '報告日期' },
     { id: 'createdDate', className: 'col-date', label: '建立日期', defaultVisible: false },
-    { id: 'messageDate', className: 'col-date', label: '訊息日期', defaultVisible: false },
+    { id: 'messageDate', className: 'col-datetime', label: '訊息時間', title: 'WhatsApp 訊息時間' },
     { id: 'po', className: 'col-po', label: 'PO' },
     { id: 'ref', label: 'Ref' },
     { id: 'contractor', label: '承辦商' },
@@ -207,7 +208,15 @@ function readVisibleReportColumns(): Set<ReportTableColumnId> {
         const valid = parsed.filter((id): id is ReportTableColumnId =>
             REPORT_TABLE_COLUMN_IDS.includes(id as ReportTableColumnId)
         )
-        return valid.length ? new Set(valid) : defaults
+        const next = valid.length ? valid : [...REPORT_TABLE_DEFAULT_VISIBLE_IDS]
+        if (!localStorage.getItem(REPORT_TABLE_MESSAGE_TIME_MIGRATION_KEY)) {
+            if (!next.includes('messageDate')) {
+                const reportIdx = next.indexOf('reportDate')
+                next.splice(reportIdx >= 0 ? reportIdx + 1 : 0, 0, 'messageDate')
+            }
+            localStorage.setItem(REPORT_TABLE_MESSAGE_TIME_MIGRATION_KEY, '1')
+        }
+        return new Set(next)
     } catch {
         return defaults
     }
@@ -234,9 +243,9 @@ function renderReportTableCell(report: DailySiteReport, columnId: ReportTableCol
             return (
                 <td
                     key={columnId}
-                    className={`col-date${hasIssue(report, 'date_mismatch') ? ' cell-warn' : ''}`}
+                    className={`col-datetime${hasIssue(report, 'date_mismatch') ? ' cell-warn' : ''}`}
                 >
-                    <span className="reports-date-pill">{report.messageDate || '—'}</span>
+                    <span className="reports-date-pill">{formatMessageSentAt(report)}</span>
                 </td>
             )
         case 'po':
@@ -527,6 +536,30 @@ function formatHktDateTime(iso: string): string {
     })
 }
 
+function formatHktTime(unixSeconds: number): string {
+    return new Date(unixSeconds * 1000).toLocaleTimeString('zh-HK', {
+        timeZone: 'Asia/Hong_Kong',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    })
+}
+
+export function formatMessageSentAt(report: DailySiteReport): string {
+    if (report.messageTimestamp == null) return report.messageDate || '—'
+    const time = formatHktTime(report.messageTimestamp)
+    return report.messageDate ? `${report.messageDate} ${time}` : time
+}
+
+function formatMessageSentAtCompact(report: DailySiteReport): string {
+    if (report.messageTimestamp == null) return report.messageDate || '—'
+    const time = formatHktTime(report.messageTimestamp)
+    if (report.messageDate && report.reportDate && report.messageDate === report.reportDate) {
+        return time
+    }
+    return report.messageDate ? `${report.messageDate} ${time}` : time
+}
+
 function exportUrl(
     from: string,
     to: string,
@@ -704,6 +737,7 @@ function ReportMobileCard({
                     {report.reportDate || '—'}
                 </span>
                 <strong className="report-mobile-card-po">{report.poNumber?.trim() || '—'}</strong>
+                <time className="report-mobile-card-sent">{formatMessageSentAtCompact(report)}</time>
                 <MessageFlags report={report} compact />
             </div>
 
@@ -919,7 +953,11 @@ function ReportDetail({
     const rows: Array<{ label: string; value: string; warn?: boolean }> = [
         { label: '報告日期', value: report.reportDate || '—', warn: hasIssue(report, 'date_mismatch') },
         { label: '建立日期', value: report.createdDate },
-        { label: '訊息日期', value: report.messageDate || '—', warn: hasIssue(report, 'date_mismatch') },
+        {
+            label: '訊息時間',
+            value: formatMessageSentAt(report),
+            warn: hasIssue(report, 'date_mismatch'),
+        },
         { label: 'PO', value: report.poNumber || '—', warn: !report.poNumber?.trim() },
         { label: 'Ref', value: joinList(report.refNumbers), warn: report.refNumbers.length === 0 },
         { label: '承辦商', value: report.contractor || '—', warn: !report.contractor?.trim() },
@@ -1305,6 +1343,16 @@ function WorkflowDebugDialog({
                                 <div>
                                     <dt>messageType</dt>
                                     <dd>{message.messageType}</dd>
+                                </div>
+                                <div>
+                                    <dt>timestamp</dt>
+                                    <dd>
+                                        {message.timestamp == null
+                                            ? '—'
+                                            : formatHktDateTime(
+                                                  new Date(message.timestamp * 1000).toISOString()
+                                              )}
+                                    </dd>
                                 </div>
                                 <div>
                                     <dt>textLength</dt>
