@@ -12,35 +12,45 @@ class ClassifiedResult(BaseModel):
     )
 
 
+_METRIC_NUMBER_RULE = (
+    "A space or line break BETWEEN digits JOINS them; it is never a decimal. "
+    "3 8米 → 38 (not 3.8); 1 9米 → 19 (not 1.9). "
+    "Only a real decimal point ( . or ． ) starts a fractional part: 3.8米 → 3.8. "
+    "Ignore parenthetical notes such as （正在cor第四條） or （A）. "
+    "If written as a sum of parts (e.g. 26.3（A）+7.5（B）), output the total (33.8). "
+    "Missing/blank/**/＊/N/A/- → 0."
+)
+
+
 class CumulativeMetrics(BaseModel):
     trench_length: float = Field(
         description=(
-            "Cumulative trench length in meters. "
-            "If written as a sum of parts (e.g. 26.3（A）+7.5（B）), output the total (33.8)."
+            "Cumulative trench length in meters from 累計開坑長度. "
+            + _METRIC_NUMBER_RULE
         )
     )
     coring_length: float = Field(
         description=(
-            "Cumulative coring length in meters. "
-            "If written as a sum of parts, output the total."
+            "Cumulative coring length in meters from 累計Coring長度. "
+            + _METRIC_NUMBER_RULE
         )
     )
     cable_pulling_length: float = Field(
         description=(
-            "Cumulative cable-pulling length in meters. "
-            "If written as a sum of parts, output the total."
+            "Cumulative cable-pulling length in meters from 累計拉線長度. "
+            + _METRIC_NUMBER_RULE
         )
     )
     conduit_laying_length: float = Field(
         description=(
-            "Cumulative conduit-laying length in meters. "
-            "If written as a sum of parts, output the total."
+            "Cumulative conduit-laying length in meters from 累計放筒長度. "
+            + _METRIC_NUMBER_RULE
         )
     )
     trial_pit_count: int = Field(
         description=(
-            "Cumulative trial-pit count. "
-            "If written as a sum of parts, output the total."
+            "Cumulative trial-pit count from 累計探窿數量. "
+            + _METRIC_NUMBER_RULE
         )
     )
 
@@ -132,6 +142,120 @@ def _leading_digits(s: str) -> str:
     return "".join(digits)
 
 
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+_METRIC_LABELS: tuple[tuple[str, re.Pattern[str], bool], ...] = (
+    ("trench_length", re.compile(r"累計開坑長度\s*[：:]"), False),
+    ("coring_length", re.compile(r"累計\s*Coring\s*長度\s*[：:]", re.IGNORECASE), False),
+    ("cable_pulling_length", re.compile(r"累計拉線長度\s*[：:]"), False),
+    ("conduit_laying_length", re.compile(r"累計放筒長度\s*[：:]"), False),
+    ("trial_pit_count", re.compile(r"累計探窿數量\s*[：:]"), True),
+)
+_NEXT_METRIC_CHUNK = re.compile(
+    r"\n\s*(?:累計|備注|備註|日期|承辦商|項目名稱|開工人數|工作內容|"
+    r"PO\b|Ref\b|RSS\b|Foreman\b|工人|司機|科文|主管|管工)",
+    re.IGNORECASE,
+)
+_PLACEHOLDER_VALUE = re.compile(
+    r"^(?:\*\*|＊{1,2}|\*|N/?A|n/?a|—+|–+|-+|／+|/{2,}|無|沒有)\s*$"
+)
+_METRIC_UNIT = re.compile(r"^(?:米|m|個|pcs|pc)\b", re.IGNORECASE)
+
+
+def parse_labeled_cumulative_metrics(text: str) -> dict[str, float | int]:
+    """Join spaced/wrapped digits in 累計 metric values.
+
+    累計Coring長度：3 8米 （正在cor第四條） → coring_length=38 (not 3.8)
+    """
+    parsed: dict[str, float | int] = {}
+    for field, pattern, as_int in _METRIC_LABELS:
+        match = pattern.search(text)
+        if not match:
+            continue
+        chunk = _metric_value_chunk(text[match.end() :])
+        value = _parse_metric_amount(chunk)
+        parsed[field] = int(round(value)) if as_int else value
+    return parsed
+
+
+def _metric_value_chunk(rest: str) -> str:
+    stop = _NEXT_METRIC_CHUNK.search(rest)
+    return rest[: stop.start()] if stop else rest
+
+
+def _parse_metric_amount(raw: str) -> float:
+    s = raw.translate(_FULLWIDTH_DIGITS)
+    total = 0.0
+    found = False
+    while s:
+        s = s.lstrip(" \t\r\n\u3000\xa0\u200b")
+        if not s:
+            break
+        if s[0] in "(（":
+            s = _skip_parens(s)
+            continue
+        if s[0] in "+＋" or s.startswith("加"):
+            s = s[1:]
+            continue
+        if found and _METRIC_UNIT.match(s):
+            break
+        if not found and _PLACEHOLDER_VALUE.match(_placeholder_head(s)):
+            return 0.0
+        number, rest = _parse_joined_number(s)
+        if number is None:
+            if found:
+                break
+            s = s[1:]
+            continue
+        total += number
+        found = True
+        s = rest
+    return total if found else 0.0
+
+
+def _placeholder_head(s: str) -> str:
+    first_line = s.splitlines()[0] if s else s
+    unit = _METRIC_UNIT.search(first_line)
+    head = first_line[: unit.start()] if unit else first_line
+    return re.sub(r"[\s\u3000]+", "", head.split("（", 1)[0].split("(", 1)[0])
+
+
+def _skip_parens(s: str) -> str:
+    close = ")" if s[0] == "(" else "）"
+    idx = s.find(close)
+    return s[idx + 1 :] if idx >= 0 else ""
+
+
+def _parse_joined_number(s: str) -> tuple[float | None, str]:
+    int_digits: list[str] = []
+    frac_digits: list[str] = []
+    seen_decimal = False
+    started = False
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isdigit():
+            started = True
+            (frac_digits if seen_decimal else int_digits).append(ch)
+            i += 1
+        elif ch in ".\uff0e" and not seen_decimal:
+            started = True
+            seen_decimal = True
+            i += 1
+        elif ch == "," and started and not seen_decimal:
+            seen_decimal = True
+            i += 1
+        elif ch.isspace() or ch in "\u3000\xa0\u200b":
+            i += 1
+        else:
+            break
+    if not int_digits and not frac_digits:
+        return None, s
+    int_part = "".join(int_digits) or "0"
+    if seen_decimal:
+        return float(f"{int_part}.{''.join(frac_digits)}"), s[i:]
+    return float(int_part), s[i:]
+
+
 class DailySiteReport(BaseModel):
     date: str = Field(
         description=(
@@ -180,7 +304,10 @@ class DailySiteReport(BaseModel):
     )
     cumulative_metrics: CumulativeMetrics = Field(
         description=(
-            "Aggregated progress metrics. When a metric value is written as a sum "
+            "Aggregated progress metrics from 累計* labels. "
+            "Spaces/line breaks between digits JOIN (3 8米 → 38, never 3.8). "
+            "Only '.' / '．' is a decimal. Ignore parenthetical notes. "
+            "Sums of parts become the total. Missing/** → 0."
         )
     )
     remarks: Optional[str] = Field(

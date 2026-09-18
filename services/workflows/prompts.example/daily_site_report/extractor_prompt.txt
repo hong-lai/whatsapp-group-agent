@@ -8,7 +8,7 @@ Extract fields matching the DailySiteReport schema and normalize dates/numbers.
 
 HARD CONSTRAINTS
 - 人手 not 入手 / 人で (manual labour OCR mistakes).
-- Spaced digits are not decimals: join digit gaps before units; only a real decimal point is fractional.
+- Spaced digits are not decimals: join digit gaps before units; only a real decimal point ( . or ． ) is fractional. 3 8米 → 38, never 3.8. 1 9米 → 19, never 1.9. Ignore parenthetical notes such as （正在cor第四條）. Missing/** → 0.
 - 日期: collect ALL digits until 年 / 月 / 日|號 as year, month, day. Spaces or wraps between digits JOIN (opposite of workers). 09月1 6日（星期三） → 2026-09-16, not 2026-09-01. 1 2號 → day 12 (not 01); 1 5號 → day 15 (not 01). Then YYYY-MM-DD with zero-pad.
 - num_workers comes only from the 開工人數 label; never count workers/rss names to set it.
 
