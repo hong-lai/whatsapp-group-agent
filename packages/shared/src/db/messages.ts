@@ -225,6 +225,114 @@ export async function getLatestGroupMessage(groupJid: string): Promise<LatestGro
 export async function getOldestGroupMessage(groupJid: string): Promise<LatestGroupMessage | undefined> {
     return getGroupMessageAnchor(groupJid, 'oldest')
 }
+
+export type MissingMediaSpan = {
+    groupJid: string
+    missingCount: number
+    oldestTimestamp: number
+    newestTimestamp: number
+    newestMessageId: string
+    newestSenderJid: string | null
+}
+
+/** Media rows with no file, grouped by chat. `stickerMessage` is not included. */
+export async function listMissingMediaSpans(
+    groupJids: string[],
+    messageTypes: string[]
+): Promise<MissingMediaSpan[]> {
+    if (groupJids.length === 0 || messageTypes.length === 0) return []
+    const result = await pool.query<{
+        group_jid: string
+        missing_count: number
+        oldest_timestamp: string
+        newest_timestamp: string
+        newest_message_id: string
+        newest_sender_jid: string | null
+    }>(
+        `WITH missing AS (
+            SELECT group_jid, message_id, sender_jid, timestamp
+            FROM messages
+            WHERE group_jid = ANY($1::text[])
+              AND media_path IS NULL
+              AND is_deleted = FALSE
+              AND timestamp IS NOT NULL
+              AND message_type = ANY($2::text[])
+        ),
+        spans AS (
+            SELECT
+                group_jid,
+                COUNT(*)::int AS missing_count,
+                MIN(timestamp) AS oldest,
+                MAX(timestamp) AS newest
+            FROM missing
+            GROUP BY group_jid
+        )
+        SELECT
+            s.group_jid,
+            s.missing_count,
+            EXTRACT(EPOCH FROM s.oldest)::bigint::text AS oldest_timestamp,
+            EXTRACT(EPOCH FROM s.newest)::bigint::text AS newest_timestamp,
+            n.message_id AS newest_message_id,
+            n.sender_jid AS newest_sender_jid
+        FROM spans s
+        JOIN LATERAL (
+            SELECT message_id, sender_jid
+            FROM missing m
+            WHERE m.group_jid = s.group_jid AND m.timestamp = s.newest
+            ORDER BY m.message_id DESC
+            LIMIT 1
+        ) n ON TRUE`,
+        [groupJids, messageTypes]
+    )
+    return result.rows.flatMap((row) => {
+        const oldestTimestamp = Number(row.oldest_timestamp)
+        const newestTimestamp = Number(row.newest_timestamp)
+        if (!Number.isFinite(oldestTimestamp) || !Number.isFinite(newestTimestamp)) return []
+        return [
+            {
+                groupJid: row.group_jid,
+                missingCount: Number(row.missing_count),
+                oldestTimestamp,
+                newestTimestamp,
+                newestMessageId: row.newest_message_id,
+                newestSenderJid: row.newest_sender_jid,
+            },
+        ]
+    })
+}
+
+/** Earliest stored message strictly newer than `timestampSeconds`. */
+export async function getGroupMessageAfter(
+    groupJid: string,
+    timestampSeconds: number
+): Promise<LatestGroupMessage | undefined> {
+    const result = await pool.query<{
+        message_id: string
+        sender_jid: string | null
+        timestamp: string | null
+    }>(
+        `SELECT
+            message_id,
+            sender_jid,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE group_jid = $1
+           AND timestamp IS NOT NULL
+           AND timestamp > to_timestamp($2)
+         ORDER BY timestamp ASC, message_id ASC
+         LIMIT 1`,
+        [groupJid, timestampSeconds]
+    )
+    const row = result.rows[0]
+    if (!row?.timestamp) return undefined
+    const timestamp = Number(row.timestamp)
+    if (!Number.isFinite(timestamp)) return undefined
+    return {
+        messageId: row.message_id,
+        senderJid: row.sender_jid,
+        timestamp,
+    }
+}
 export async function getMessageSecret(messageId: string): Promise<string | undefined> {
     const result = await pool.query<{ message_secret: string | null }>(
         'SELECT message_secret FROM messages WHERE message_id = $1',

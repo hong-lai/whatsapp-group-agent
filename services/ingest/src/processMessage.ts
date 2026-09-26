@@ -63,6 +63,18 @@ export function historyCutoffSeconds(): number {
     return Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
 }
 
+/** Old history is ignored, except rows already saved with no media file. Stickers stay ignored. */
+export async function isMissingMediaBackfill(m: WAMessage): Promise<boolean> {
+    const messageId = m.key.id
+    if (!messageId || !m.message) return false
+    const content = contentForIngest(m.message) || m.message
+    const messageType = getContentType(content) || 'unknown'
+    if (messageType === 'stickerMessage' || !fileTypes[messageType]) return false
+    if (isLivePhotoMotionVideo(m.message, content)) return false
+    const existing = await getMessageMediaState(messageId)
+    return Boolean(existing && !existing.mediaPath && !existing.isDeleted)
+}
+
 function secondsFromMillis(value: unknown, fallback: number): number {
     const millis = Number(value)
     return Number.isFinite(millis) && millis > 0 ? Math.floor(millis / 1000) : fallback
@@ -299,7 +311,15 @@ export async function processMessage(
         await setSenderDisplayNames(nameEntries)
     }
     const timestamp = unixSeconds(m.messageTimestamp)
-    if (isHistory && timestamp < historyCutoffSeconds()) return 'ignored'
+    if (isHistory && timestamp < historyCutoffSeconds()) {
+        const retryMissingMedia =
+            Boolean(messageId) &&
+            messageType !== 'stickerMessage' &&
+            Boolean(fileTypes[messageType])
+        if (!retryMissingMedia || !messageId) return 'ignored'
+        const existingMedia = await getMessageMediaState(messageId)
+        if (!existingMedia || existingMedia.mediaPath || existingMedia.isDeleted) return 'ignored'
+    }
     const ingestLog = isHistory ? log.debug.bind(log) : log.info.bind(log)
     const messageSecret = extractMessageSecret(m.message)
     const alreadyEdited = isEditedWrapper(m.message)

@@ -25,4 +25,6 @@ export const config = {
     catchupMaxPages: envInt('CATCHUP_MAX_PAGES', 3),
     /** Max on-demand pages per group for first-login / deep backfill. */
     catchupBackfillMaxPages: envInt('CATCHUP_BACKFILL_MAX_PAGES', 40),
+    /** One-time missing-media history walk. Each page is `catchupPageSize` messages. */
+    mediaGapMaxPages: envInt('MEDIA_GAP_MAX_PAGES', 100),
 }

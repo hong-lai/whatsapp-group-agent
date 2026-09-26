@@ -17,7 +17,9 @@ export {
 } from './groups.js'
 export {
     fillMessageSecretIfMissing,
+    getGroupMessageAfter,
     getLatestGroupMessage,
+    listMissingMediaSpans,
     getMessageEditTarget,
     getMessageHktDate,
     getMessageMediaState,
@@ -34,6 +36,7 @@ export {
     updateAlbumLink,
     updateMessageMediaPath,
     type LatestGroupMessage,
+    type MissingMediaSpan,
     type MessageEditTarget,
     type MessageRow,
 } from './messages.js'

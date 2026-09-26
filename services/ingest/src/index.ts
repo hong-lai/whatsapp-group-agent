@@ -56,7 +56,13 @@ import {
     markDeletedAndRenameMedia,
     recoverPendingMediaDownloads,
 } from './media.js'
-import { historyCutoffSeconds, processMessage, resolveGroupMetadata, unixSeconds } from './processMessage.js'
+import {
+    historyCutoffSeconds,
+    isMissingMediaBackfill,
+    processMessage,
+    resolveGroupMetadata,
+    unixSeconds,
+} from './processMessage.js'
 import { createSerialQueue } from './rateLimit.js'
 
 function clearAuthContents(dir: string): void {
@@ -319,7 +325,7 @@ async function connectToWhatsApp() {
                 if (last) catchup.noteChatHead(last)
             }
             for (const m of messages || []) {
-                if (unixSeconds(m.messageTimestamp) < cutoff) {
+                if (unixSeconds(m.messageTimestamp) < cutoff && !(await isMissingMediaBackfill(m))) {
                     counts.tooOld += 1
                     continue
                 }
