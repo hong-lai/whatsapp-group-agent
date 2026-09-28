@@ -103,6 +103,12 @@ services:
       - ./services/workflows/private:/app/private:ro
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
+    # Named-tunnel origin in Cloudflare is still http://app:3000 from before
+    # the service was renamed. Keep that hostname resolvable on this network.
+    networks:
+      default:
+        aliases:
+          - app
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -138,7 +144,7 @@ services:
     restart: unless-stopped
 
   # Stable public URL. Needs a domain in Cloudflare + CLOUDFLARE_TUNNEL_TOKEN.
-  # Origin in the dashboard must be http://api:3000
+  # Dashboard origin stays http://app:3000; api is aliased as app above.
   # docker compose --profile tunnel up -d
   tunnel:
     image: cloudflare/cloudflared:latest
