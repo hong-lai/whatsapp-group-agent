@@ -250,6 +250,97 @@ export async function getLatestWorkflowRunStatuses(
     }))
 }
 
+export type WorkflowBacklogMessageContext = {
+    messageId: string
+    groupJid: string
+    groupName: string | null
+    messageType: string
+    preview: string | null
+    sentAt: number | null
+    isDeleted: boolean
+}
+
+export type WorkflowBacklogRunContext = {
+    messageId: string
+    workflowName: string
+    status: string
+    detail: string | null
+    updatedAt: string
+}
+
+/** Group, text preview, and latest run per workflow for jobs currently in the queue. */
+export async function getWorkflowBacklogContext(messageIds: string[]): Promise<{
+    messages: WorkflowBacklogMessageContext[]
+    runs: WorkflowBacklogRunContext[]
+}> {
+    if (messageIds.length === 0) return { messages: [], runs: [] }
+
+    const [messagesResult, runsResult] = await Promise.all([
+        pool.query<{
+            message_id: string
+            group_jid: string
+            group_name: string | null
+            message_type: string
+            preview: string | null
+            timestamp: string | null
+            is_deleted: boolean
+        }>(
+            `SELECT
+                m.message_id,
+                m.group_jid,
+                g.name AS group_name,
+                m.message_type,
+                NULLIF(
+                    LEFT(btrim(regexp_replace(COALESCE(m.text_content, ''), '\\s+', ' ', 'g')), 180),
+                    ''
+                ) AS preview,
+                EXTRACT(EPOCH FROM m.timestamp)::bigint::text AS timestamp,
+                m.is_deleted
+             FROM messages m
+             LEFT JOIN groups g ON g.jid = m.group_jid
+             WHERE m.message_id = ANY($1::text[])`,
+            [messageIds]
+        ),
+        pool.query<{
+            message_id: string
+            workflow_name: string
+            status: string
+            detail: string | null
+            updated_at: Date
+        }>(
+            `SELECT DISTINCT ON (message_id, workflow_name)
+                message_id,
+                workflow_name,
+                status,
+                detail,
+                updated_at
+             FROM workflow_runs
+             WHERE message_id = ANY($1::text[])
+             ORDER BY message_id, workflow_name, created_at DESC, id DESC`,
+            [messageIds]
+        ),
+    ])
+
+    return {
+        messages: messagesResult.rows.map((row) => ({
+            messageId: row.message_id,
+            groupJid: row.group_jid,
+            groupName: row.group_name,
+            messageType: row.message_type,
+            preview: row.preview,
+            sentAt: row.timestamp == null ? null : Number(row.timestamp),
+            isDeleted: row.is_deleted,
+        })),
+        runs: runsResult.rows.map((row) => ({
+            messageId: row.message_id,
+            workflowName: row.workflow_name,
+            status: row.status,
+            detail: row.detail?.trim() || null,
+            updatedAt: row.updated_at.toISOString(),
+        })),
+    }
+}
+
 export async function findInProgressWorkflows(
     messageId: string,
     workflowNames: string[]

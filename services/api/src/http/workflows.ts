@@ -1,12 +1,14 @@
 import express, { type Express } from 'express'
 import { config, WORKFLOW_LABELS } from '../config.js'
 import { log } from '../../../../packages/shared/src/log.js'
-import { enqueueMessageEvent } from '../../../../packages/shared/src/queue/index.js'
+import { enqueueMessageEvent, getMessageEventBacklog } from '../../../../packages/shared/src/queue/index.js'
 import type { MessageEventType } from '../../../../packages/shared/src/queue/types.js'
 import {
+    WORKFLOW_IN_PROGRESS_STATUSES,
     findInProgressWorkflows,
     getMessageForWorkflowEnqueue,
     getMessagesForWorkflowEnqueue,
+    getWorkflowBacklogContext,
     getWorkflowDebugSnapshot,
     listDailySiteReportMessageIds,
 } from '../../../../packages/shared/src/db/index.js'
@@ -44,6 +46,64 @@ export function registerWorkflowRoutes(app: Express): void {
             })
         }
     )
+
+    app.get('/api/workflows/backlog', async (request, response) => {
+        const limitRaw =
+            typeof request.query.limit === 'string' ? Number.parseInt(request.query.limit, 10) : 200
+        const limit = Number.isFinite(limitRaw) ? limitRaw : 200
+        try {
+            const backlog = await getMessageEventBacklog(limit)
+            const messageIds = [...new Set(backlog.jobs.map((job) => job.messageId))]
+            const context = await getWorkflowBacklogContext(messageIds)
+            const messages = new Map(context.messages.map((message) => [message.messageId, message]))
+            const runsByMessage = new Map<string, typeof context.runs>()
+            for (const run of context.runs) {
+                const list = runsByMessage.get(run.messageId) ?? []
+                list.push(run)
+                runsByMessage.set(run.messageId, list)
+            }
+
+            response.json({
+                workflowsEnabled: config.workflowsEnabled,
+                paused: backlog.paused,
+                workers: backlog.workers,
+                counts: backlog.counts,
+                truncated: backlog.truncated,
+                jobs: backlog.jobs.map((job) => {
+                    const message = messages.get(job.messageId)
+                    const runs = (runsByMessage.get(job.messageId) ?? []).filter((run) => {
+                        if (!WORKFLOW_IN_PROGRESS_STATUSES.has(run.status)) return false
+                        if (!job.workflowNames?.length) return true
+                        return job.workflowNames.includes(run.workflowName)
+                    })
+                    return {
+                        ...job,
+                        groupJid: message?.groupJid ?? job.groupJid,
+                        groupName: message?.groupName ?? null,
+                        stored: Boolean(message),
+                        messageType: message?.messageType ?? job.messageType,
+                        preview: message?.preview ?? null,
+                        sentAt: message?.sentAt ?? null,
+                        isDeleted: message?.isDeleted ?? false,
+                        runs: runs.map((run) => ({
+                            workflowName: run.workflowName,
+                            label: WORKFLOW_LABELS[run.workflowName] ?? run.workflowName,
+                            status: run.status,
+                            detail: run.detail ? run.detail.slice(0, 300) : null,
+                            updatedAt: run.updatedAt,
+                        })),
+                        workflows: (job.workflowNames ?? config.enabledWorkflows).map((name) => ({
+                            name,
+                            label: WORKFLOW_LABELS[name] ?? name,
+                        })),
+                    }
+                }),
+            })
+        } catch (error) {
+            log.warn({ err: String(error) }, 'workflow.backlog_unavailable')
+            response.status(503).json({ error: 'Workflow queue is unavailable' })
+        }
+    })
 
     app.get(
         '/api/debug/workflows',

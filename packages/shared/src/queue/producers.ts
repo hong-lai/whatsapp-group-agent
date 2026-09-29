@@ -1,4 +1,4 @@
-import { Queue } from 'bullmq'
+import { Queue, type Job } from 'bullmq'
 import { Redis } from 'ioredis'
 import { config } from '../config.js'
 import { log } from '../log.js'
@@ -66,6 +66,137 @@ export async function enqueueMessageEvent(
             'workflow.enqueue_failed'
         )
         return false
+    }
+}
+
+export type WorkflowBacklogState = 'active' | 'waiting' | 'prioritized'
+
+export type WorkflowBacklogCounts = {
+    active: number
+    waiting: number
+    prioritized: number
+}
+
+export type WorkflowBacklogJob = {
+    id: string
+    state: WorkflowBacklogState
+    /** 1-based place among jobs in the same state. 1 is next. */
+    position: number | null
+    event: string
+    messageId: string
+    groupJid: string | null
+    messageType: string | null
+    isHistory: boolean
+    /** Null means the worker should run every enabled workflow. */
+    workflowNames: string[] | null
+    enqueuedAt: string | null
+    addedAt: string
+    processedOn: string | null
+    attemptsMade: number
+}
+
+export type WorkflowBacklogSnapshot = {
+    counts: WorkflowBacklogCounts
+    paused: boolean
+    workers: number | null
+    jobs: WorkflowBacklogJob[]
+    /** True when a state has more jobs than this snapshot includes. */
+    truncated: boolean
+}
+
+const ACTIVE_LIMIT = 100
+const PRIORITIZED_LIMIT = 100
+
+function countOf(counts: Record<string, number>, key: string): number {
+    const value = counts[key]
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function workflowNamesFromJob(data: MessageEventJob): string[] | null {
+    if (!Array.isArray(data.workflowNames)) return null
+    const names = [
+        ...new Set(
+            data.workflowNames
+                .map((name) => (typeof name === 'string' ? name.trim() : ''))
+                .filter(Boolean)
+        ),
+    ]
+    return names.length > 0 ? names : null
+}
+
+function mapBacklogJob(
+    job: Job<MessageEventJob>,
+    state: WorkflowBacklogState,
+    position: number | null
+): WorkflowBacklogJob | null {
+    const data = job.data
+    if (!data || typeof data.messageId !== 'string' || !data.messageId) return null
+    return {
+        id: job.id ?? `${state}:${data.messageId}:${job.timestamp}`,
+        state,
+        position,
+        event: typeof data.event === 'string' && data.event ? data.event : job.name,
+        messageId: data.messageId,
+        groupJid: data.groupJid ?? null,
+        messageType: data.messageType ?? null,
+        isHistory: Boolean(data.isHistory),
+        workflowNames: workflowNamesFromJob(data),
+        enqueuedAt: typeof data.enqueuedAt === 'string' ? data.enqueuedAt : null,
+        addedAt: new Date(job.timestamp).toISOString(),
+        processedOn: job.processedOn ? new Date(job.processedOn).toISOString() : null,
+        attemptsMade: job.attemptsMade ?? 0,
+    }
+}
+
+function takeJobs(
+    jobs: Job<MessageEventJob>[],
+    state: WorkflowBacklogState,
+    withPosition: boolean
+): WorkflowBacklogJob[] {
+    const mapped: WorkflowBacklogJob[] = []
+    jobs.forEach((job, index) => {
+        const item = mapBacklogJob(job, state, withPosition ? index + 1 : null)
+        if (item) mapped.push(item)
+    })
+    return mapped
+}
+
+/** Outstanding message-event jobs: running, waiting, and prioritized. */
+export async function getMessageEventBacklog(limit = 200): Promise<WorkflowBacklogSnapshot> {
+    const waitingLimit = Math.min(Math.max(Math.floor(limit) || 200, 1), 500)
+    const queue = getQueue()
+    const [counts, paused, active, waiting, prioritized, workers] = await Promise.all([
+        queue.getJobCounts('active', 'waiting', 'prioritized'),
+        queue.isPaused(),
+        queue.getActive(0, ACTIVE_LIMIT - 1),
+        queue.getWaiting(0, waitingLimit - 1),
+        queue.getPrioritized(0, PRIORITIZED_LIMIT - 1),
+        queue.getWorkersCount().catch(() => null),
+    ])
+
+    const snapshotCounts: WorkflowBacklogCounts = {
+        active: countOf(counts, 'active'),
+        waiting: countOf(counts, 'waiting'),
+        prioritized: countOf(counts, 'prioritized'),
+    }
+
+    const activeJobs = takeJobs(active, 'active', false).sort((a, b) => {
+        const aTime = a.processedOn ? Date.parse(a.processedOn) : Number.POSITIVE_INFINITY
+        const bTime = b.processedOn ? Date.parse(b.processedOn) : Number.POSITIVE_INFINITY
+        return aTime - bTime
+    })
+    const prioritizedJobs = takeJobs(prioritized, 'prioritized', true)
+    const waitingJobs = takeJobs(waiting, 'waiting', true)
+
+    return {
+        counts: snapshotCounts,
+        paused,
+        workers: typeof workers === 'number' ? workers : null,
+        jobs: [...activeJobs, ...prioritizedJobs, ...waitingJobs],
+        truncated:
+            snapshotCounts.active > active.length ||
+            snapshotCounts.waiting > waiting.length ||
+            snapshotCounts.prioritized > prioritized.length,
     }
 }
 

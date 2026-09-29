@@ -28,6 +28,7 @@ import FilenameSettings from './FilenameSettings'
 import FilterSheet from './FilterSheet'
 import InstallApp from './InstallApp'
 import { DownloadButton } from './downloadFile'
+import WorkflowBacklogView from './WorkflowBacklogView'
 import {
     mergeFirstPage,
     useInfiniteScroll,
@@ -274,6 +275,14 @@ function initialSortOrder(params: URLSearchParams): SortOrder {
     return params.get('order') === 'asc' ? 'asc' : 'desc'
 }
 
+type DashboardView = 'messages' | 'album' | 'reports' | 'queue'
+
+function initialDashboardView(params: URLSearchParams): DashboardView {
+    const view = params.get('view')
+    if (view === 'album' || view === 'reports' || view === 'queue') return view
+    return 'messages'
+}
+
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
     timeZone: 'Asia/Hong_Kong',
     dateStyle: 'medium',
@@ -334,6 +343,7 @@ function Icon({
         | 'filter'
         | 'more'
         | 'report'
+        | 'queue'
         | 'lock'
         | 'shield'
         | 'logout'
@@ -401,6 +411,13 @@ function Icon({
             <>
                 <path d="M7 4h10v16H7z" />
                 <path d="M9 8h6M9 12h6M9 16h4" />
+            </>
+        ),
+        queue: (
+            <>
+                <path d="M12 3 3 8l9 5 9-5-9-5z" />
+                <path d="m3 12 9 5 9-5" />
+                <path d="m3 16 9 5 9-5" />
             </>
         ),
         lock: (
@@ -2078,13 +2095,7 @@ export default function App() {
     const [from, setFrom] = useState(initialParams.get('from') || today)
     const [to, setTo] = useState(initialParams.get('to') || today)
     const [selectedJid, setSelectedJid] = useState<string | null>(initialParams.get('group'))
-    const [view, setView] = useState<'messages' | 'album' | 'reports'>(
-        initialParams.get('view') === 'album'
-            ? 'album'
-            : initialParams.get('view') === 'reports'
-              ? 'reports'
-              : 'messages'
-    )
+    const [view, setView] = useState<DashboardView>(initialDashboardView(initialParams))
     const [albumScope, setAlbumScope] = useState<AlbumScope>(
         initialParams.get('scope') === 'group' ? 'group' : 'all'
     )
@@ -2134,6 +2145,8 @@ export default function App() {
     const [overflowOpen, setOverflowOpen] = useState(false)
     const [reportToast, setReportToast] = useState<ReportProcessedEvent | null>(null)
     const [reportsLiveTick, setReportsLiveTick] = useState(0)
+    const [queueLiveTick, setQueueLiveTick] = useState(0)
+    const [queueOutstanding, setQueueOutstanding] = useState(0)
     const [albumCounts, setAlbumCounts] = useState(emptyCounts)
     const overflowRef = useRef<HTMLDivElement>(null)
     const groupsRequestId = useRef(0)
@@ -2187,7 +2200,9 @@ export default function App() {
                 : 'All media'
             : view === 'reports'
               ? selectedGroup?.name || 'Site reports'
-              : selectedGroup?.name || 'Groups'
+              : view === 'queue'
+                ? 'Queue'
+                : selectedGroup?.name || 'Groups'
     const messageScrollKey = `${selectedJid ?? ''}|${from}|${to}|${reloadKey}`
     const { onScroll: onMessageListScroll } = usePinnedScroll(
         messageListRef,
@@ -2251,6 +2266,7 @@ export default function App() {
                 setMessages((current) =>
                     current.map((message) => applyWorkflowStatusToMessage(message, data))
                 )
+                setQueueLiveTick((tick) => tick + 1)
                 pulseLive()
             } catch {
                 // ignore malformed payloads
@@ -2270,7 +2286,7 @@ export default function App() {
     }, [reportToast])
 
     useEffect(() => {
-        if (groupsLoading || view === 'reports') return
+        if (groupsLoading || view === 'reports' || view === 'queue') return
         if (selectedJid && rangedGroups.some((group) => group.jid === selectedJid)) return
         setSelectedJid(rangedGroups[0]?.jid ?? null)
     }, [groupsLoading, rangedGroups, selectedJid, view])
@@ -2378,7 +2394,7 @@ export default function App() {
                 if (data.pattern?.source) setPattern(data.pattern)
                 setSelectedJid((current) => {
                     if (current && data.groups.some((group) => group.jid === current)) return current
-                    if (view === 'reports') return current
+                    if (view === 'reports' || view === 'queue') return current
                     return (
                         data.groups.find((group) => group.messageCount > 0)?.jid ||
                         data.groups[0]?.jid ||
@@ -2770,7 +2786,7 @@ export default function App() {
     }
 
     return (
-        <div className={`app-shell${view === 'album' ? ' is-album' : ''}${view === 'reports' ? ' is-reports' : ''}`}>
+        <div className={`app-shell${view === 'album' ? ' is-album' : ''}${view === 'reports' ? ' is-reports' : ''}${view === 'queue' ? ' is-queue' : ''}`}>
             <header className="topbar">
                 <button
                     type="button"
@@ -3114,6 +3130,22 @@ export default function App() {
                         <Icon name="report" />
                         <span className="view-switch-label">Reports</span>
                     </button>
+                    <button
+                        type="button"
+                        className={view === 'queue' ? 'active' : ''}
+                        aria-label={queueOutstanding > 0 ? `Queue, ${queueOutstanding} in progress` : 'Queue'}
+                        aria-pressed={view === 'queue'}
+                        title="Queue"
+                        onClick={() => setView('queue')}
+                    >
+                        <Icon name="queue" />
+                        <span className="view-switch-label">Queue</span>
+                        {queueOutstanding > 0 && (
+                            <span className="queue-nav-badge">
+                                {queueOutstanding > 99 ? '99+' : queueOutstanding}
+                            </span>
+                        )}
+                    </button>
                 </div>
                 {invalidRange && <p className="inline-error">Choose a valid date range.</p>}
             </section>
@@ -3126,7 +3158,7 @@ export default function App() {
             )}
 
             <main
-                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}${view === 'reports' ? ' reports-dashboard' : ''}`}
+                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}${view === 'reports' ? ' reports-dashboard' : ''}${view === 'queue' ? ' queue-dashboard' : ''}`}
                 aria-busy={groupsLoading || messagesLoading}
             >
                 <div
@@ -3253,6 +3285,26 @@ export default function App() {
                         onOpenGroups={() => setReportsGroupsCollapsed(false)}
                     />
                 </div>
+                <div
+                    className={`view-pane queue-pane ${view === 'queue' ? 'is-active' : ''}`}
+                    aria-hidden={view !== 'queue'}
+                >
+                    <WorkflowBacklogView
+                        active={view === 'queue'}
+                        liveTick={queueLiveTick}
+                        onOutstandingChange={setQueueOutstanding}
+                        onOpenGroup={(groupJid, sentAt) => {
+                            if (sentAt) {
+                                const day = hongKongDate(sentAt * 1000)
+                                setFrom(day)
+                                setTo(day)
+                            }
+                            setSelectedJid(groupJid)
+                            setView('messages')
+                            setDrawerOpen(false)
+                        }}
+                    />
+                </div>
             </main>
             <nav className="bottom-nav mobile-only" aria-label="Views">
                 <button
@@ -3281,6 +3333,21 @@ export default function App() {
                 >
                     <Icon name="report" />
                     Reports
+                </button>
+                <button
+                    type="button"
+                    className={view === 'queue' ? 'active' : ''}
+                    aria-pressed={view === 'queue'}
+                    aria-label={queueOutstanding > 0 ? `Queue, ${queueOutstanding} in progress` : 'Queue'}
+                    onClick={() => setView('queue')}
+                >
+                    <Icon name="queue" />
+                    Queue
+                    {queueOutstanding > 0 && (
+                        <span className="queue-nav-badge">
+                            {queueOutstanding > 99 ? '99+' : queueOutstanding}
+                        </span>
+                    )}
                 </button>
             </nav>
             <Drawer
