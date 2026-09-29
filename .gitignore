@@ -9,6 +9,11 @@ reports/*
 !reports/.gitkeep
 .cursor/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
 # Confidential company prompts / local Python venv for agent workflows
 services/workflows/private/
 services/workflows/.venv/
