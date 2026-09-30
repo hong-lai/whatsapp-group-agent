@@ -6,7 +6,12 @@ export {
     nextAlbumIndex,
     resolveAlbumParent,
 } from './albums.js'
-export { getAppSetting, setAppSetting } from './settings.js'
+export {
+    getAppSetting,
+    listExhaustedMediaDownloadIds,
+    noteExhaustedMediaDownload,
+    setAppSetting,
+} from './settings.js'
 export {
     groupMatchesPattern,
     markGroupDeleted,
@@ -19,6 +24,9 @@ export {
     fillMessageSecretIfMissing,
     getGroupMessageAfter,
     getLatestGroupMessage,
+    getLatestGroupMessageBefore,
+    getMediaDownloadStatus,
+    listMissingMediaMessages,
     listMissingMediaSpans,
     getMessageEditTarget,
     getMessageHktDate,
@@ -36,6 +44,9 @@ export {
     updateAlbumLink,
     updateMessageMediaPath,
     type LatestGroupMessage,
+    type MediaDownloadGap,
+    type MediaDownloadStatus,
+    type MissingMediaMessage,
     type MissingMediaSpan,
     type MessageEditTarget,
     type MessageRow,

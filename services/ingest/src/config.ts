@@ -14,6 +14,8 @@ export const config = {
     mediaRetryMaxAttempts: envInt('MEDIA_RETRY_MAX_ATTEMPTS', 5),
     mediaRetryMinMs: envInt('MEDIA_RETRY_MIN_MS', 5000),
     mediaRetryMaxMs: envInt('MEDIA_RETRY_MAX_MS', 60_000),
+    /** One CDN/reupload attempt. Baileys' media reupload wait has no timeout of its own. */
+    mediaDownloadTimeoutMs: envInt('MEDIA_DOWNLOAD_TIMEOUT_MS', 180_000),
     /** When true, save message rows but skip downloading media files (faster text-only ingest). */
     skipMediaDownload: env('SKIP_MEDIA_DOWNLOAD', 'false') === 'true',
     /** Reconnect catchup: only fill gaps newer than now - this many seconds. */

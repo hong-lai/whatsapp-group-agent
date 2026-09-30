@@ -226,6 +226,53 @@ export async function getOldestGroupMessage(groupJid: string): Promise<LatestGro
     return getGroupMessageAnchor(groupJid, 'oldest')
 }
 
+export type MissingMediaMessage = {
+    groupJid: string
+    messageId: string
+    senderJid: string | null
+    timestamp: number
+}
+
+/** Media rows with no file. `stickerMessage` is not included by the caller. */
+export async function listMissingMediaMessages(
+    groupJids: string[],
+    messageTypes: string[]
+): Promise<MissingMediaMessage[]> {
+    if (groupJids.length === 0 || messageTypes.length === 0) return []
+    const result = await pool.query<{
+        group_jid: string
+        message_id: string
+        sender_jid: string | null
+        timestamp: string | null
+    }>(
+        `SELECT
+            group_jid,
+            message_id,
+            sender_jid,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE group_jid = ANY($1::text[])
+           AND media_path IS NULL
+           AND is_deleted = FALSE
+           AND timestamp IS NOT NULL
+           AND message_type = ANY($2::text[])
+         ORDER BY group_jid, timestamp, message_id`,
+        [groupJids, messageTypes]
+    )
+    return result.rows.flatMap((row) => {
+        const timestamp = Number(row.timestamp)
+        if (!Number.isFinite(timestamp)) return []
+        return [
+            {
+                groupJid: row.group_jid,
+                messageId: row.message_id,
+                senderJid: row.sender_jid,
+                timestamp,
+            },
+        ]
+    })
+}
+
 export type MissingMediaSpan = {
     groupJid: string
     missingCount: number
@@ -299,6 +346,126 @@ export async function listMissingMediaSpans(
             },
         ]
     })
+}
+
+const DOWNLOADABLE_MEDIA_TYPES = [
+    'imageMessage',
+    'videoMessage',
+    'ptvMessage',
+    'documentMessage',
+    'audioMessage',
+]
+
+export type MediaDownloadGap = {
+    messageId: string
+    groupJid: string
+    groupName: string
+    messageType: string
+    timestamp: number
+    givenUp: boolean
+}
+
+export type MediaDownloadStatus = {
+    missing: number
+    givenUp: number
+    gaps: MediaDownloadGap[]
+}
+
+/** Saved media rows that still have no file. Stickers are not downloaded. */
+export async function getMediaDownloadStatus(exhaustedIds: string[]): Promise<MediaDownloadStatus> {
+    const counts = await pool.query<{ missing: number; given_up: number }>(
+        `SELECT
+            COUNT(*)::int AS missing,
+            COUNT(*) FILTER (WHERE message_id = ANY($2::text[]))::int AS given_up
+         FROM messages
+         WHERE media_path IS NULL
+           AND is_deleted = FALSE
+           AND timestamp IS NOT NULL
+           AND message_type = ANY($1::text[])`,
+        [DOWNLOADABLE_MEDIA_TYPES, exhaustedIds]
+    )
+    const missing = Number(counts.rows[0]?.missing ?? 0)
+    const givenUp = Number(counts.rows[0]?.given_up ?? 0)
+    if (!Number.isFinite(missing) || !Number.isFinite(givenUp)) {
+        throw new Error('media download status counts were not numbers')
+    }
+    if (missing === 0) return { missing: 0, givenUp: 0, gaps: [] }
+    const gaps = await pool.query<{
+        message_id: string
+        group_jid: string
+        group_name: string | null
+        message_type: string
+        timestamp: string | null
+        given_up: boolean
+    }>(
+        `SELECT
+            m.message_id,
+            m.group_jid,
+            g.name AS group_name,
+            m.message_type,
+            EXTRACT(EPOCH FROM m.timestamp)::bigint::text AS timestamp,
+            m.message_id = ANY($2::text[]) AS given_up
+         FROM messages m
+         LEFT JOIN groups g ON g.jid = m.group_jid
+         WHERE m.media_path IS NULL
+           AND m.is_deleted = FALSE
+           AND m.timestamp IS NOT NULL
+           AND m.message_type = ANY($1::text[])
+         ORDER BY m.timestamp DESC, m.message_id DESC
+         LIMIT 8`,
+        [DOWNLOADABLE_MEDIA_TYPES, exhaustedIds]
+    )
+    return {
+        missing,
+        givenUp,
+        gaps: gaps.rows.flatMap((row) => {
+            const timestamp = Number(row.timestamp)
+            if (!Number.isFinite(timestamp)) return []
+            return [
+                {
+                    messageId: row.message_id,
+                    groupJid: row.group_jid,
+                    groupName: row.group_name?.trim() || row.group_jid,
+                    messageType: row.message_type,
+                    timestamp,
+                    givenUp: row.given_up,
+                },
+            ]
+        }),
+    }
+}
+
+/** Latest stored message strictly older than `timestampSeconds`. */
+export async function getLatestGroupMessageBefore(
+    groupJid: string,
+    timestampSeconds: number
+): Promise<LatestGroupMessage | undefined> {
+    const result = await pool.query<{
+        message_id: string
+        sender_jid: string | null
+        timestamp: string | null
+    }>(
+        `SELECT
+            message_id,
+            sender_jid,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE group_jid = $1
+           AND timestamp IS NOT NULL
+           AND timestamp < to_timestamp($2)
+         ORDER BY timestamp DESC, message_id DESC
+         LIMIT 1`,
+        [groupJid, timestampSeconds]
+    )
+    const row = result.rows[0]
+    if (!row?.timestamp) return undefined
+    const timestamp = Number(row.timestamp)
+    if (!Number.isFinite(timestamp)) return undefined
+    return {
+        messageId: row.message_id,
+        senderJid: row.sender_jid,
+        timestamp,
+    }
 }
 
 /** Earliest stored message strictly newer than `timestampSeconds`. */

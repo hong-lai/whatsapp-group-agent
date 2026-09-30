@@ -51,6 +51,7 @@ import {
     isLivePhotoMotionVideo,
     originalMediaName,
     storeMediaFile,
+    type MediaStoreMeta,
 } from './media.js'
 
 export function unixSeconds(value: unknown): number {
@@ -266,6 +267,16 @@ export async function resolveGroupMetadata(
     return refreshGroup(sock, jid, 'processMessage')
 }
 
+/** Download off the ingest queue. A hung CDN fetch or Baileys reupload must not block the next message. */
+function startMediaDownload(m: WAMessage, sock: WASocket, meta: MediaStoreMeta): void {
+    void storeMediaFile(m, sock, meta).catch((err) => {
+        log.warn(
+            { err, messageId: meta.messageId, groupJid: meta.groupJid },
+            'media.store_failed'
+        )
+    })
+}
+
 export async function processMessage(
     m: WAMessage,
     sock: WASocket,
@@ -415,8 +426,7 @@ export async function processMessage(
                     { messageId, groupJid: jid, groupName, messageType, isHistory },
                     'media.retry_missing'
                 )
-                if (isHistory) void storeMediaFile(m, sock, mediaMeta)
-                else await storeMediaFile(m, sock, mediaMeta)
+                startMediaDownload(m, sock, mediaMeta)
             }
             if (messageType !== 'reactionMessage') return 'ignored'
         }
@@ -588,8 +598,7 @@ export async function processMessage(
                 senderName,
                 albumIndex: albumIndex ?? null,
             }
-            if (isHistory) void storeMediaFile(m, sock, mediaMeta)
-            else await storeMediaFile(m, sock, mediaMeta)
+            startMediaDownload(m, sock, mediaMeta)
         }
         ingestLog(
             {

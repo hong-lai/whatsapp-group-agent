@@ -8,11 +8,12 @@ import {
 import logger from '@whiskeysockets/baileys/lib/Utils/logger.js'
 import { createWriteStream, existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 import { basename, extname } from 'path'
+import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
-import type { Readable } from 'stream'
 import {
     getMessageMediaState,
     markMessagesDeleted,
+    noteExhaustedMediaDownload,
     updateMessageMediaPath,
 } from '../../../packages/shared/src/db/index.js'
 import {
@@ -201,7 +202,17 @@ export type MediaStoreMeta = {
 }
 
 function mediaErrorText(err: unknown): string {
-    return err instanceof Error ? err.message : String(err)
+    const parts: string[] = []
+    const seen = new Set<unknown>()
+    let current: unknown = err
+    while (current != null && typeof current === 'object' && !seen.has(current)) {
+        seen.add(current)
+        const record = current as { message?: unknown; code?: unknown; cause?: unknown }
+        if (typeof record.message === 'string') parts.push(record.message)
+        if (typeof record.code === 'string') parts.push(record.code)
+        current = record.cause
+    }
+    return parts.length > 0 ? parts.join('\n') : String(err)
 }
 
 function isTimeoutMediaError(err: unknown): boolean {
@@ -213,14 +224,64 @@ function isRetryableMediaError(err: unknown): boolean {
     const error = mediaErrorText(err)
     return (
         isTimeoutMediaError(err) ||
-        /ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ECONNRESET|ECONNREFUSED|EPIPE|ECONNABORTED|UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|socket hang up|Connection Closed|connection closed|Stream Errored|aborted|Premature close/i.test(
+        /timed out|ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ECONNRESET|ECONNREFUSED|EPIPE|ECONNABORTED|UND_ERR_(CONNECT|HEADERS|BODY)_TIMEOUT|UND_ERR_SOCKET|other side closed|terminated|socket hang up|Connection Closed|connection closed|Stream Errored|aborted|Premature close/i.test(
             error
         )
     )
 }
 
+// Baileys decrypts with httpBody.pipe(decrypt). Node's pipe() does not forward
+// errors from the HTTP body, so a CDN socket close is an unhandled 'error' on
+// that Readable and can exit the process. The listener is attached when pipe()
+// runs and stays on that body after the patch is removed.
+const originalReadablePipe = Readable.prototype.pipe
+let mediaPipeDepth = 0
+
+function mediaPipe(
+    this: Readable,
+    dest: NodeJS.WritableStream,
+    opts?: { end?: boolean }
+): NodeJS.WritableStream {
+    const source = this
+    source.on('error', function onSourceError(err: Error) {
+        source.removeListener('error', onSourceError)
+        const target = dest as unknown as { destroyed?: boolean; destroy: (error?: Error) => void }
+        if (!target.destroyed) target.destroy(err)
+    })
+    return originalReadablePipe.call(source, dest, opts)
+}
+
+function beginMediaPipeGuard(): void {
+    if (mediaPipeDepth === 0) {
+        Readable.prototype.pipe = mediaPipe as typeof Readable.prototype.pipe
+    }
+    mediaPipeDepth += 1
+}
+
+function endMediaPipeGuard(): void {
+    mediaPipeDepth = Math.max(0, mediaPipeDepth - 1)
+    if (mediaPipeDepth === 0) Readable.prototype.pipe = originalReadablePipe
+}
+
+type MediaBump = {
+    promise: Promise<never>
+    reject: (err: Error) => void
+}
+
+function createMediaBump(): MediaBump {
+    let reject: (err: Error) => void = () => {}
+    const promise = new Promise<never>((_, rej) => {
+        reject = rej
+    })
+    // Rejecting with no waiter (disconnect while idle) must not crash the process.
+    promise.catch(() => {})
+    return { promise, reject }
+}
+
 /** Bumped on every WhatsApp disconnect so in-flight media retries stop using a dead socket. */
 let mediaSocketGeneration = 0
+/** Rejected on disconnect so a hung CDN fetch or Baileys reupload cannot outlive the socket. */
+let mediaBump = createMediaBump()
 /** Messages waiting for a successful media download (survives reconnect). */
 const pendingMediaDownloads = new Map<string, { m: WAMessage; meta: MediaStoreMeta }>()
 /** Prevents concurrent downloads for the same message id. */
@@ -228,6 +289,9 @@ const inFlightMediaDownloads = new Set<string>()
 
 export function bumpMediaSocketGeneration(): void {
     mediaSocketGeneration += 1
+    const previous = mediaBump
+    mediaBump = createMediaBump()
+    previous.reject(new Error('Connection Closed'))
     // Aborted retries must not block recovery on the new socket.
     inFlightMediaDownloads.clear()
 }
@@ -298,22 +362,64 @@ async function downloadMediaOnce(
     sock: WASocket,
     fileName: string
 ): Promise<void> {
-    await waitMediaDownload()
-    const stream = (await downloadMediaMessage(
-        messageForMediaDownload(m),
-        'stream',
-        {},
-        {
-            logger,
-            reuploadRequest: sock.updateMediaMessage,
+    const partial = `${fileName}.${process.hrtime.bigint()}.part`
+    const bumpPromise = mediaBump.promise
+    let abandoned = false
+    let stream: Readable | undefined
+    const attempt = (async () => {
+        await waitMediaDownload()
+        if (abandoned) throw new Error('media download timed out')
+        // Baileys waits forever inside reuploadRequest when the CDN returns 404/410.
+        beginMediaPipeGuard()
+        try {
+            stream = (await downloadMediaMessage(
+                messageForMediaDownload(m),
+                'stream',
+                {},
+                {
+                    logger,
+                    reuploadRequest: sock.updateMediaMessage,
+                }
+            )) as Readable
+        } finally {
+            endMediaPipeGuard()
         }
-    )) as Readable
+        if (abandoned) {
+            stream.destroy()
+            throw new Error('Connection Closed')
+        }
+        try {
+            await pipeline(stream, createWriteStream(partial))
+        } catch (err) {
+            stream.destroy()
+            removePartialMedia(partial)
+            throw err
+        }
+        if (abandoned) {
+            removePartialMedia(partial)
+            throw new Error('Connection Closed')
+        }
+        renameSync(partial, fileName)
+    })()
+    // A loser of the race must not surface as an unhandled rejection.
+    attempt.catch(() => {})
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+            () => reject(new Error('media download timed out')),
+            Math.max(1_000, config.mediaDownloadTimeoutMs)
+        )
+    })
+    timeout.catch(() => {})
     try {
-        await pipeline(stream, createWriteStream(fileName))
+        await Promise.race([attempt, bumpPromise, timeout])
     } catch (err) {
-        stream.destroy()
-        removePartialMedia(fileName)
+        abandoned = true
+        stream?.destroy()
+        removePartialMedia(partial)
         throw err
+    } finally {
+        if (timer) clearTimeout(timer)
     }
 }
 
@@ -322,6 +428,7 @@ function logMediaDownloadFailure(
     meta: MediaStoreMeta,
     attempts: number
 ): void {
+    noteExhaustedMediaDownload(meta.messageId)
     if (meta.isHistory && isTimeoutMediaError(err)) {
         log.debug(
             {
@@ -450,6 +557,17 @@ export async function storeMediaFile(
 
     inFlightMediaDownloads.add(meta.messageId)
     rememberPendingMedia(m, meta)
+    const logDownload = meta.isHistory ? log.debug.bind(log) : log.info.bind(log)
+    logDownload(
+        {
+            messageId: meta.messageId,
+            groupJid: meta.groupJid,
+            groupName: meta.groupName,
+            messageType: meta.messageType,
+            isHistory: meta.isHistory,
+        },
+        'media.download_started'
+    )
     const sockGeneration = mediaSocketGeneration
     let handoffToRetry = false
     try {

@@ -248,10 +248,60 @@ type AgentConnectionEvent = {
     detail?: string
 }
 
+type MediaDownloadGap = {
+    messageId: string
+    groupJid: string
+    groupName: string
+    messageType: string
+    timestamp: number
+    givenUp: boolean
+}
+
+type MediaDownloadStatus = {
+    enabled: boolean
+    missing: number
+    givenUp: number
+    gaps: MediaDownloadGap[]
+}
+
 type StatusResponse = {
     state: AgentConnectionState
     since: number
     events: AgentConnectionEvent[]
+    media?: MediaDownloadStatus
+}
+
+function mediaKind(type: string): string {
+    if (type === 'imageMessage') return 'Image'
+    if (type === 'videoMessage' || type === 'ptvMessage') return 'Video'
+    if (type === 'documentMessage') return 'Document'
+    if (type === 'audioMessage') return 'Audio'
+    return 'File'
+}
+
+function mediaHealthText(media: MediaDownloadStatus): string {
+    if (!media.enabled) return 'Media download is turned off.'
+    const { missing, givenUp } = media
+    if (missing === 0) return 'Media downloads are up to date.'
+    const files = `${missing} media file${missing === 1 ? '' : 's'}`
+    if (givenUp === 0) return `${files} missing.`
+    if (givenUp === missing) return `${files} missing. Download retries are finished.`
+    return `${files} missing. ${givenUp} will not be retried.`
+}
+
+function mediaChipText(media: MediaDownloadStatus): string {
+    if (!media.enabled) return 'Media off'
+    if (media.missing === 0) return 'Media OK'
+    if (media.givenUp === 0) return `${media.missing} missing`
+    if (media.givenUp === media.missing) return `${media.missing} failed`
+    return `${media.missing} missing · ${media.givenUp} failed`
+}
+
+function mediaChipTone(media: MediaDownloadStatus): 'off' | 'ok' | 'gap' | 'failed' {
+    if (!media.enabled) return 'off'
+    if (media.missing === 0) return 'ok'
+    if (media.givenUp > 0) return 'failed'
+    return 'gap'
 }
 
 function initialMediaCategories(params: URLSearchParams): MediaCategory[] {
@@ -545,14 +595,19 @@ function ConnectionStatus({
     events,
     live,
     unreachable,
+    media,
 }: {
     state: AgentConnectionState
     events: AgentConnectionEvent[]
     live?: boolean
     unreachable?: boolean
+    media: MediaDownloadStatus | null
 }) {
     const [open, setOpen] = useState(false)
     const rootRef = useRef<HTMLDivElement>(null)
+    const missing = media?.enabled ? media.missing : 0
+    const health = media ? mediaHealthText(media) : 'Media status is loading.'
+    const tone = media ? mediaChipTone(media) : null
 
     useEffect(() => {
         if (!open) return undefined
@@ -577,18 +632,49 @@ function ConnectionStatus({
         <div className="connection-status" ref={rootRef}>
             <button
                 type="button"
-                className={`connection-toggle is-${state}`}
-                aria-label={label}
+                className={`connection-toggle is-${state}${tone ? ` has-media-${tone}` : ''}`}
+                aria-label={`${label}. ${health}`}
                 aria-expanded={open}
                 aria-haspopup="dialog"
-                title="Connection log"
+                title={health}
                 onClick={() => setOpen((current) => !current)}
             >
                 <span className={`status-dot is-${state}${live ? ' is-live' : ''}`} />
                 <span className="connection-label">{label}</span>
+                {media && tone && (
+                    <span className={`media-gap-count is-${tone}`}>{mediaChipText(media)}</span>
+                )}
             </button>
             {open && (
-                <div className="connection-log" role="dialog" aria-label="Connection log">
+                <div className="connection-log" role="dialog" aria-label="Connection and media status">
+                    {media && (
+                        <section
+                            className={`media-health is-${
+                                !media.enabled ? 'off' : media.givenUp > 0 ? 'failed' : missing > 0 ? 'gap' : 'ok'
+                            }`}
+                        >
+                            <strong>{health}</strong>
+                            {missing > 0 && (
+                                <ol>
+                                    {media.gaps.map((gap) => (
+                                        <li key={gap.messageId}>
+                                            <span>{gap.groupName}</span>
+                                            <small>
+                                                {mediaKind(gap.messageType)}
+                                                {' · '}
+                                                <time>{hkDateTime.format(gap.timestamp * 1000)}</time>
+                                                {gap.givenUp ? ' · retries finished' : ''}
+                                            </small>
+                                            <code>{gap.messageId}</code>
+                                        </li>
+                                    ))}
+                                </ol>
+                            )}
+                            {missing > media.gaps.length && (
+                                <p>{missing - media.gaps.length} older files are also missing.</p>
+                            )}
+                        </section>
+                    )}
                     <strong>Connection log</strong>
                     <p>Disconnect and reconnect times since this process started. Not stored.</p>
                     {unreachable && (
@@ -2134,6 +2220,7 @@ export default function App() {
     const [pattern, setPattern] = useState<{ source: string; flags: string } | null>(null)
     const [agentState, setAgentState] = useState<AgentConnectionState>('connecting')
     const [connectionEvents, setConnectionEvents] = useState<AgentConnectionEvent[]>([])
+    const [mediaDownload, setMediaDownload] = useState<MediaDownloadStatus | null>(null)
     const [linkDown, setLinkDown] = useState(typeof navigator !== 'undefined' && !navigator.onLine)
     const [settingsOpen, setSettingsOpen] = useState(false)
     const [adminLoginOpen, setAdminLoginOpen] = useState(false)
@@ -2311,6 +2398,7 @@ export default function App() {
             setLinkDown(false)
             setAgentState(data.state)
             setConnectionEvents(data.events)
+            if (data.media) setMediaDownload(data.media)
         } catch {
             setLinkDown(true)
             setAgentState('disconnected')
@@ -2917,6 +3005,7 @@ export default function App() {
                             events={connectionEvents}
                             live={connectionState === 'connected' && livePulse}
                             unreachable={linkDown}
+                            media={mediaDownload}
                         />
                     </div>
                     <button
@@ -3004,6 +3093,7 @@ export default function App() {
                                     events={connectionEvents}
                                     live={connectionState === 'connected' && livePulse}
                                     unreachable={linkDown}
+                                    media={mediaDownload}
                                 />
                             </div>
                         )}

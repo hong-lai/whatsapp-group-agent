@@ -10,8 +10,11 @@ import {
     getAppSetting,
     getGroupMessageAfter,
     getLatestGroupMessage,
+    getLatestGroupMessageBefore,
     getOldestGroupMessage,
-    listMissingMediaSpans,
+    listExhaustedMediaDownloadIds,
+    listMissingMediaMessages,
+    noteExhaustedMediaDownload,
     setAppSetting,
     type LatestGroupMessage,
 } from '../../../packages/shared/src/db/index.js'
@@ -25,11 +28,21 @@ import { settleDelayMs, waitHistoryRequest } from './rateLimit.js'
 // so groups that still have missing files get one more walk.
 const MEDIA_GAP_BACKFILL_KEY = 'media_gap_backfill_v2'
 const MEDIA_GAP_REASON = 'media-gap'
+/** Ids already paged in this process. Reconnects must not start the walk again; a new process can. */
+const pagedMissingMediaIds = new Set<string>()
+
+type MediaGapMessage = {
+    messageId: string
+    timestamp: number
+}
 
 type MediaGapTarget = {
     oldestTs: number
     newestTs: number
     missingCount: number
+    messages: MediaGapMessage[]
+    newestMessageId: string
+    newestSenderJid: string | null
 }
 
 type MediaGapBackfillState = {
@@ -361,9 +374,11 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         if (isBackfillReason(reason) && timestamp <= backfillFloor()) return 'done'
 
         try {
-            const latest = await getLatestGroupMessage(groupJid)
-            const coversAnchor = Boolean(latest && latest.timestamp >= timestamp - 2)
-            if (coversAnchor && !isBackfillReason(reason)) return 'done'
+            // The anchor is often the message that just revealed the hole, and it is
+            // already stored by the time this runs. Compare the row before it.
+            const predecessor = await getLatestGroupMessageBefore(groupJid, timestamp)
+            const adjacent = predecessor != null && timestamp - predecessor.timestamp <= 2
+            if (adjacent && !isBackfillReason(reason)) return 'done'
 
             const waitedMs = await waitHistoryRequest()
             if (stopped) return 'done'
@@ -665,12 +680,31 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             })
     }
 
-    function finishMediaGap(groupJid: string, why: string): void {
+    function finishMediaGap(groupJid: string, why: string, coveredThroughTs?: number): void {
+        const target = mediaGapTargets.get(groupJid)
         clearMediaGapWait(groupJid)
         mediaGapTargets.delete(groupJid)
         mediaGapEndings.set(groupJid, why)
-        const retryLater = why === 'awaiting-timeout' || why === 'request-failed'
-        if (!retryLater) mediaGapFinished.add(groupJid)
+        // no-anchor: history is requested before a newer message, so the newest missing
+        // file cannot appear in the page until something newer exists.
+        const retryLater =
+            why === 'awaiting-timeout' ||
+            why === 'request-failed' ||
+            why === 'no-anchor' ||
+            why === 'no-target'
+        if (!retryLater && target) {
+            mediaGapFinished.add(groupJid)
+            const covered =
+                coveredThroughTs == null
+                    ? target.messages
+                    : target.messages.filter((message) => message.timestamp >= coveredThroughTs)
+            const uncovered =
+                coveredThroughTs == null
+                    ? []
+                    : target.messages.filter((message) => message.timestamp < coveredThroughTs)
+            for (const message of covered) pagedMissingMediaIds.add(message.messageId)
+            for (const message of uncovered) noteExhaustedMediaDownload(message.messageId)
+        }
         log.info({ groupJid, why, remaining: mediaGapTargets.size }, 'media_gap.group_complete')
         if (mediaGapTargets.size > 0) {
             if (!retryLater) scheduleMediaGapPersist(false)
@@ -678,7 +712,11 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             return
         }
         const retry = [...mediaGapEndings.values()].some(
-            (ending) => ending === 'awaiting-timeout' || ending === 'request-failed'
+            (ending) =>
+                ending === 'awaiting-timeout' ||
+                ending === 'request-failed' ||
+                ending === 'no-anchor' ||
+                ending === 'no-target'
         )
         scheduleMediaGapPersist(!retry && !stopped)
         pokeDrain()
@@ -699,7 +737,7 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             return
         }
         if (lastPage) {
-            finishMediaGap(groupJid, 'short-page')
+            finishMediaGap(groupJid, 'short-page', oldestTs)
             return
         }
         if (page >= config.mediaGapMaxPages) {
@@ -713,7 +751,7 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
                 },
                 'media_gap.page_limit'
             )
-            finishMediaGap(groupJid, 'page-limit')
+            finishMediaGap(groupJid, 'page-limit', oldestTs)
             return
         }
         enqueue({
@@ -776,63 +814,89 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
 
     async function startMediaGap(): Promise<void> {
         const state = parseMediaGapState(await getAppSetting(MEDIA_GAP_BACKFILL_KEY))
-        if (state.done) {
-            log.info('media_gap.already_done')
-            return
-        }
         if (stopped || jobs.size > 0 || awaitingOnDemand.size > 0 || !allowingRequests) {
             mediaGapStartPromise = undefined
             return
         }
-        for (const groupJid of state.finishedGroups) mediaGapFinished.add(groupJid)
-        const pendingJids = trackedJids.filter((jid) => !mediaGapFinished.has(jid))
-        const spans = await listMissingMediaSpans(pendingJids, mediaGapMessageTypes())
+        const [rows, exhaustedIds] = await Promise.all([
+            listMissingMediaMessages(trackedJids, mediaGapMessageTypes()),
+            listExhaustedMediaDownloadIds(),
+        ])
         if (stopped || jobs.size > 0 || awaitingOnDemand.size > 0 || !allowingRequests) {
             mediaGapStartPromise = undefined
             return
         }
-        if (spans.length === 0) {
-            scheduleMediaGapPersist(true)
-            log.info({ skippedGroups: mediaGapFinished.size }, 'media_gap.nothing_missing')
+        const exhausted = new Set(exhaustedIds)
+        const pending = rows.filter(
+            (row) => !exhausted.has(row.messageId) && !pagedMissingMediaIds.has(row.messageId)
+        )
+        if (rows.length === 0) {
+            if (!state.done) scheduleMediaGapPersist(true)
+            log.info('media_gap.nothing_missing')
             return
         }
-        const missing = spans.reduce((sum, span) => sum + span.missingCount, 0)
-        log.info({ groups: spans.length, missing }, 'media_gap.start')
-        for (const span of spans) {
-            mediaGapTargets.set(span.groupJid, {
-                oldestTs: span.oldestTimestamp,
-                newestTs: span.newestTimestamp,
-                missingCount: span.missingCount,
+        if (pending.length === 0) {
+            log.info({ missing: rows.length }, 'media_gap.already_done')
+            return
+        }
+        const byGroup = new Map<string, typeof pending>()
+        for (const row of pending) {
+            const list = byGroup.get(row.groupJid) ?? []
+            list.push(row)
+            byGroup.set(row.groupJid, list)
+        }
+        log.info({ groups: byGroup.size, missing: pending.length }, 'media_gap.start')
+        for (const [groupJid, list] of byGroup) {
+            const oldest = list[0]
+            const newest = list[list.length - 1]
+            if (!oldest || !newest) continue
+            mediaGapTargets.set(groupJid, {
+                oldestTs: oldest.timestamp,
+                newestTs: newest.timestamp,
+                missingCount: list.length,
+                messages: list.map((row) => ({
+                    messageId: row.messageId,
+                    timestamp: row.timestamp,
+                })),
+                newestMessageId: newest.messageId,
+                newestSenderJid: newest.senderJid,
             })
         }
-        for (const span of spans) {
-            const newer = await getGroupMessageAfter(span.groupJid, span.newestTimestamp)
-            const head = chatHeads.get(span.groupJid)
-            const storedAnchor: LatestGroupMessage = newer ?? {
-                messageId: span.newestMessageId,
-                senderJid: span.newestSenderJid,
-                timestamp: span.newestTimestamp,
+        for (const [groupJid, target] of [...mediaGapTargets]) {
+            const newer = await getGroupMessageAfter(groupJid, target.newestTs)
+            const head = chatHeads.get(groupJid)
+            const headIsNewer = Boolean(head?.key.id && head.timestamp > target.newestTs)
+            if (!newer && !headIsNewer) {
+                log.info(
+                    { groupJid, messageId: target.newestMessageId, missing: target.missingCount },
+                    'media_gap.needs_newer_anchor'
+                )
+                finishMediaGap(groupJid, 'no-anchor')
+                continue
             }
-            const headIsNewer = Boolean(head?.key.id && head.timestamp > span.newestTimestamp)
-            const key = headIsNewer && head ? head.key : historyKeyFromStored(span.groupJid, storedAnchor)
+            const storedAnchor: LatestGroupMessage = newer ?? {
+                messageId: target.newestMessageId,
+                senderJid: target.newestSenderJid,
+                timestamp: target.newestTs,
+            }
+            const key = headIsNewer && head ? head.key : historyKeyFromStored(groupJid, storedAnchor)
             const timestamp = headIsNewer && head ? head.timestamp : storedAnchor.timestamp
             if (!key.id) {
-                finishMediaGap(span.groupJid, 'no-anchor')
+                finishMediaGap(groupJid, 'no-anchor')
                 continue
             }
             log.info(
                 {
-                    groupJid: span.groupJid,
+                    groupJid,
                     messageId: key.id,
-                    missing: span.missingCount,
-                    oldestTarget: span.oldestTimestamp,
-                    tip: !newer && !headIsNewer,
-                    anchor: headIsNewer ? 'chat-head' : newer ? 'newer-message' : 'missing-message',
+                    missing: target.missingCount,
+                    oldestTarget: target.oldestTs,
+                    anchor: headIsNewer ? 'chat-head' : 'newer-message',
                 },
                 'media_gap.anchored'
             )
             enqueue({
-                groupJid: span.groupJid,
+                groupJid,
                 key,
                 timestamp,
                 reason: MEDIA_GAP_REASON,

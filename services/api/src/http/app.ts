@@ -3,6 +3,10 @@ import { existsSync } from 'node:fs'
 import { resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { getConnectionStatus } from '../../../../packages/shared/src/connectionStatus.js'
+import {
+    getMediaDownloadStatus,
+    listExhaustedMediaDownloadIds,
+} from '../../../../packages/shared/src/db/index.js'
 import { log } from '../../../../packages/shared/src/log.js'
 import { handleReportProcessedSse, handleWorkflowStatusSse } from '../sse.js'
 import { registerAlbumRoutes } from './album.js'
@@ -30,7 +34,21 @@ export function createApiApp() {
     })
 
     app.get('/api/status', async (_request, response) => {
-        response.json(await getConnectionStatus())
+        const connection = await getConnectionStatus()
+        if (process.env.SKIP_MEDIA_DOWNLOAD === 'true') {
+            response.json({
+                ...connection,
+                media: { enabled: false, missing: 0, givenUp: 0, gaps: [] },
+            })
+            return
+        }
+        try {
+            const status = await getMediaDownloadStatus(await listExhaustedMediaDownloadIds())
+            response.json({ ...connection, media: { enabled: true, ...status } })
+        } catch (error) {
+            log.warn({ err: error }, 'media_status.failed')
+            response.json(connection)
+        }
     })
 
     app.post('/api/admin/verify', requireAdmin, (_request, response) => {
