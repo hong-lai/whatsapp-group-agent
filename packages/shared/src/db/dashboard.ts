@@ -197,7 +197,7 @@ async function loadMentionNames(users: string[]): Promise<Map<string, string>> {
     return names
 }
 
-async function resolveMentionedText(
+export async function resolveMentionedText(
     texts: Array<string | null | undefined>
 ): Promise<(text: string | null) => string | null> {
     const names = await loadMentionNames(mentionUsersIn(...texts))

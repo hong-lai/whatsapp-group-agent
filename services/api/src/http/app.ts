@@ -12,6 +12,7 @@ import { handleReportProcessedSse, handleWorkflowStatusSse } from '../sse.js'
 import { registerAlbumRoutes } from './album.js'
 import { ROBOTS_TAG, ROBOTS_TXT, requireAdmin } from './helpers.js'
 import { registerMessageRoutes } from './messages.js'
+import { registerOverviewRoutes } from './overview.js'
 import { registerReportRoutes } from './reports.js'
 import { registerSettingsRoutes } from './settings.js'
 import { registerWorkflowRoutes } from './workflows.js'
@@ -64,6 +65,7 @@ export function createApiApp() {
     })
 
     registerMessageRoutes(app)
+    registerOverviewRoutes(app)
     registerAlbumRoutes(app)
     registerReportRoutes(app)
     registerWorkflowRoutes(app)

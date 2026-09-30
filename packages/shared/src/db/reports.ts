@@ -240,7 +240,7 @@ function hktDateFromDate(value: Date): string {
     return hktStamp(Math.floor(value.getTime() / 1000)).date
 }
 
-function computeDailySiteReportIssues(input: {
+export function computeDailySiteReportIssues(input: {
     reportDate: string | null
     poNumber: string | null
     refNumbers: string[]

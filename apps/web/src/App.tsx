@@ -25,6 +25,7 @@ import DailySiteReportView, {
 import DateRangePicker from './DateRangePicker'
 import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
+import OverviewView from './OverviewView'
 import FilterSheet from './FilterSheet'
 import InstallApp from './InstallApp'
 import { DownloadButton } from './downloadFile'
@@ -325,12 +326,12 @@ function initialSortOrder(params: URLSearchParams): SortOrder {
     return params.get('order') === 'asc' ? 'asc' : 'desc'
 }
 
-type DashboardView = 'messages' | 'album' | 'reports' | 'queue'
+type DashboardView = 'overview' | 'messages' | 'album' | 'reports' | 'queue'
 
 function initialDashboardView(params: URLSearchParams): DashboardView {
     const view = params.get('view')
-    if (view === 'album' || view === 'reports' || view === 'queue') return view
-    return 'messages'
+    if (view === 'messages' || view === 'album' || view === 'reports' || view === 'queue') return view
+    return 'overview'
 }
 
 const hkDateTime = new Intl.DateTimeFormat('en-HK', {
@@ -392,6 +393,7 @@ function Icon({
         | 'menu'
         | 'filter'
         | 'more'
+        | 'overview'
         | 'report'
         | 'queue'
         | 'lock'
@@ -455,6 +457,14 @@ function Icon({
                 <circle cx="6" cy="12" r="1.3" />
                 <circle cx="12" cy="12" r="1.3" />
                 <circle cx="18" cy="12" r="1.3" />
+            </>
+        ),
+        overview: (
+            <>
+                <rect x="3" y="3" width="8" height="8" rx="1.5" />
+                <rect x="13" y="3" width="8" height="5" rx="1.5" />
+                <rect x="13" y="10" width="8" height="11" rx="1.5" />
+                <rect x="3" y="13" width="8" height="8" rx="1.5" />
             </>
         ),
         report: (
@@ -2278,7 +2288,9 @@ export default function App() {
         view === 'album' && albumScope === 'group',
     ].filter(Boolean).length
     const headerTitle =
-        view === 'album'
+        view === 'overview'
+            ? 'Overview'
+            : view === 'album'
             ? albumScope === 'group' && albumGroupJids.length
                 ? albumGroupJids
                       .map((jid) => groups.find((group) => group.jid === jid)?.name)
@@ -2373,7 +2385,7 @@ export default function App() {
     }, [reportToast])
 
     useEffect(() => {
-        if (groupsLoading || view === 'reports' || view === 'queue') return
+        if (groupsLoading || view === 'overview' || view === 'reports' || view === 'queue') return
         if (selectedJid && rangedGroups.some((group) => group.jid === selectedJid)) return
         setSelectedJid(rangedGroups[0]?.jid ?? null)
     }, [groupsLoading, rangedGroups, selectedJid, view])
@@ -2482,7 +2494,7 @@ export default function App() {
                 if (data.pattern?.source) setPattern(data.pattern)
                 setSelectedJid((current) => {
                     if (current && data.groups.some((group) => group.jid === current)) return current
-                    if (view === 'reports' || view === 'queue') return current
+                    if (view === 'overview' || view === 'reports' || view === 'queue') return current
                     return (
                         data.groups.find((group) => group.messageCount > 0)?.jid ||
                         data.groups[0]?.jid ||
@@ -2567,7 +2579,9 @@ export default function App() {
             setGroups(groupsData.groups)
             if (groupsData.pattern?.source) setPattern(groupsData.pattern)
             setSelectedJid((current) => {
-                if (currentView === 'reports') return current
+                if (currentView === 'overview' || currentView === 'reports' || currentView === 'queue') {
+                    return current
+                }
                 if (!current) {
                     return (
                         groupsData.groups.find((group) => group.messageCount > 0)?.jid ||
@@ -2676,6 +2690,12 @@ export default function App() {
     }
 
     function pickGroup(jid: string) {
+        if (view === 'overview') {
+            setSelectedJid(jid)
+            setView('messages')
+            setDrawerOpen(false)
+            return
+        }
         if (view === 'album') {
             if (albumScope === 'all') {
                 setAlbumScope('group')
@@ -2874,7 +2894,7 @@ export default function App() {
     }
 
     return (
-        <div className={`app-shell${view === 'album' ? ' is-album' : ''}${view === 'reports' ? ' is-reports' : ''}${view === 'queue' ? ' is-queue' : ''}`}>
+        <div className={`app-shell${view === 'overview' ? ' is-overview' : ''}${view === 'album' ? ' is-album' : ''}${view === 'reports' ? ' is-reports' : ''}${view === 'queue' ? ' is-queue' : ''}`}>
             <header className="topbar">
                 <button
                     type="button"
@@ -3189,6 +3209,17 @@ export default function App() {
                 <div className="view-switch" aria-label="Dashboard view">
                     <button
                         type="button"
+                        className={view === 'overview' ? 'active' : ''}
+                        aria-label="Overview"
+                        aria-pressed={view === 'overview'}
+                        title="Overview"
+                        onClick={() => setView('overview')}
+                    >
+                        <Icon name="overview" />
+                        <span className="view-switch-label">Overview</span>
+                    </button>
+                    <button
+                        type="button"
                         className={view === 'messages' ? 'active' : ''}
                         aria-label="Messages"
                         aria-pressed={view === 'messages'}
@@ -3248,9 +3279,32 @@ export default function App() {
             )}
 
             <main
-                className={`dashboard ${view === 'album' ? 'album-dashboard' : ''}${view === 'reports' ? ' reports-dashboard' : ''}${view === 'queue' ? ' queue-dashboard' : ''}`}
+                className={`dashboard ${view === 'overview' ? 'overview-dashboard' : ''}${view === 'album' ? 'album-dashboard' : ''}${view === 'reports' ? ' reports-dashboard' : ''}${view === 'queue' ? ' queue-dashboard' : ''}`}
                 aria-busy={groupsLoading || messagesLoading}
             >
+                <div
+                    className={`view-pane overview-pane ${view === 'overview' ? 'is-active' : ''}`}
+                    aria-hidden={view !== 'overview'}
+                >
+                    <OverviewView
+                        from={from}
+                        to={to}
+                        active={view === 'overview'}
+                        liveTick={reportsLiveTick + queueLiveTick}
+                        showEmptyGroups={showEmptyGroups}
+                        onToggleEmpty={() => setShowEmptyGroups((current) => !current)}
+                        onOpenGroup={(jid) => {
+                            setSelectedJid(jid)
+                            setView('messages')
+                            setDrawerOpen(false)
+                        }}
+                        onOpenReports={(jid) => {
+                            setSelectedJid(jid)
+                            setView('reports')
+                            setDrawerOpen(false)
+                        }}
+                    />
+                </div>
                 <div
                     className={`view-pane messages-pane ${view === 'messages' ? 'is-active' : ''}`}
                     aria-hidden={view !== 'messages'}
@@ -3397,6 +3451,15 @@ export default function App() {
                 </div>
             </main>
             <nav className="bottom-nav mobile-only" aria-label="Views">
+                <button
+                    type="button"
+                    className={view === 'overview' ? 'active' : ''}
+                    aria-pressed={view === 'overview'}
+                    onClick={() => setView('overview')}
+                >
+                    <Icon name="overview" />
+                    Overview
+                </button>
                 <button
                     type="button"
                     className={view === 'messages' ? 'active' : ''}
