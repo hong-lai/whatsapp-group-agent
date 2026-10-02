@@ -88,6 +88,7 @@ export function createApiApp() {
                 next()
                 return
             }
+            response.setHeader('Cache-Control', 'no-store')
             response.sendFile(resolve(webDist, 'index.html'))
         })
     }
