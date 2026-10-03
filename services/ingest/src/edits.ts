@@ -150,6 +150,31 @@ export function isEditEnvelope(message: proto.IMessage | null | undefined): bool
     return Boolean(protocol && (protocol.type === ProtocolEditType || protocol.editedMessage))
 }
 
+/**
+ * History delivers an already-edited message as a protocol edit and does not
+ * include a normal body under the original id. Rewrite that to the original id
+ * so ingest inserts a row. Encrypted edits still need the stored message secret.
+ */
+export function materializeHistoryEdit(message: WAMessage): WAMessage {
+    const content = message.message
+    if (!content || content.secretEncryptedMessage?.secretEncType === MessageEditEncType) {
+        return message
+    }
+    const protocol = content.protocolMessage
+    const targetId = protocol?.key?.id
+    const edited = protocol?.editedMessage
+    if (!protocol || !targetId || !edited || !isEditEnvelope(content)) return message
+    const rewritten: proto.IMessage = {
+        editedMessage: { message: edited },
+    }
+    if (content.messageContextInfo) rewritten.messageContextInfo = content.messageContextInfo
+    return {
+        ...message,
+        key: { ...message.key, id: targetId },
+        message: rewritten,
+    }
+}
+
 function copyBytes(value: Uint8Array | Buffer | number[] | null | undefined): Uint8Array | undefined {
     if (!value) return undefined
     return Uint8Array.from(value)

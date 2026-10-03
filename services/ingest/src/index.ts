@@ -42,6 +42,7 @@ import {
     applyEditUpdate,
     applyIncomingEdit,
     isEditEnvelope,
+    materializeHistoryEdit,
 } from './edits.js'
 import {
     forgetGroup,
@@ -289,6 +290,7 @@ async function connectToWhatsApp() {
             const { messages, contacts, chats, syncType, lidPnMappings } = history
             const started = Date.now()
             const counts = { saved: 0, reaction: 0, ignored: 0, error: 0, edited: 0, tooOld: 0 }
+            const historyMessages = (messages || []).map((message) => materializeHistoryEdit(message))
             const latestBefore = new Map<string, number | undefined>()
             const cutoff = historyCutoffSeconds()
             log.info(
@@ -322,9 +324,9 @@ async function connectToWhatsApp() {
                     }
                 }
                 const last = asCatchupMessage(chat.messages?.[0])
-                if (last) catchup.noteChatHead(last)
+                if (last) catchup.noteChatHead(materializeHistoryEdit(last))
             }
-            for (const m of messages || []) {
+            for (const m of historyMessages) {
                 if (unixSeconds(m.messageTimestamp) < cutoff && !(await isMissingMediaBackfill(m))) {
                     counts.tooOld += 1
                     continue
@@ -338,11 +340,11 @@ async function connectToWhatsApp() {
                     catchup.setTrackedGroups([trackedJid])
                 })] += 1
             }
-            for (const m of messages || []) {
+            for (const m of historyMessages) {
                 const result = await applyIncomingEdit(m, true)
                 if (result === 'applied') counts.edited += 1
             }
-            await catchup.considerHistoryBatch(messages || [], syncType, latestBefore)
+            await catchup.considerHistoryBatch(historyMessages, syncType, latestBefore)
             catchup.noteHistoryChunk(syncType)
             log.info({ syncType, ms: Date.now() - started, ...counts }, 'history.sync.done')
         }
@@ -375,14 +377,17 @@ async function connectToWhatsApp() {
         const upsert = events['messages.upsert']
         if (upsert && (upsert.type === 'notify' || upsert.type === 'append')) {
             const isHistory = upsert.type === 'append' || Boolean(upsert.requestId)
+            const incoming = isHistory
+                ? upsert.messages.map((message) => materializeHistoryEdit(message))
+                : upsert.messages
             const track = (groupJid: string) => catchup.setTrackedGroups([groupJid])
-            for (const m of upsert.messages) {
+            for (const m of incoming) {
                 const groupJid = m.key.remoteJid
                 if (!groupJid || !isJidGroup(groupJid) || isEditEnvelope(m.message)) continue
                 const meta = await resolveGroupMetadata(groupJid, sock, !isHistory)
                 if (meta && matchesGroupPattern(meta.subject)) track(groupJid)
             }
-            for (const m of upsert.messages) {
+            for (const m of incoming) {
                 if (!isEditEnvelope(m.message)) {
                     catchup.noteChatHead(m)
                     await catchup.considerMessage(
@@ -391,10 +396,10 @@ async function connectToWhatsApp() {
                     )
                 }
             }
-            for (const m of upsert.messages) {
+            for (const m of incoming) {
                 await processMessage(m, sock, isHistory, track)
             }
-            for (const m of upsert.messages) {
+            for (const m of incoming) {
                 await applyIncomingEdit(m, isHistory)
             }
         }
