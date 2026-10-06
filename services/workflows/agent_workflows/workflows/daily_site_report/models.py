@@ -270,7 +270,13 @@ class DailySiteReport(BaseModel):
             "Then zero-pad month and day. Discard 星期 and weekday text."
         )
     )
-    po_number: str = Field(description="The Purchase Order (PO) identification number.")
+    po_number: str = Field(
+        default="",
+        description=(
+            "Purchase Order (PO) number, digits only. Optional. "
+            "If the PO line is missing or blank, use an empty string. Do not invent a number."
+        ),
+    )
     ref_number: List[str] = Field(
         description="A list of reference numbers associated with the project."
     )
@@ -317,6 +323,13 @@ class DailySiteReport(BaseModel):
             "null if missing/empty."
         ),
     )
+
+    @field_validator("po_number", mode="before")
+    @classmethod
+    def _blank_po_number(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
     @field_validator("workers", mode="after")
     @classmethod

@@ -156,7 +156,8 @@ class DailySiteReportWorkflow(Workflow):
                 update=parsed_metrics
             )
 
-        if not result.po_number or not result.contractor:
+        result.po_number = (result.po_number or "").strip()
+        if not result.contractor:
             removed = self._hard_delete(message_id)
             record_workflow_run(
                 workflow_name=self.name,
@@ -164,7 +165,7 @@ class DailySiteReportWorkflow(Workflow):
                 event=event,
                 status="rejected",
                 detail=(
-                    "missing po_number or contractor; report hard-deleted; "
+                    "missing contractor; report hard-deleted; "
                     f"model={used_model}; {prompt_note}"
                 ),
             )
