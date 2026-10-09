@@ -37,6 +37,24 @@ export function registerMessageRoutes(app: Express): void {
         }
     )
 
+    app.get('/api/messages', async (request, response) => {
+        const range = getDateRange(request)
+        const cursor = decodeCursor(request.query.cursor)
+        const limit = parseLimit(request.query.limit)
+        const page = await listDashboardMessages(
+            null,
+            range.fromTimestamp,
+            range.toTimestamp,
+            limit,
+            cursor
+        )
+        response.json({
+            range: { from: range.from, to: range.to },
+            messages: page.messages,
+            nextCursor: encodeCursor(page.nextCursor),
+        })
+    })
+
     app.get(
         '/api/groups/:jid/messages',
         async (request, response) => {

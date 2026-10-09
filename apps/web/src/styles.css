@@ -1010,6 +1010,16 @@ h3 {
     font-size: 0.8rem;
 }
 
+.group-avatar.all-groups svg {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 .group-copy,
 .group-copy span {
     min-width: 0;
@@ -1116,6 +1126,11 @@ h3 {
     grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
     overflow: hidden;
     background: var(--paper);
+    transition: grid-template-columns 320ms var(--ease-out);
+}
+
+.messages-pane.groups-collapsed {
+    grid-template-columns: minmax(0, 0fr) minmax(0, 1fr);
 }
 
 .media-pane {
@@ -3941,6 +3956,16 @@ h3 {
     background: rgba(255, 255, 255, 0.94);
 }
 
+.messages-heading > .groups-panel-toggle {
+    align-self: stretch;
+    flex: 0 0 40px;
+    width: 40px;
+    min-width: 40px;
+    height: auto;
+    min-height: 68px;
+    margin: 0;
+}
+
 .messages-heading > div {
     min-width: 0;
     flex: 1;
@@ -4236,6 +4261,20 @@ h3 {
 .message-content header strong {
     color: #175f50;
     font-size: 0.78rem;
+}
+
+.message-group-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
+    border: 1px solid #d5e6df;
+    border-radius: 999px;
+    background: #f3f8f6;
+    color: #3d6b5c;
+    font-size: 0.62rem;
+    font-weight: 700;
+    line-height: 1.45;
+    letter-spacing: 0.01em;
 }
 
 .message-content time {

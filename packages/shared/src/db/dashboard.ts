@@ -104,6 +104,8 @@ export type MessageCursor = {
 
 export type DashboardMessage = {
     messageId: string
+    groupJid: string | null
+    groupName: string | null
     senderJid: string | null
     senderName: string | null
     messageType: string
@@ -135,6 +137,8 @@ export type DashboardMessage = {
 
 type DashboardMessageRow = {
     message_id: string
+    group_jid: string | null
+    group_name: string | null
     sender_jid: string | null
     sender_name: string | null
     message_type: string
@@ -302,6 +306,8 @@ function toDashboardMessage(
 ): DashboardMessage {
     return {
         messageId: row.message_id,
+        groupJid: row.group_jid,
+        groupName: row.group_name,
         senderJid: row.sender_jid,
         senderName: row.sender_name,
         messageType: row.message_type,
@@ -336,19 +342,25 @@ function toDashboardMessage(
 }
 
 export async function listDashboardMessages(
-    groupJid: string,
+    groupJid: string | null,
     fromTimestamp: number,
     toTimestamp: number,
     limit: number,
     cursor?: MessageCursor
 ): Promise<{ messages: DashboardMessage[]; nextCursor: MessageCursor | null }> {
-    if (!(await groupMatchesPattern(groupJid))) {
+    const groupJids = groupJid ? [groupJid] : await matchingGroupJids()
+    if (groupJid && !(await groupMatchesPattern(groupJid))) {
+        return { messages: [], nextCursor: null }
+    }
+    if (groupJids.length === 0) {
         return { messages: [], nextCursor: null }
     }
 
     const result = await pool.query<DashboardMessageRow>(
         `SELECT
             m.message_id,
+            m.group_jid,
+            g.name AS group_name,
             m.sender_jid,
             s.display_name AS sender_name,
             m.message_type,
@@ -390,8 +402,9 @@ export async function listDashboardMessages(
                 LIMIT 1
             ) AS site_report_workflow_detail
          FROM messages m
+         JOIN groups g ON g.jid = m.group_jid
          LEFT JOIN senders s ON s.jid = m.sender_jid
-         WHERE m.group_jid = $1
+         WHERE m.group_jid = ANY($1::text[])
            AND m.timestamp >= to_timestamp($2)
            AND m.timestamp < to_timestamp($3)
            AND ${DASHBOARD_HIDDEN_TYPES_SQL}
@@ -412,7 +425,7 @@ export async function listDashboardMessages(
          ORDER BY m.timestamp DESC, m.message_id DESC
          LIMIT $6`,
         [
-            groupJid,
+            groupJids,
             fromTimestamp,
             toTimestamp,
             cursor?.timestamp ?? null,
@@ -439,6 +452,8 @@ export async function listDashboardMessages(
         const children = await pool.query<DashboardMessageRow & { album_parent_id: string }>(
             `SELECT
                 m.message_id,
+                m.group_jid,
+                g.name AS group_name,
                 m.sender_jid,
                 s.display_name AS sender_name,
                 m.message_type,
@@ -481,6 +496,7 @@ export async function listDashboardMessages(
                     LIMIT 1
                 ) AS site_report_workflow_detail
              FROM messages m
+             JOIN groups g ON g.jid = m.group_jid
              LEFT JOIN senders s ON s.jid = m.sender_jid
              WHERE m.album_parent_id = ANY($1::text[])
                 OR (m.album_parent_id = ANY($2::text[]) AND m.is_deleted)

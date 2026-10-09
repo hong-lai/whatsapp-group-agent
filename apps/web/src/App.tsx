@@ -57,6 +57,8 @@ type Reaction = {
 
 type Message = {
     messageId: string
+    groupJid: string | null
+    groupName: string | null
     senderJid: string | null
     senderName: string | null
     messageType: string
@@ -2000,14 +2002,61 @@ function RunWorkflowDialog({
     )
 }
 
+function AllGroupsIcon() {
+    return (
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3 3 8v8l9 5 9-5V8l-9-5Z" />
+            <path d="M12 12 3 7" />
+            <path d="m12 12 9-5" />
+            <path d="M12 12v9" />
+        </svg>
+    )
+}
+
+function AllGroupsCard({
+    selected,
+    detail,
+    onSelect,
+}: {
+    selected: boolean
+    detail: string
+    onSelect: () => void
+}) {
+    return (
+        <button
+            type="button"
+            className={`all-groups-card ${selected ? 'selected' : ''}`}
+            onClick={onSelect}
+        >
+            <span className="all-groups-card-icon" aria-hidden="true">
+                <AllGroupsIcon />
+            </span>
+            <span className="all-groups-card-copy">
+                <strong>All groups</strong>
+                <span>{detail}</span>
+            </span>
+        </button>
+    )
+}
+
+function messagesUrl(groupJid: string | null, from: string, to: string, cursor?: string | null): string {
+    const params = new URLSearchParams({ from, to })
+    if (cursor) params.set('cursor', cursor)
+    const query = params.toString()
+    if (!groupJid) return `/api/messages?${query}`
+    return `/api/groups/${encodeURIComponent(groupJid)}/messages?${query}`
+}
+
 function MessageCard({
     message,
     isAdmin = false,
+    showGroup = false,
     onOpenReports,
     onWorkflowQueued,
 }: {
     message: Message
     isAdmin?: boolean
+    showGroup?: boolean
     onOpenReports?: () => void
     onWorkflowQueued?: () => void
 }) {
@@ -2056,6 +2105,11 @@ function MessageCard({
                 <header>
                     <span className="message-byline">
                         <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
+                        {showGroup && message.groupName && (
+                            <span className="message-group-chip" title={message.groupName}>
+                                {message.groupName}
+                            </span>
+                        )}
                         {message.isForwarded && (!message.isDeleted || revealed) && (
                             <span className="forwarded-label">
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -2215,6 +2269,11 @@ export default function App() {
             typeof localStorage !== 'undefined' &&
             localStorage.getItem('reportsGroupsCollapsed') === '1'
     )
+    const [chatGroupsCollapsed, setChatGroupsCollapsed] = useState(
+        () =>
+            typeof localStorage !== 'undefined' &&
+            localStorage.getItem('chatGroupsCollapsed') === '1'
+    )
     const [sortOrder, setSortOrder] = useState<SortOrder>(initialSortOrder(initialParams))
     const [search, setSearch] = useState('')
     const [showEmptyGroups, setShowEmptyGroups] = useState(initialParams.get('empty') === '1')
@@ -2301,7 +2360,15 @@ export default function App() {
               ? selectedGroup?.name || 'Site reports'
               : view === 'queue'
                 ? 'Queue'
-                : selectedGroup?.name || 'Groups'
+                : selectedGroup?.name || (selectedJid ? 'Group' : 'All groups')
+    const allGroupsSummary = useMemo(() => {
+        const withMessages = groups.filter((group) => group.messageCount > 0)
+        return {
+            groups: withMessages.length,
+            messages: withMessages.reduce((total, group) => total + group.messageCount, 0),
+        }
+    }, [groups])
+    const viewingAllGroups = !selectedJid
     const messageScrollKey = `${selectedJid ?? ''}|${from}|${to}|${reloadKey}`
     const { onScroll: onMessageListScroll } = usePinnedScroll(
         messageListRef,
@@ -2338,6 +2405,11 @@ export default function App() {
         if (typeof localStorage === 'undefined') return
         localStorage.setItem('reportsGroupsCollapsed', reportsGroupsCollapsed ? '1' : '0')
     }, [reportsGroupsCollapsed])
+
+    useEffect(() => {
+        if (typeof localStorage === 'undefined') return
+        localStorage.setItem('chatGroupsCollapsed', chatGroupsCollapsed ? '1' : '0')
+    }, [chatGroupsCollapsed])
 
     useEffect(() => {
         const reportSource = new EventSource('/api/events/report-processed')
@@ -2383,12 +2455,6 @@ export default function App() {
         const timer = window.setTimeout(() => setReportToast(null), 5500)
         return () => window.clearTimeout(timer)
     }, [reportToast])
-
-    useEffect(() => {
-        if (groupsLoading || view === 'overview' || view === 'reports' || view === 'queue') return
-        if (selectedJid && rangedGroups.some((group) => group.jid === selectedJid)) return
-        setSelectedJid(rangedGroups[0]?.jid ?? null)
-    }, [groupsLoading, rangedGroups, selectedJid, view])
 
     function pulseLive() {
         const now = Date.now()
@@ -2492,15 +2558,6 @@ export default function App() {
                 if (requestId !== groupsRequestId.current) return
                 setGroups(data.groups)
                 if (data.pattern?.source) setPattern(data.pattern)
-                setSelectedJid((current) => {
-                    if (current && data.groups.some((group) => group.jid === current)) return current
-                    if (view === 'overview' || view === 'reports' || view === 'queue') return current
-                    return (
-                        data.groups.find((group) => group.messageCount > 0)?.jid ||
-                        data.groups[0]?.jid ||
-                        null
-                    )
-                })
             })
             .catch((reason: unknown) => {
                 if (
@@ -2514,17 +2571,22 @@ export default function App() {
                 if (requestId === groupsRequestId.current) setGroupsLoading(false)
             })
         return () => controller.abort()
-    }, [from, to, invalidRange, reloadKey, view])
+    }, [from, to, invalidRange, reloadKey])
 
     useEffect(() => {
         silentGen.current += 1
-        if (!selectedJid || invalidRange) {
+        if (invalidRange) {
             messagesRequestId.current += 1
             setMessagesLoading(false)
-            if (!selectedJid) {
-                setMessages([])
-                setNextCursor(null)
-            }
+            setMessages([])
+            setNextCursor(null)
+            return
+        }
+        // All-groups chat is heavier than one group. Load it when Chat is open,
+        // and keep a selected group's thread warm so page switches stay instant.
+        if (!selectedJid && view !== 'messages') {
+            messagesRequestId.current += 1
+            setMessagesLoading(false)
             return
         }
         const controller = new AbortController()
@@ -2532,10 +2594,7 @@ export default function App() {
         scrollRestore.current = null
         setMessagesLoading(true)
         setError(null)
-        getJson<MessagesResponse>(
-            `/api/groups/${encodeURIComponent(selectedJid)}/messages?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`,
-            controller.signal
-        )
+        getJson<MessagesResponse>(messagesUrl(selectedJid, from, to), controller.signal)
             .then((data) => {
                 if (requestId !== messagesRequestId.current) return
                 setMessages(data.messages)
@@ -2553,7 +2612,7 @@ export default function App() {
                 if (requestId === messagesRequestId.current) setMessagesLoading(false)
             })
         return () => controller.abort()
-    }, [selectedJid, from, to, invalidRange, reloadKey])
+    }, [selectedJid, from, to, invalidRange, reloadKey, view])
 
     async function silentRefresh() {
         if (
@@ -2578,29 +2637,11 @@ export default function App() {
             if (gen !== silentGen.current) return
             setGroups(groupsData.groups)
             if (groupsData.pattern?.source) setPattern(groupsData.pattern)
-            setSelectedJid((current) => {
-                if (currentView === 'overview' || currentView === 'reports' || currentView === 'queue') {
-                    return current
-                }
-                if (!current) {
-                    return (
-                        groupsData.groups.find((group) => group.messageCount > 0)?.jid ||
-                        groupsData.groups[0]?.jid ||
-                        null
-                    )
-                }
-                if (groupsData.groups.some((group) => group.jid === current)) return current
-                return (
-                    groupsData.groups.find((group) => group.messageCount > 0)?.jid ||
-                    groupsData.groups[0]?.jid ||
-                    null
-                )
-            })
             setError(null)
 
-            if (currentView === 'messages' && jid) {
+            if (currentView === 'messages') {
                 const messagesData = await getJson<MessagesResponse>(
-                    `/api/groups/${encodeURIComponent(jid)}/messages?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}`
+                    messagesUrl(jid, rangeFrom, rangeTo)
                 )
                 if (gen !== silentGen.current) return
                 const list = messageListRef.current
@@ -2646,16 +2687,12 @@ export default function App() {
         () => {
             void loadMore()
         },
-        view === 'messages' &&
-            Boolean(selectedJid) &&
-            Boolean(nextCursor) &&
-            !loadingMore &&
-            !messagesLoading,
+        view === 'messages' && Boolean(nextCursor) && !loadingMore && !messagesLoading,
         sortOrder
     )
 
     async function loadMore() {
-        if (!selectedJid || !nextCursor || loadingMore) return
+        if (!nextCursor || loadingMore) return
         silentGen.current += 1
         setLoadingMore(true)
         const list = messageListRef.current
@@ -2664,7 +2701,7 @@ export default function App() {
         }
         try {
             const data = await getJson<MessagesResponse>(
-                `/api/groups/${encodeURIComponent(selectedJid)}/messages?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&cursor=${encodeURIComponent(nextCursor)}`
+                messagesUrl(selectedJid, from, to, nextCursor)
             )
             setMessages((current) => [...current, ...data.messages])
             setNextCursor(data.nextCursor)
@@ -2716,68 +2753,51 @@ export default function App() {
         const multi = view === 'album' && albumScope === 'group'
         return (
             <>
-                {view === 'reports' && (
-                    <>
-                        {!inDrawer ? (
-                            <div className="groups-panel-top desktop-only">
-                                <button
-                                    type="button"
-                                    className={`all-groups-card ${!selectedJid ? 'selected' : ''}`}
-                                    onClick={() => {
-                                        setSelectedJid(null)
-                                        setDrawerOpen(false)
-                                    }}
-                                >
-                                    <span className="all-groups-card-icon" aria-hidden="true">
-                                        <svg viewBox="0 0 24 24">
-                                            <path d="M12 3 3 8v8l9 5 9-5V8l-9-5Z" />
-                                            <path d="M12 12 3 7" />
-                                            <path d="m12 12 9-5" />
-                                            <path d="M12 12v9" />
-                                        </svg>
-                                    </span>
-                                    <span className="all-groups-card-copy">
-                                        <strong>All groups</strong>
-                                        <span>Every extracted report in range</span>
-                                    </span>
-                                </button>
-                                <button
-                                    type="button"
-                                    className="groups-panel-toggle groups-panel-toggle--collapse"
-                                    onClick={() => setReportsGroupsCollapsed(true)}
-                                    title="Hide groups"
-                                    aria-label="Hide groups"
-                                >
-                                    <svg viewBox="0 0 24 24" aria-hidden="true">
-                                        <path d="m15 6-6 6 6 6" />
-                                    </svg>
-                                </button>
-                            </div>
-                        ) : (
-                            <button
-                                type="button"
-                                className={`all-groups-card ${!selectedJid ? 'selected' : ''}`}
-                                onClick={() => {
+                {(view === 'reports' || view === 'messages') &&
+                    (!inDrawer ? (
+                        <div className="groups-panel-top desktop-only">
+                            <AllGroupsCard
+                                selected={!selectedJid}
+                                detail={
+                                    view === 'reports'
+                                        ? 'Every extracted report in range'
+                                        : 'Every message in range'
+                                }
+                                onSelect={() => {
                                     setSelectedJid(null)
                                     setDrawerOpen(false)
                                 }}
+                            />
+                            <button
+                                type="button"
+                                className="groups-panel-toggle groups-panel-toggle--collapse"
+                                onClick={() =>
+                                    view === 'reports'
+                                        ? setReportsGroupsCollapsed(true)
+                                        : setChatGroupsCollapsed(true)
+                                }
+                                title="Hide groups"
+                                aria-label="Hide groups"
                             >
-                                <span className="all-groups-card-icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24">
-                                        <path d="M12 3 3 8v8l9 5 9-5V8l-9-5Z" />
-                                        <path d="M12 12 3 7" />
-                                        <path d="m12 12 9-5" />
-                                        <path d="M12 12v9" />
-                                    </svg>
-                                </span>
-                                <span className="all-groups-card-copy">
-                                    <strong>All groups</strong>
-                                    <span>Every extracted report in range</span>
-                                </span>
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="m15 6-6 6 6 6" />
+                                </svg>
                             </button>
-                        )}
-                    </>
-                )}
+                        </div>
+                    ) : (
+                        <AllGroupsCard
+                            selected={!selectedJid}
+                            detail={
+                                view === 'reports'
+                                    ? 'Every extracted report in range'
+                                    : 'Every message in range'
+                            }
+                            onSelect={() => {
+                                setSelectedJid(null)
+                                setDrawerOpen(false)
+                            }}
+                        />
+                    ))}
                 {view === 'album' && (
                     <div className="scope-switch" role="group" aria-label="Album scope">
                         <button
@@ -2933,9 +2953,11 @@ export default function App() {
                     >
                         {headerTitle}
                     </strong>
-                    {view === 'messages' && selectedGroup && (
+                    {view === 'messages' && (selectedGroup || viewingAllGroups) && (
                         <small>
-                            {selectedGroup.messageCount} messages · {selectedGroup.senderCount} senders
+                            {selectedGroup
+                                ? `${selectedGroup.messageCount} messages · ${selectedGroup.senderCount} senders`
+                                : `${allGroupsSummary.messages} messages · ${allGroupsSummary.groups} groups`}
                         </small>
                     )}
                 </button>
@@ -3306,15 +3328,32 @@ export default function App() {
                     />
                 </div>
                 <div
-                    className={`view-pane messages-pane ${view === 'messages' ? 'is-active' : ''}`}
+                    className={`view-pane messages-pane ${view === 'messages' ? 'is-active' : ''}${chatGroupsCollapsed ? ' groups-collapsed' : ''}`}
                     aria-hidden={view !== 'messages'}
                 >
-                    <aside className="groups-panel desktop-only">{renderGroupsPanel()}</aside>
+                    <aside
+                        className={`groups-panel desktop-only${chatGroupsCollapsed ? ' is-collapsed' : ''}`}
+                    >
+                        {renderGroupsPanel()}
+                    </aside>
 
                 <section className="messages-panel">
-                    {selectedGroup ? (
-                        <>
-                            <header className="messages-heading desktop-only">
+                    <header className="messages-heading desktop-only">
+                        {chatGroupsCollapsed && (
+                            <button
+                                type="button"
+                                className="groups-panel-toggle groups-panel-toggle--open"
+                                onClick={() => setChatGroupsCollapsed(false)}
+                                title="Show groups"
+                                aria-label="Show groups"
+                            >
+                                <svg viewBox="0 0 24 24" aria-hidden="true">
+                                    <path d="m9 6 6 6-6 6" />
+                                </svg>
+                            </button>
+                        )}
+                        {selectedGroup ? (
+                            <>
                                 <span className="group-avatar large">{initials(selectedGroup.name)}</span>
                                 <div>
                                     <div className="title-with-status">
@@ -3327,56 +3366,78 @@ export default function App() {
                                         {selectedGroup.messageCount} messages · {selectedGroup.senderCount} senders
                                     </p>
                                 </div>
-                            </header>
-
-                            {messagesLoading && messages.length === 0 ? (
-                                <SkeletonMessages />
-                            ) : messages.length ? (
-                                <div
-                                    className={`message-list ${messagesLoading ? 'is-loading' : ''}`}
-                                    ref={messageListRef}
-                                    onScroll={onMessageListScroll}
-                                >
-                                    {messagesLoading && (
-                                        <div className="content-overlay" role="status">
-                                            <span className="overlay-spinner" />
-                                            Loading
-                                        </div>
-                                    )}
-                                    {sortOrder === 'asc' && nextCursor && (
-                                        <div className="load-sentinel is-start" ref={olderSentinelRef}>
-                                            {loadingMore ? 'Loading…' : ''}
-                                        </div>
-                                    )}
-                                    {displayMessages.map((message) => (
-                                        <MessageCard
-                                            message={message}
-                                            key={message.messageId}
-                                            isAdmin={isAdmin}
-                                            onOpenReports={() => setView('reports')}
-                                            onWorkflowQueued={refreshMessagesAfterWorkflowQueue}
-                                        />
-                                    ))}
-                                    {sortOrder === 'desc' && nextCursor && (
-                                        <div className="load-sentinel" ref={olderSentinelRef}>
-                                            {loadingMore ? 'Loading…' : ''}
-                                        </div>
-                                    )}
+                            </>
+                        ) : viewingAllGroups ? (
+                            <>
+                                <span className="group-avatar large all-groups">
+                                    <AllGroupsIcon />
+                                </span>
+                                <div>
+                                    <div className="title-with-status">
+                                        <h2>All groups</h2>
+                                    </div>
+                                    <p>
+                                        {allGroupsSummary.messages} messages · {allGroupsSummary.groups} groups
+                                    </p>
                                 </div>
-                            ) : (
-                                <div className="empty-state">
-                                    <span className="empty-icon"><Icon name="message" /></span>
-                                    <h3>No messages in this range</h3>
-                                    <p>Try a wider date range or choose another group.</p>
-                                    <button onClick={() => applyPreset(30)}>Show the last 30 days</button>
+                            </>
+                        ) : (
+                            <>
+                                <span className="group-avatar large" />
+                                <div>
+                                    <div className="title-with-status">
+                                        <h2>Group</h2>
+                                    </div>
+                                </div>
+                            </>
+                        )}
+                    </header>
+
+                    {messagesLoading && messages.length === 0 ? (
+                        <SkeletonMessages />
+                    ) : messages.length ? (
+                        <div
+                            className={`message-list ${messagesLoading ? 'is-loading' : ''}`}
+                            ref={messageListRef}
+                            onScroll={onMessageListScroll}
+                        >
+                            {messagesLoading && (
+                                <div className="content-overlay" role="status">
+                                    <span className="overlay-spinner" />
+                                    Loading
                                 </div>
                             )}
-                        </>
+                            {sortOrder === 'asc' && nextCursor && (
+                                <div className="load-sentinel is-start" ref={olderSentinelRef}>
+                                    {loadingMore ? 'Loading…' : ''}
+                                </div>
+                            )}
+                            {displayMessages.map((message) => (
+                                <MessageCard
+                                    message={message}
+                                    key={message.messageId}
+                                    isAdmin={isAdmin}
+                                    showGroup={viewingAllGroups}
+                                    onOpenReports={() => setView('reports')}
+                                    onWorkflowQueued={refreshMessagesAfterWorkflowQueue}
+                                />
+                            ))}
+                            {sortOrder === 'desc' && nextCursor && (
+                                <div className="load-sentinel" ref={olderSentinelRef}>
+                                    {loadingMore ? 'Loading…' : ''}
+                                </div>
+                            )}
+                        </div>
                     ) : (
                         <div className="empty-state">
-                            <span className="empty-icon"><Icon name="users" /></span>
-                            <h3>Select a group</h3>
-                            <p>Choose a group to explore its archived messages and media.</p>
+                            <span className="empty-icon"><Icon name="message" /></span>
+                            <h3>No messages in this range</h3>
+                            <p>
+                                {viewingAllGroups
+                                    ? 'Try a wider date range.'
+                                    : 'Try a wider date range or choose another group.'}
+                            </p>
+                            <button onClick={() => applyPreset(30)}>Show the last 30 days</button>
                         </div>
                     )}
                     </section>
