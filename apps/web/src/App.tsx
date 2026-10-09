@@ -2050,13 +2050,31 @@ function messagesUrl(groupJid: string | null, from: string, to: string, cursor?:
     return `/api/groups/${encodeURIComponent(groupJid)}/messages?${query}`
 }
 
-function visibleMessageTime(list: HTMLElement): number | null {
-    const edge = list.getBoundingClientRect().top + 8
+function visibleMessageTime(list: HTMLElement, sortOrder: 'asc' | 'desc'): number | null {
     const cards = list.querySelectorAll<HTMLElement>('[data-ts]')
-    for (const card of cards) {
-        if (card.getBoundingClientRect().bottom <= edge) continue
+    const box = list.getBoundingClientRect()
+    const timeOf = (card: HTMLElement) => {
         const seconds = Number(card.dataset.ts)
         return Number.isFinite(seconds) ? seconds * 1000 : null
+    }
+    const pinnedToBottom =
+        sortOrder === 'asc' && list.scrollHeight - list.scrollTop - list.clientHeight <= 80
+    if (pinnedToBottom) {
+        const limit = box.bottom - 8
+        let chosen: number | null = null
+        for (const card of cards) {
+            const rect = card.getBoundingClientRect()
+            if (rect.top >= limit) break
+            if (rect.bottom <= box.top + 8) continue
+            const ms = timeOf(card)
+            if (ms != null) chosen = ms
+        }
+        return chosen
+    }
+    const top = box.top + 8
+    for (const card of cards) {
+        if (card.getBoundingClientRect().bottom <= top) continue
+        return timeOf(card)
     }
     return null
 }
@@ -2404,7 +2422,7 @@ export default function App() {
     const syncFlowFocus = (follow: boolean) => {
         const list = messageListRef.current
         if (!list) return
-        const ms = visibleMessageTime(list)
+        const ms = visibleMessageTime(list, sortOrder)
         if (ms == null) return
         setFlowFocus((current) => {
             if (current?.ms === ms && (!follow || current.follow)) return current
