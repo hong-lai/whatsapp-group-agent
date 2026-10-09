@@ -8,6 +8,8 @@ import {
     groupMatchesPattern,
     listDashboardGroups,
     listDashboardMessages,
+    listMessageFlow,
+    type MessageFlowIntervalMinutes,
 } from '../../../../packages/shared/src/db/index.js'
 import { contentDisposition } from '../../../../packages/shared/src/filenames.js'
 import {
@@ -19,6 +21,12 @@ import {
     resolveMediaPath,
 } from './helpers.js'
 
+function parseFlowInterval(value: unknown): MessageFlowIntervalMinutes | null {
+    if (value === '1' || value === '5' || value === '10' || value === '30' || value === '60') {
+        return Number(value) as MessageFlowIntervalMinutes
+    }
+    return null
+}
 
 export function registerMessageRoutes(app: Express): void {
     app.get(
@@ -36,6 +44,28 @@ export function registerMessageRoutes(app: Express): void {
             })
         }
     )
+
+    app.get('/api/message-flow', async (request, response) => {
+        const interval = parseFlowInterval(request.query.interval)
+        if (interval == null) {
+            response.status(400).json({ error: 'Invalid interval. Use 1, 5, 10, 30, or 60.' })
+            return
+        }
+        const range = getDateRange(request)
+        const groupValue = request.query.group
+        const groupJid = typeof groupValue === 'string' && groupValue ? groupValue : null
+        if (groupJid && !(await groupMatchesPattern(groupJid))) {
+            response.status(404).json({ error: 'Group is outside the configured name pattern' })
+            return
+        }
+        const flow = await listMessageFlow(
+            range.fromTimestamp,
+            range.toTimestamp,
+            interval,
+            groupJid
+        )
+        response.json(flow)
+    })
 
     app.get('/api/messages', async (request, response) => {
         const range = getDateRange(request)
