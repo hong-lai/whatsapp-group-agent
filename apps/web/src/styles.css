@@ -880,6 +880,7 @@ h3 {
 }
 
 .panel-heading.is-drawer {
+    flex-shrink: 0;
     justify-content: flex-end;
     padding: 8px 16px 4px;
 }
@@ -5998,8 +5999,10 @@ button.document-link {
 .drawer-panel {
     width: min(86vw, 360px);
     height: 100%;
+    max-height: 100%;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
     padding-top: env(safe-area-inset-top, 0px);
     background: #fbfcfb;
     box-shadow: 18px 0 40px rgba(16, 36, 31, 0.16);
@@ -6072,8 +6075,14 @@ button.document-link {
     line-height: 1;
 }
 
+.drawer-body .all-groups-card,
+.drawer-body .scope-switch,
+.drawer-body .search-box {
+    flex-shrink: 0;
+}
+
 .drawer-body .group-list {
-    flex: 1 1 auto;
+    flex: 1 1 0%;
     min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
@@ -6083,10 +6092,15 @@ button.document-link {
 
 .drawer-body .search-box {
     height: 44px;
+    min-height: 44px;
 }
 
 .drawer-body .search-box input {
+    height: auto;
+    padding: 0;
     font-size: 16px;
+    line-height: 1.2;
+    appearance: none;
 }
 
 .drawer-body .empty-groups-toggle {
