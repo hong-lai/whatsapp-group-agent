@@ -60,10 +60,23 @@ class CumulativeMetrics(BaseModel):
 # ]
 
 # Punctuation between people. CJK runs have no internal space; Latin names may.
+# Supplementary-plane ideographs (Ext. B+, e.g. U+242EE 𤋮) are real name
+# characters. A BMP-only range drops them and stores a shortened name.
 _WORKER_SEP = re.compile(r"[,，、;/；]+")
 _WORKER_TOKEN = re.compile(
     r"[A-Za-z][A-Za-z'.\-]*(?:\s+[A-Za-z][A-Za-z'.\-]*)*"
-    r"|[\u3400-\u9FFF\uF900-\uFAFF]+"
+    r"|["
+    r"\u3400-\u9FFF"  # Ext. A + Unified Ideographs
+    r"\uF900-\uFAFF"  # Compatibility ideographs
+    r"\U00020000-\U0002A6DF"  # Ext. B
+    r"\U0002A700-\U0002B73F"  # Ext. C
+    r"\U0002B740-\U0002B81F"  # Ext. D
+    r"\U0002B820-\U0002CEAF"  # Ext. E
+    r"\U0002CEB0-\U0002EBEF"  # Ext. F
+    r"\U0002EBF0-\U0002EE5F"  # Ext. I
+    r"\U0002F800-\U0002FA1F"  # Compatibility supplement
+    r"\U00030000-\U000323AF"  # Ext. G–H
+    r"]+"
 )
 
 
