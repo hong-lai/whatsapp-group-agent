@@ -373,6 +373,8 @@ function initials(name: string): string {
     return letters.join('') || '?'
 }
 
+const OUTSIDE_GROUP_PATTERN_ERROR = 'Group is outside the configured name pattern'
+
 async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
     const response = await fetch(url, { signal })
     const body = (await response.json()) as T & { error?: string }
@@ -2306,6 +2308,7 @@ export default function App() {
     const [albumCounts, setAlbumCounts] = useState(emptyCounts)
     const overflowRef = useRef<HTMLDivElement>(null)
     const groupsRequestId = useRef(0)
+    const groupsFetchOk = useRef(false)
     const messagesRequestId = useRef(0)
     const silentGen = useRef(0)
     const silentBusy = useRef(false)
@@ -2543,11 +2546,13 @@ export default function App() {
         silentGen.current += 1
         if (invalidRange) {
             groupsRequestId.current += 1
+            groupsFetchOk.current = false
             setGroupsLoading(false)
             return
         }
         const controller = new AbortController()
         const requestId = ++groupsRequestId.current
+        groupsFetchOk.current = false
         setGroupsLoading(true)
         setError(null)
         getJson<GroupsResponse>(
@@ -2556,6 +2561,7 @@ export default function App() {
         )
             .then((data) => {
                 if (requestId !== groupsRequestId.current) return
+                groupsFetchOk.current = true
                 setGroups(data.groups)
                 if (data.pattern?.source) setPattern(data.pattern)
             })
@@ -2572,6 +2578,14 @@ export default function App() {
             })
         return () => controller.abort()
     }, [from, to, invalidRange, reloadKey])
+
+    useEffect(() => {
+        if (!groupsFetchOk.current || groupsLoading || !selectedJid) return
+        if (groups.some((group) => group.jid === selectedJid)) return
+        setSelectedJid(null)
+        setView('overview')
+        setError((current) => (current === OUTSIDE_GROUP_PATTERN_ERROR ? null : current))
+    }, [groups, groupsLoading, selectedJid])
 
     useEffect(() => {
         silentGen.current += 1
@@ -2602,11 +2616,17 @@ export default function App() {
             })
             .catch((reason: unknown) => {
                 if (
-                    requestId === messagesRequestId.current &&
-                    (reason as Error).name !== 'AbortError'
+                    requestId !== messagesRequestId.current ||
+                    (reason as Error).name === 'AbortError'
                 ) {
-                    setError(reason instanceof Error ? reason.message : 'Could not load messages')
+                    return
                 }
+                if (reason instanceof Error && reason.message === OUTSIDE_GROUP_PATTERN_ERROR) {
+                    setSelectedJid(null)
+                    setView('overview')
+                    return
+                }
+                setError(reason instanceof Error ? reason.message : 'Could not load messages')
             })
             .finally(() => {
                 if (requestId === messagesRequestId.current) setMessagesLoading(false)
