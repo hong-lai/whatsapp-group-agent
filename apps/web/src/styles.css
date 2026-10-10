@@ -7682,6 +7682,249 @@ button.queue-row:hover {
     }
 }
 
+.flow-timeline {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    border-bottom: 1px solid var(--line);
+    background:
+        radial-gradient(circle at 8% 0%, rgba(66, 184, 150, 0.2), transparent 14rem),
+        linear-gradient(180deg, #f6fbf8 0%, #ffffff 100%);
+}
+
+.flow-timeline-error {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 14px;
+    color: #8a4e12;
+    font-size: 0.75rem;
+}
+
+.flow-timeline-error p {
+    margin: 0;
+}
+
+.flow-timeline-error button {
+    border: 0;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: var(--green-dark);
+    background: var(--mint);
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.flow-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 8px 14px 0;
+}
+
+.flow-readout {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    color: var(--ink);
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.flow-toolbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    flex-shrink: 0;
+}
+
+.flow-timeline .flow-interval button {
+    width: auto;
+    min-width: 36px;
+    padding: 0 8px;
+    font-size: 0.68rem;
+}
+
+.flow-now-btn {
+    height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--green-dark);
+    background: #edf3f0;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+.flow-now-btn[aria-pressed='true'] {
+    color: #fff;
+    background: var(--green);
+}
+
+.flow-peak-btn {
+    height: 32px;
+    max-width: 11rem;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    color: #8a4e12;
+    background: #f8ead3;
+    font-size: 0.72rem;
+    font-weight: 700;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.flow-peak-short {
+    display: none;
+}
+
+.flow-timeline.is-collapsed {
+    position: relative;
+    flex-direction: column;
+    gap: 0;
+    padding: 4px 0;
+}
+
+.flow-visibility-btn {
+    width: 32px;
+    height: 32px;
+    display: grid;
+    flex: 0 0 auto;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 8px;
+    color: var(--green-dark);
+    background: #edf3f0;
+}
+
+.flow-visibility-btn svg {
+    width: 1rem;
+    height: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.flow-timeline.is-collapsed .flow-stage {
+    height: 44px;
+    width: 100%;
+}
+
+.flow-timeline.is-collapsed .flow-stage canvas {
+    cursor: pointer;
+}
+
+.flow-timeline.is-collapsed .flow-visibility-btn {
+    position: absolute;
+    top: 8px;
+    right: 6px;
+    z-index: 3;
+    width: 28px;
+    height: 28px;
+    color: #5d746c;
+    background: rgba(255, 255, 255, 0.88);
+}
+
+.flow-stage {
+    position: relative;
+    height: 148px;
+}
+
+.flow-tip {
+    position: absolute;
+    z-index: 2;
+    top: 4px;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(13, 39, 33, 0.92);
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.35;
+    pointer-events: none;
+    white-space: nowrap;
+    transform: translateX(-50%);
+}
+
+.flow-timeline:not(.is-collapsed) .flow-tip {
+    top: 28px;
+}
+
+.flow-stage canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: grab;
+}
+
+.flow-stage canvas:active {
+    cursor: grabbing;
+}
+
+@media (max-width: 959px) {
+    .flow-toolbar {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        column-gap: 8px;
+        row-gap: 6px;
+        padding: 8px 10px 0;
+    }
+
+    .flow-readout {
+        grid-column: 1;
+        grid-row: 1;
+    }
+
+    .flow-visibility-btn {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .flow-toolbar-actions {
+        grid-column: 1 / -1;
+        grid-row: 2;
+        width: auto;
+        margin-left: 0;
+        justify-content: flex-start;
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .flow-timeline .flow-interval button {
+        min-width: 32px;
+        padding: 0 6px;
+    }
+
+    .flow-stage {
+        height: 112px;
+    }
+
+    .flow-timeline.is-collapsed .flow-stage {
+        height: 44px;
+    }
+
+    .flow-peak-long {
+        display: none;
+    }
+
+    .flow-peak-short {
+        display: inline;
+    }
+}
+
 @media (prefers-reduced-motion: reduce) {
     *,
     *::before,

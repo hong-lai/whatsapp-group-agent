@@ -819,3 +819,125 @@ export async function getAlbumMediaForDownload(
         mediaPath: row.media_path,
     }))
 }
+
+const HONG_KONG_OFFSET_MS = 8 * 60 * 60 * 1000
+
+const FLOW_INTERVAL_SQL = {
+    1: '1 minute',
+    5: '5 minutes',
+    10: '10 minutes',
+    30: '30 minutes',
+    60: '1 hour',
+} as const
+
+export type MessageFlowIntervalMinutes = keyof typeof FLOW_INTERVAL_SQL
+
+export type MessageFlowPoint = {
+    start: string
+    count: number
+    reportCount: number
+}
+
+export type MessageFlow = {
+    intervalMinutes: MessageFlowIntervalMinutes
+    points: MessageFlowPoint[]
+    peakStart: string | null
+    peakCount: number
+    total: number
+    reportTotal: number
+}
+
+type MessageFlowRow = {
+    start: string
+    count: number
+    report_count: number
+}
+
+function formatHktSlot(unixSeconds: number): string {
+    const date = new Date(unixSeconds * 1000 + HONG_KONG_OFFSET_MS)
+    const pad = (value: number) => String(value).padStart(2, '0')
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`
+}
+
+export async function listMessageFlow(
+    fromTimestamp: number,
+    toTimestamp: number,
+    intervalMinutes: MessageFlowIntervalMinutes,
+    groupJid: string | null
+): Promise<MessageFlow> {
+    const empty: MessageFlow = {
+        intervalMinutes,
+        points: [],
+        peakStart: null,
+        peakCount: 0,
+        total: 0,
+        reportTotal: 0,
+    }
+    const groupJids = groupJid ? [groupJid] : await matchingGroupJids()
+    if (groupJid && !(await groupMatchesPattern(groupJid))) return empty
+    if (groupJids.length === 0) return empty
+
+    const result = await pool.query<MessageFlowRow>(
+        `SELECT
+            to_char(
+                date_bin(
+                    $1::interval,
+                    m.timestamp AT TIME ZONE 'Asia/Hong_Kong',
+                    TIMESTAMP '2000-01-01'
+                ),
+                'YYYY-MM-DD"T"HH24:MI'
+            ) AS start,
+            COUNT(*)::int AS count,
+            COUNT(r.id)::int AS report_count
+         FROM messages m
+         LEFT JOIN daily_site_reports r
+           ON r.message_id = m.message_id
+          AND r.is_deleted = FALSE
+         WHERE m.group_jid = ANY($2::text[])
+           AND m.timestamp >= to_timestamp($3)
+           AND m.timestamp < to_timestamp($4)
+           AND ${DASHBOARD_HIDDEN_TYPES_SQL}
+         GROUP BY 1
+         ORDER BY 1`,
+        [FLOW_INTERVAL_SQL[intervalMinutes], groupJids, fromTimestamp, toTimestamp]
+    )
+
+    const byStart = new Map(result.rows.map((row) => [row.start, row]))
+    const step = intervalMinutes * 60
+    const points: MessageFlowPoint[] = []
+    for (let timestamp = fromTimestamp; timestamp < toTimestamp; timestamp += step) {
+        const start = formatHktSlot(timestamp)
+        const row = byStart.get(start)
+        points.push({
+            start,
+            count: row ? Number(row.count) : 0,
+            reportCount: row ? Number(row.report_count) : 0,
+        })
+    }
+
+    if (points.length === 0) return empty
+
+    let peakIndex = 0
+    let total = 0
+    let reportTotal = 0
+    for (let index = 0; index < points.length; index += 1) {
+        const point = points[index]
+        if (!point) continue
+        total += point.count
+        reportTotal += point.reportCount
+        const peak = points[peakIndex]
+        if (!peak || point.count >= peak.count) peakIndex = index
+    }
+
+    const peak = points[peakIndex]
+    if (!peak) return empty
+
+    return {
+        intervalMinutes,
+        points,
+        peakStart: peak.start,
+        peakCount: peak.count,
+        total,
+        reportTotal,
+    }
+}

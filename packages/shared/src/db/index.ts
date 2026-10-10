@@ -65,6 +65,7 @@ export {
     listAlbumMedia,
     listDashboardGroups,
     listDashboardMessages,
+    listMessageFlow,
     resolveMentionedText,
     type AlbumCounts,
     type AlbumDownloadMedia,
@@ -72,6 +73,9 @@ export {
     type DashboardGroup,
     type DashboardMessage,
     type MessageCursor,
+    type MessageFlow,
+    type MessageFlowIntervalMinutes,
+    type MessageFlowPoint,
 } from './dashboard.js'
 export {
     computeDailySiteReportIssues,

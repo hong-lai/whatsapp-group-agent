@@ -25,6 +25,7 @@ import DailySiteReportView, {
 import DateRangePicker from './DateRangePicker'
 import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
+import MessageFlowTimeline from './MessageFlowTimeline'
 import OverviewView from './OverviewView'
 import FilterSheet from './FilterSheet'
 import InstallApp from './InstallApp'
@@ -2049,6 +2050,35 @@ function messagesUrl(groupJid: string | null, from: string, to: string, cursor?:
     return `/api/groups/${encodeURIComponent(groupJid)}/messages?${query}`
 }
 
+function visibleMessageTime(list: HTMLElement, sortOrder: 'asc' | 'desc'): number | null {
+    const cards = list.querySelectorAll<HTMLElement>('[data-ts]')
+    const box = list.getBoundingClientRect()
+    const timeOf = (card: HTMLElement) => {
+        const seconds = Number(card.dataset.ts)
+        return Number.isFinite(seconds) ? seconds * 1000 : null
+    }
+    const pinnedToBottom =
+        sortOrder === 'asc' && list.scrollHeight - list.scrollTop - list.clientHeight <= 80
+    if (pinnedToBottom) {
+        const limit = box.bottom - 8
+        let chosen: number | null = null
+        for (const card of cards) {
+            const rect = card.getBoundingClientRect()
+            if (rect.top >= limit) break
+            if (rect.bottom <= box.top + 8) continue
+            const ms = timeOf(card)
+            if (ms != null) chosen = ms
+        }
+        return chosen
+    }
+    const top = box.top + 8
+    for (const card of cards) {
+        if (card.getBoundingClientRect().bottom <= top) continue
+        return timeOf(card)
+    }
+    return null
+}
+
 function MessageCard({
     message,
     isAdmin = false,
@@ -2099,7 +2129,10 @@ function MessageCard({
     }
 
     return (
-        <article className={`message-card ${message.isDeleted ? 'deleted' : ''} ${revealed ? 'revealed' : ''}`}>
+        <article
+            className={`message-card ${message.isDeleted ? 'deleted' : ''} ${revealed ? 'revealed' : ''}`}
+            data-ts={message.timestamp}
+        >
             <span className="sender-avatar">
                 {initials(message.senderName || message.senderJid || 'Unknown')}
             </span>
@@ -2315,6 +2348,8 @@ export default function App() {
     const pulseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
     const lastPulse = useRef(0)
     const messageListRef = useRef<HTMLDivElement>(null)
+    const ignoreFlowScroll = useRef(false)
+    const [flowFocus, setFlowFocus] = useState<{ ms: number; follow: boolean } | null>(null)
     const scrollRestore = useRef<{ top: number; height: number } | null>(null)
     const nextCursorRef = useRef<string | null>(null)
     const silentRefreshRef = useRef<() => void>(() => {})
@@ -2373,6 +2408,9 @@ export default function App() {
     }, [groups])
     const viewingAllGroups = !selectedJid
     const messageScrollKey = `${selectedJid ?? ''}|${from}|${to}|${reloadKey}`
+    useLayoutEffect(() => {
+        ignoreFlowScroll.current = true
+    }, [messages, sortOrder])
     const { onScroll: onMessageListScroll } = usePinnedScroll(
         messageListRef,
         messages,
@@ -2380,6 +2418,25 @@ export default function App() {
         messageScrollKey,
         scrollRestore
     )
+
+    const syncFlowFocus = (follow: boolean) => {
+        const list = messageListRef.current
+        if (!list) return
+        const ms = visibleMessageTime(list, sortOrder)
+        if (ms == null) return
+        setFlowFocus((current) => {
+            if (current?.ms === ms && (!follow || current.follow)) return current
+            return { ms, follow }
+        })
+    }
+
+    useLayoutEffect(() => {
+        syncFlowFocus(false)
+        const frame = requestAnimationFrame(() => {
+            ignoreFlowScroll.current = false
+        })
+        return () => cancelAnimationFrame(frame)
+    }, [messages, sortOrder])
 
     useEffect(() => {
         const params = new URLSearchParams()
@@ -3412,6 +3469,16 @@ export default function App() {
                             </>
                         )}
                     </header>
+                    {!invalidRange && (
+                        <MessageFlowTimeline
+                            from={from}
+                            to={to}
+                            groupJid={selectedJid}
+                            active={view === 'messages'}
+                            focusMs={flowFocus?.ms ?? null}
+                            followFocus={flowFocus?.follow ?? false}
+                        />
+                    )}
 
                     {messagesLoading && messages.length === 0 ? (
                         <SkeletonMessages />
@@ -3419,7 +3486,10 @@ export default function App() {
                         <div
                             className={`message-list ${messagesLoading ? 'is-loading' : ''}`}
                             ref={messageListRef}
-                            onScroll={onMessageListScroll}
+                            onScroll={(event) => {
+                                onMessageListScroll(event)
+                                if (!ignoreFlowScroll.current) syncFlowFocus(true)
+                            }}
                         >
                             {messagesLoading && (
                                 <div className="content-overlay" role="status">
