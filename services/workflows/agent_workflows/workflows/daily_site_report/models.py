@@ -25,31 +25,34 @@ _METRIC_NUMBER_RULE = (
 class CumulativeMetrics(BaseModel):
     trench_length: float = Field(
         description=(
-            "Cumulative trench length in meters from 累計開坑長度. "
+            "Cumulative trench length in meters. "
+            "Same field from 累計開坑長度, 累計開坑, or 累計坑數. "
+            "累計坑數：137m → 137. Do not output 0 because the long label 累計開坑長度 is absent. "
             + _METRIC_NUMBER_RULE
         )
     )
     coring_length: float = Field(
         description=(
-            "Cumulative coring length in meters from 累計Coring長度. "
+            "Cumulative coring length in meters from 累計Coring長度 or 累計Coring. "
             + _METRIC_NUMBER_RULE
         )
     )
     cable_pulling_length: float = Field(
         description=(
-            "Cumulative cable-pulling length in meters from 累計拉線長度. "
+            "Cumulative cable-pulling length in meters from 累計拉線長度, 累計拉線, or 累計放線. "
             + _METRIC_NUMBER_RULE
         )
     )
     conduit_laying_length: float = Field(
         description=(
-            "Cumulative conduit-laying length in meters from 累計放筒長度. "
+            "Cumulative conduit-laying length in meters from 累計放筒長度, 累計放筒, or 累計筒數. "
             + _METRIC_NUMBER_RULE
         )
     )
     trial_pit_count: int = Field(
         description=(
-            "Cumulative trial-pit count from 累計探窿數量. "
+            "Cumulative trial-pit count from 累計探窿數量 or 累計探窿. "
+            "累計TH is a different label and is not this field. "
             + _METRIC_NUMBER_RULE
         )
     )
@@ -156,12 +159,13 @@ def _leading_digits(s: str) -> str:
 
 
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+# Longer label first so 累計開坑長度 is not cut short by 累計開坑.
 _METRIC_LABELS: tuple[tuple[str, re.Pattern[str], bool], ...] = (
-    ("trench_length", re.compile(r"累計開坑長度\s*[：:]"), False),
-    ("coring_length", re.compile(r"累計\s*Coring\s*長度\s*[：:]", re.IGNORECASE), False),
-    ("cable_pulling_length", re.compile(r"累計拉線長度\s*[：:]"), False),
-    ("conduit_laying_length", re.compile(r"累計放筒長度\s*[：:]"), False),
-    ("trial_pit_count", re.compile(r"累計探窿數量\s*[：:]"), True),
+    ("trench_length", re.compile(r"累計(?:開坑長度|開坑|坑數)\s*[：:]"), False),
+    ("coring_length", re.compile(r"累計\s*Coring(?:\s*長度)?\s*[：:]", re.IGNORECASE), False),
+    ("cable_pulling_length", re.compile(r"累計(?:拉線長度|拉線|放線)\s*[：:]"), False),
+    ("conduit_laying_length", re.compile(r"累計(?:放筒長度|放筒|筒數)\s*[：:]"), False),
+    ("trial_pit_count", re.compile(r"累計探窿(?:數量)?\s*[：:]"), True),
 )
 _NEXT_METRIC_CHUNK = re.compile(
     r"\n\s*(?:累計|備注|備註|日期|承辦商|項目名稱|開工人數|工作內容|"
@@ -178,6 +182,7 @@ def parse_labeled_cumulative_metrics(text: str) -> dict[str, float | int]:
     """Join spaced/wrapped digits in 累計 metric values.
 
     累計Coring長度：3 8米 （正在cor第四條） → coring_length=38 (not 3.8)
+    累計坑數：137m → trench_length=137 (shorthand for 累計開坑長度, not missing)
     """
     parsed: dict[str, float | int] = {}
     for field, pattern, as_int in _METRIC_LABELS:
@@ -324,9 +329,12 @@ class DailySiteReport(BaseModel):
     cumulative_metrics: CumulativeMetrics = Field(
         description=(
             "Aggregated progress metrics from 累計* labels. "
+            "累計坑數 is trench_length (137m → 137), not a missing 累計開坑長度. "
+            "Also accept 累計筒數, 累計放線, 累計Coring, and 累計探窿 as the short forms. "
+            "Ignore 累計TH. "
             "Spaces/line breaks between digits JOIN (3 8米 → 38, never 3.8). "
             "Only '.' / '．' is a decimal. Ignore parenthetical notes. "
-            "Sums of parts become the total. Missing/** → 0."
+            "Sums of parts become the total. Missing/** → 0 only when no alias is present."
         )
     )
     remarks: Optional[str] = Field(
