@@ -7,6 +7,8 @@ type Props = {
     from: string
     to: string
     max: string
+    /** Earliest selectable day (`YYYY-MM-DD`). Days before this stay disabled. */
+    min?: string | null
     onChange: (from: string, to: string) => void
 }
 
@@ -58,6 +60,13 @@ function ordered(a: string, b: string): [string, string] {
     return a <= b ? [a, b] : [b, a]
 }
 
+function monthIsBefore(
+    view: { year: number; month: number },
+    floor: { year: number; month: number }
+): boolean {
+    return view.year < floor.year || (view.year === floor.year && view.month < floor.month)
+}
+
 function formatRangeLabel(from: string, to: string): string {
     const [start, end] = ordered(from, to)
     if (start === end) return longDate.format(utcDate(start))
@@ -91,7 +100,7 @@ function weeks(cells: Array<string | null>): Array<Array<string | null>> {
     return rows
 }
 
-export default function DateRangePicker({ from, to, max, onChange }: Props) {
+export default function DateRangePicker({ from, to, max, min, onChange }: Props) {
     const [open, setOpen] = useState(false)
     const [mode, setMode] = useState<Mode>(from === to ? 'day' : 'range')
     const [viewMonth, setViewMonth] = useState(() => monthOf(from))
@@ -101,14 +110,21 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
     const rootRef = useRef<HTMLDivElement>(null)
     const popoverRef = useRef<HTMLDivElement>(null)
 
+    const earliest = min && min <= max ? min : null
     const [start, end] = ordered(from, to)
-    const isDay = start === end
+    const boundedStart = earliest && start < earliest ? earliest : start
+    const boundedEnd = earliest && end < earliest ? earliest : end
+    const isDay = boundedStart === boundedEnd
     const preview = useMemo(() => {
         if (mode === 'range' && rangeAnchor) {
-            return ordered(rangeAnchor, hoverDate && hoverDate <= max ? hoverDate : rangeAnchor)
+            const hover =
+                hoverDate && hoverDate <= max && (!earliest || hoverDate >= earliest)
+                    ? hoverDate
+                    : rangeAnchor
+            return ordered(rangeAnchor, hover)
         }
-        return [start, end] as [string, string]
-    }, [end, hoverDate, max, mode, rangeAnchor, start])
+        return [boundedStart, boundedEnd] as [string, string]
+    }, [boundedEnd, boundedStart, earliest, hoverDate, max, mode, rangeAnchor])
 
     useEffect(() => {
         if (open) return
@@ -116,6 +132,16 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
         setRangeAnchor(null)
         setHoverDate(null)
     }, [from, to, open])
+
+    useEffect(() => {
+        if (!earliest) return
+        if (rangeAnchor && rangeAnchor < earliest) {
+            setRangeAnchor(null)
+            setHoverDate(null)
+        }
+        const floor = monthOf(earliest)
+        setViewMonth((current) => (monthIsBefore(current, floor) ? floor : current))
+    }, [earliest, rangeAnchor])
 
     useEffect(() => {
         if (!open) return undefined
@@ -170,7 +196,9 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
         setMode(from === to ? 'day' : 'range')
         setRangeAnchor(null)
         setHoverDate(null)
-        setViewMonth(monthOf(from <= to ? from : to))
+        const startMonth = monthOf(boundedStart)
+        const floor = earliest ? monthOf(earliest) : null
+        setViewMonth(floor && monthIsBefore(startMonth, floor) ? floor : startMonth)
         setOpen(true)
     }
 
@@ -181,7 +209,7 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
     }
 
     function selectDay(iso: string) {
-        if (iso > max) return
+        if (iso > max || (earliest != null && iso < earliest)) return
         if (mode === 'day') {
             onChange(iso, iso)
             setOpen(false)
@@ -193,6 +221,7 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
             return
         }
         const [nextFrom, nextTo] = ordered(rangeAnchor, iso)
+        if (earliest != null && nextFrom < earliest) return
         onChange(nextFrom, nextTo)
         setRangeAnchor(null)
         setHoverDate(null)
@@ -200,9 +229,11 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
     }
 
     const maxMonth = monthOf(max)
+    const minMonth = earliest ? monthOf(earliest) : null
     const canGoNext =
         viewMonth.year < maxMonth.year ||
         (viewMonth.year === maxMonth.year && viewMonth.month < maxMonth.month)
+    const canGoPrev = minMonth == null || monthIsBefore(minMonth, viewMonth)
     const hint =
         mode === 'day'
             ? 'Pick a day'
@@ -273,7 +304,11 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
                                 type="button"
                                 className="date-cal-nav"
                                 aria-label="Previous month"
-                                onClick={() => setViewMonth((current) => shiftMonth(current, -1))}
+                                disabled={!canGoPrev}
+                                onClick={() => {
+                                    if (!canGoPrev) return
+                                    setViewMonth((current) => shiftMonth(current, -1))
+                                }}
                             >
                                 <svg viewBox="0 0 24 24" aria-hidden="true">
                                     <path d="m15 6-6 6 6 6" />
@@ -307,10 +342,11 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
                                         if (!iso) {
                                             return <span className="date-cal-empty" key={`e${index}`} />
                                         }
-                                        const disabled = iso > max
-                                        const selected = iso >= previewStart && iso <= previewEnd
-                                        const isStart = iso === previewStart
-                                        const isEnd = iso === previewEnd
+                                        const beforeOldest = earliest != null && iso < earliest
+                                        const disabled = iso > max || beforeOldest
+                                        const selected = !disabled && iso >= previewStart && iso <= previewEnd
+                                        const isStart = !disabled && iso === previewStart
+                                        const isEnd = !disabled && iso === previewEnd
                                         const isToday = iso === max
                                         return (
                                             <button
@@ -329,6 +365,11 @@ export default function DateRangePicker({ from, to, max, onChange }: Props) {
                                                 aria-pressed={selected}
                                                 aria-current={isToday ? 'date' : undefined}
                                                 aria-label={longDate.format(utcDate(iso))}
+                                                title={
+                                                    beforeOldest
+                                                        ? 'No messages before this date'
+                                                        : undefined
+                                                }
                                                 onPointerEnter={() => {
                                                     if (mode === 'range' && rangeAnchor && !disabled) {
                                                         setHoverDate(iso)

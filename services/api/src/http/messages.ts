@@ -5,6 +5,7 @@ import { basename } from 'node:path'
 import { config } from '../config.js'
 import {
     getDashboardMedia,
+    getOldestDashboardMessageDate,
     groupMatchesPattern,
     listDashboardGroups,
     listDashboardMessages,
@@ -33,7 +34,10 @@ export function registerMessageRoutes(app: Express): void {
         '/api/groups',
         async (request, response) => {
             const range = getDateRange(request)
-            const groups = await listDashboardGroups(range.fromTimestamp, range.toTimestamp)
+            const [groups, oldestDate] = await Promise.all([
+                listDashboardGroups(range.fromTimestamp, range.toTimestamp),
+                getOldestDashboardMessageDate(),
+            ])
             response.json({
                 range: { from: range.from, to: range.to },
                 pattern: {
@@ -41,6 +45,7 @@ export function registerMessageRoutes(app: Express): void {
                     flags: 'i',
                 },
                 groups,
+                oldestDate,
             })
         }
     )

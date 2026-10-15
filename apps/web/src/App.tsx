@@ -94,6 +94,7 @@ type GroupsResponse = {
         source: string
         flags: string
     }
+    oldestDate?: string | null
 }
 
 type MessagesResponse = {
@@ -2279,6 +2280,7 @@ export default function App() {
     const today = hongKongDate()
     const [from, setFrom] = useState(initialParams.get('from') || today)
     const [to, setTo] = useState(initialParams.get('to') || today)
+    const [oldestMessageDate, setOldestMessageDate] = useState<string | null>(null)
     const [selectedJid, setSelectedJid] = useState<string | null>(initialParams.get('group'))
     const [view, setView] = useState<DashboardView>(initialDashboardView(initialParams))
     const [albumScope, setAlbumScope] = useState<AlbumScope>(
@@ -2377,6 +2379,8 @@ export default function App() {
         [messages, sortOrder]
     )
     const dateIsDefault = from === today && to === today
+    const earliestDate =
+        oldestMessageDate && oldestMessageDate <= today ? oldestMessageDate : null
     const typesAreDefault = isAllTypes(albumTypes)
     const activeFilterCount = [
         !dateIsDefault,
@@ -2470,6 +2474,16 @@ export default function App() {
         if (typeof localStorage === 'undefined') return
         localStorage.setItem('chatGroupsCollapsed', chatGroupsCollapsed ? '1' : '0')
     }, [chatGroupsCollapsed])
+
+    useEffect(() => {
+        if (!earliestDate) return
+        if (to < earliestDate) {
+            setFrom(earliestDate)
+            setTo(earliestDate)
+            return
+        }
+        if (from < earliestDate) setFrom(earliestDate)
+    }, [earliestDate, from, to])
 
     useEffect(() => {
         const reportSource = new EventSource('/api/events/report-processed')
@@ -2621,6 +2635,7 @@ export default function App() {
                 groupsFetchOk.current = true
                 setGroups(data.groups)
                 if (data.pattern?.source) setPattern(data.pattern)
+                if (data.oldestDate !== undefined) setOldestMessageDate(data.oldestDate)
             })
             .catch((reason: unknown) => {
                 if (
@@ -2714,6 +2729,7 @@ export default function App() {
             if (gen !== silentGen.current) return
             setGroups(groupsData.groups)
             if (groupsData.pattern?.source) setPattern(groupsData.pattern)
+            if (groupsData.oldestDate !== undefined) setOldestMessageDate(groupsData.oldestDate)
             setError(null)
 
             if (currentView === 'messages') {
@@ -2790,8 +2806,9 @@ export default function App() {
     }
 
     function applyPreset(days: number) {
+        const start = addDays(today, -(days - 1))
         setTo(today)
-        setFrom(addDays(today, -(days - 1)))
+        setFrom(earliestDate && start < earliestDate ? earliestDate : start)
     }
 
     function dateChipLabel(): string {
@@ -3278,31 +3295,42 @@ export default function App() {
                         from={from}
                         to={to}
                         max={today}
+                        min={earliestDate}
                         onChange={(nextFrom, nextTo) => {
                             setFrom(nextFrom)
                             setTo(nextTo)
                         }}
                     />
                     <div className="presets" aria-label="Date presets">
-                        {[1, 2, 7, 30].map((days) => (
-                            <button
-                                className={from === addDays(today, -(days - 1)) && to === today ? 'active' : ''}
-                                key={days}
-                                onClick={() => applyPreset(days)}
-                            >
-                                {days === 1 ? (
-                                    <>
-                                        <span className="preset-long">Today</span>
-                                        <span className="preset-short">1d</span>
-                                    </>
-                                ) : (
-                                    <>
-                                        <span className="preset-long">{days} days</span>
-                                        <span className="preset-short">{days}d</span>
-                                    </>
-                                )}
-                            </button>
-                        ))}
+                        {[1, 2, 7, 30].map((days) => {
+                            const presetStart = addDays(today, -(days - 1))
+                            const beforeOldest = Boolean(earliestDate && presetStart < earliestDate)
+                            return (
+                                <button
+                                    className={from === presetStart && to === today ? 'active' : ''}
+                                    key={days}
+                                    disabled={beforeOldest}
+                                    title={
+                                        beforeOldest && earliestDate
+                                            ? `No messages before ${earliestDate}`
+                                            : undefined
+                                    }
+                                    onClick={() => applyPreset(days)}
+                                >
+                                    {days === 1 ? (
+                                        <>
+                                            <span className="preset-long">Today</span>
+                                            <span className="preset-short">1d</span>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <span className="preset-long">{days} days</span>
+                                            <span className="preset-short">{days}d</span>
+                                        </>
+                                    )}
+                                </button>
+                            )
+                        })}
                     </div>
                 </div>
                 <div className="view-switch" aria-label="Dashboard view">
@@ -3591,8 +3619,9 @@ export default function App() {
                         onOpenGroup={(groupJid, sentAt) => {
                             if (sentAt) {
                                 const day = hongKongDate(sentAt * 1000)
-                                setFrom(day)
-                                setTo(day)
+                                const next = earliestDate && day < earliestDate ? earliestDate : day
+                                setFrom(next)
+                                setTo(next)
                             }
                             setSelectedJid(groupJid)
                             setView('messages')
@@ -3669,6 +3698,7 @@ export default function App() {
                 from={from}
                 to={to}
                 today={today}
+                minDate={earliestDate}
                 onRangeChange={(nextFrom, nextTo) => {
                     setFrom(nextFrom)
                     setTo(nextTo)

@@ -726,11 +726,18 @@ h3 {
         box-shadow var(--duration) var(--ease-out);
 }
 
-.presets button:hover,
+.presets button:hover:not(:disabled),
 .presets button.active {
     color: var(--green-dark);
     background: white;
     box-shadow: 0 3px 12px rgba(37, 69, 60, 0.09);
+}
+
+.presets button:disabled {
+    color: #c3cec9;
+    background: transparent;
+    box-shadow: none;
+    cursor: default;
 }
 
 .inline-error {

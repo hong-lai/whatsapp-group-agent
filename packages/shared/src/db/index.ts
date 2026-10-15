@@ -62,6 +62,7 @@ export {
     countAlbumMedia,
     getAlbumMediaForDownload,
     getDashboardMedia,
+    getOldestDashboardMessageDate,
     listAlbumMedia,
     listDashboardGroups,
     listDashboardMessages,

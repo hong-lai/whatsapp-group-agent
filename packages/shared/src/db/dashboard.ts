@@ -97,6 +97,22 @@ export async function listDashboardGroups(
     }))
 }
 
+/** Hong Kong calendar date of the earliest dashboard message, or null when none exist. */
+export async function getOldestDashboardMessageDate(): Promise<string | null> {
+    const groupJids = await matchingGroupJids()
+    if (groupJids.length === 0) return null
+    const result = await pool.query<{ oldest_date: string | null }>(
+        `SELECT to_char(MIN(timestamp) AT TIME ZONE 'Asia/Hong_Kong', 'YYYY-MM-DD') AS oldest_date
+         FROM messages
+         WHERE group_jid = ANY($1::text[])
+           AND timestamp IS NOT NULL
+           AND message_type <> ALL($2::text[])`,
+        [groupJids, [...DASHBOARD_HIDDEN_MESSAGE_TYPES]]
+    )
+    const date = result.rows[0]?.oldest_date ?? null
+    return date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : null
+}
+
 export type MessageCursor = {
     timestamp: number
     messageId: string

@@ -17,6 +17,8 @@ type Props = {
     from: string
     to: string
     today: string
+    /** Earliest selectable day. Presets that start before this are disabled. */
+    minDate?: string | null
     onRangeChange: (from: string, to: string) => void
     onPreset: (days: number) => void
     sortOrder: SortOrder
@@ -53,6 +55,7 @@ export default function FilterSheet({
     from,
     to,
     today,
+    minDate,
     onRangeChange,
     onPreset,
     sortOrder,
@@ -154,23 +157,37 @@ export default function FilterSheet({
                     <section className="sheet-section">
                         <h3>When</h3>
                         <div className="sheet-when">
-                            <DateRangePicker from={from} to={to} max={today} onChange={onRangeChange} />
+                            <DateRangePicker
+                                from={from}
+                                to={to}
+                                max={today}
+                                min={minDate}
+                                onChange={onRangeChange}
+                            />
                             <div className="presets sheet-presets" aria-label="Date presets">
-                                {presets.map((preset) => (
-                                    <button
-                                        key={preset.days}
-                                        type="button"
-                                        className={
-                                            from === addDays(today, -(preset.days - 1)) && to === today
-                                                ? 'active'
-                                                : ''
-                                        }
-                                        onClick={() => onPreset(preset.days)}
-                                    >
-                                        <span className="preset-long">{preset.long}</span>
-                                        <span className="preset-short">{preset.short}</span>
-                                    </button>
-                                ))}
+                                {presets.map((preset) => {
+                                    const presetStart = addDays(today, -(preset.days - 1))
+                                    const beforeOldest = Boolean(minDate && presetStart < minDate)
+                                    return (
+                                        <button
+                                            key={preset.days}
+                                            type="button"
+                                            className={
+                                                from === presetStart && to === today ? 'active' : ''
+                                            }
+                                            disabled={beforeOldest}
+                                            title={
+                                                beforeOldest && minDate
+                                                    ? `No messages before ${minDate}`
+                                                    : undefined
+                                            }
+                                            onClick={() => onPreset(preset.days)}
+                                        >
+                                            <span className="preset-long">{preset.long}</span>
+                                            <span className="preset-short">{preset.short}</span>
+                                        </button>
+                                    )
+                                })}
                             </div>
                         </div>
                     </section>
