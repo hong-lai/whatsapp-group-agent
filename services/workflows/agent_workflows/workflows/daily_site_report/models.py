@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Annotated, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -274,10 +275,50 @@ def _parse_joined_number(s: str) -> tuple[float | None, str]:
     return float(int_part), s[i:]
 
 
+_ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def _calendar_iso_date(text: str) -> str | None:
+    match = _ISO_DATE.fullmatch(text.strip())
+    if not match:
+        return None
+    year, month, day = (int(match.group(i)) for i in range(1, 4))
+    try:
+        date(year, month, day)
+    except ValueError:
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def normalize_report_date(value: object) -> str:
+    """Keep a real calendar date as YYYY-MM-DD; anything else is blank.
+
+    Blank becomes SQL NULL via ``report.date or None``. A non-date token must
+    not be stored, because ``report_date`` is a PostgreSQL date.
+    """
+    if value is None:
+        return ""
+    text = str(value).strip().translate(_FULLWIDTH_DIGITS)
+    if not text:
+        return ""
+    iso = _calendar_iso_date(text)
+    if iso:
+        return iso
+    if not re.search(r"[年月日號号]", text):
+        return ""
+    parsed = parse_labeled_report_date(f"日期：{text}")
+    if not parsed:
+        return ""
+    return _calendar_iso_date(parsed) or ""
+
+
 class DailySiteReport(BaseModel):
     date: str = Field(
+        default="",
         description=(
-            "Report date from this message's 日期 value, YYYY-MM-DD. "
+            "Report date from this message's 日期 value, YYYY-MM-DD, or an empty "
+            "string when 日期 is missing, blank, or not a real calendar date. "
+            "Never a word or placeholder. "
             "Scan left to right: all digits until 年 are YEAR, until 月 are MONTH, "
             "until 日/號/号 are DAY. Spaces or line breaks between digits JOIN "
             "(do not apply worker name-splitting to dates). "
@@ -286,7 +327,7 @@ class DailySiteReport(BaseModel):
             "1 2號 → day 12 (not 01); 1 5號 → day 15 (not 01). "
             "Zero-padded months (09月) and weekday text are ignored after the day. "
             "Then zero-pad month and day. Discard 星期 and weekday text."
-        )
+        ),
     )
     po_number: str = Field(
         default="",
@@ -344,6 +385,11 @@ class DailySiteReport(BaseModel):
             "null if missing/empty."
         ),
     )
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def _normalize_date(cls, value: object) -> str:
+        return normalize_report_date(value)
 
     @field_validator("po_number", mode="before")
     @classmethod
