@@ -14,6 +14,7 @@ import { ROBOTS_TAG, ROBOTS_TXT, requireAdmin } from './helpers.js'
 import { registerMessageRoutes } from './messages.js'
 import { registerOverviewRoutes } from './overview.js'
 import { registerReportRoutes } from './reports.js'
+import { registerSenderRoutes } from './senders.js'
 import { registerSettingsRoutes } from './settings.js'
 import { registerWorkflowRoutes } from './workflows.js'
 
@@ -65,6 +66,7 @@ export function createApiApp() {
     })
 
     registerMessageRoutes(app)
+    registerSenderRoutes(app)
     registerOverviewRoutes(app)
     registerAlbumRoutes(app)
     registerReportRoutes(app)

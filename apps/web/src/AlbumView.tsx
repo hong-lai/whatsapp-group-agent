@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { DownloadButton, DownloadIcon, saveBlob } from './downloadFile'
+import { SenderName } from './SenderName'
 import {
     mergeFirstPage,
     useInfiniteScroll,
@@ -20,6 +21,7 @@ type AlbumItem = {
     messageId: string
     groupJid: string
     groupName: string
+    senderJid: string | null
     senderName: string | null
     messageType: string
     textContent: string | null
@@ -988,7 +990,12 @@ export default function AlbumView({
                     </div>
                     <div className="lightbox-info" onClick={stopTileAction}>
                         <strong>{lightbox.groupName}</strong>
-                        <span className="lightbox-meta">{lightbox.senderName || 'Unknown sender'}</span>
+                        <SenderName
+                            name={lightbox.senderName}
+                            jid={lightbox.senderJid}
+                            as="span"
+                            className="lightbox-meta"
+                        />
                         <time className="lightbox-meta">{hkDateTime.format(lightbox.timestamp * 1000)}</time>
                         {displayItems.length > 1 && (
                             <span className="lightbox-meta">

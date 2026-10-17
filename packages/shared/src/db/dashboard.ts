@@ -610,6 +610,7 @@ export type AlbumMedia = {
     messageId: string
     groupJid: string
     groupName: string
+    senderJid: string | null
     senderName: string | null
     messageType: string
     textContent: string | null
@@ -621,6 +622,7 @@ type AlbumMediaRow = {
     message_id: string
     group_jid: string
     group_name: string
+    sender_jid: string | null
     sender_name: string | null
     message_type: string
     text_content: string | null
@@ -659,6 +661,7 @@ export async function listAlbumMedia(
             m.message_id,
             m.group_jid,
             g.name AS group_name,
+            m.sender_jid,
             s.display_name AS sender_name,
             m.message_type,
             m.text_content,
@@ -704,6 +707,7 @@ export async function listAlbumMedia(
             messageId: row.message_id,
             groupJid: row.group_jid,
             groupName: row.group_name,
+            senderJid: row.sender_jid,
             senderName: row.sender_name,
             messageType: row.message_type,
             textContent: withMentions(row.text_content),
@@ -801,6 +805,7 @@ export async function getAlbumMediaForDownload(
             m.message_id,
             m.group_jid,
             g.name AS group_name,
+            m.sender_jid,
             s.display_name AS sender_name,
             m.message_type,
             m.text_content,
@@ -827,6 +832,7 @@ export async function getAlbumMediaForDownload(
         messageId: row.message_id,
         groupJid: row.group_jid,
         groupName: row.group_name,
+        senderJid: row.sender_jid,
         senderName: row.sender_name,
         messageType: row.message_type,
         textContent: withMentions(row.text_content),

@@ -3911,7 +3911,18 @@ h3 {
     line-height: 1.5;
 }
 
-.lightbox-info button:not(.download-button),
+.lightbox-info .sender-name {
+    display: inline-flex;
+}
+
+.lightbox-info .sender-phone {
+    display: inline-flex;
+    margin-top: 0;
+    background: rgba(255, 255, 255, 0.14);
+    color: #ffffff;
+}
+
+.lightbox-info button:not(.download-button):not(.sender-name-btn),
 .lightbox-info a:not(.download-button) {
     display: inline-block;
     margin-top: 24px;
@@ -4269,6 +4280,61 @@ h3 {
 .message-content header strong {
     color: #175f50;
     font-size: 0.78rem;
+}
+
+.sender-name {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+}
+
+.message-content header .sender-name-btn,
+.lightbox-info button.sender-name-btn {
+    display: inline;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    color: inherit;
+    font: inherit;
+    font-weight: 700;
+    line-height: inherit;
+    letter-spacing: inherit;
+    text-align: inherit;
+    text-decoration: underline dotted;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.message-content header .sender-name-btn {
+    color: #175f50;
+    font-size: 0.78rem;
+}
+
+.sender-name-btn:hover,
+.sender-name-btn:focus-visible {
+    text-decoration-style: solid;
+}
+
+.sender-phone {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: #e7f3ee;
+    color: #175f50;
+    font-size: 0.68rem;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    line-height: 1.45;
+    user-select: text;
 }
 
 .message-group-chip {
@@ -6697,7 +6763,7 @@ button.document-link {
         padding: 16px 16px calc(16px + env(safe-area-inset-bottom, 0px));
     }
 
-    .lightbox-info button,
+    .lightbox-info button:not(.sender-name-btn),
     .lightbox-info .download-button {
         margin-top: 12px;
     }

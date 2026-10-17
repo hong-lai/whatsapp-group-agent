@@ -27,6 +27,7 @@ import Drawer from './Drawer'
 import FilenameSettings from './FilenameSettings'
 import MessageFlowTimeline from './MessageFlowTimeline'
 import OverviewView from './OverviewView'
+import { SenderName } from './SenderName'
 import FilterSheet from './FilterSheet'
 import InstallApp from './InstallApp'
 import { DownloadButton } from './downloadFile'
@@ -931,9 +932,18 @@ function MediaLightbox({
                 </div>
             </div>
             <div className="lightbox-info" onClick={(event) => event.stopPropagation()}>
-                <strong>{heading || item.senderName || 'Media'}</strong>
+                {heading ? (
+                    <strong>{heading}</strong>
+                ) : (
+                    <SenderName name={item.senderName} jid={item.senderJid} fallback="Media" />
+                )}
                 {heading && item.senderName && (
-                    <span className="lightbox-meta">{item.senderName}</span>
+                    <SenderName
+                        name={item.senderName}
+                        jid={item.senderJid}
+                        as="span"
+                        className="lightbox-meta"
+                    />
                 )}
                 <time className="lightbox-meta">{hkDateTime.format(item.timestamp * 1000)}</time>
                 {items.length > 1 && (
@@ -2140,7 +2150,11 @@ function MessageCard({
             <div className="message-content">
                 <header>
                     <span className="message-byline">
-                        <strong>{message.senderName || message.senderJid || 'Unknown sender'}</strong>
+                        <SenderName
+                            name={message.senderName}
+                            jid={message.senderJid}
+                            fallback={message.senderJid || 'Unknown sender'}
+                        />
                         {showGroup && message.groupName && (
                             <span className="message-group-chip" title={message.groupName}>
                                 {message.groupName}
