@@ -341,6 +341,44 @@ export async function getWorkflowBacklogContext(messageIds: string[]): Promise<{
     }
 }
 
+/** Replace the stored message body and the report's original-message copy. */
+export async function replaceWorkflowMessageText(
+    messageId: string,
+    textContent: string
+): Promise<boolean> {
+    const client = await pool.connect()
+    try {
+        await client.query('BEGIN')
+        const updated = await client.query(
+            `UPDATE messages
+             SET text_content = $1, is_edited = TRUE
+             WHERE message_id = $2`,
+            [textContent, messageId]
+        )
+        if ((updated.rowCount ?? 0) === 0) {
+            await client.query('ROLLBACK')
+            return false
+        }
+        await client.query(
+            `UPDATE daily_site_reports
+             SET source_text = $1, updated_at = NOW()
+             WHERE message_id = $2 AND is_deleted = FALSE`,
+            [textContent, messageId]
+        )
+        await client.query('COMMIT')
+        return true
+    } catch (error) {
+        try {
+            await client.query('ROLLBACK')
+        } catch {
+            // The original error is the one to surface.
+        }
+        throw error
+    } finally {
+        client.release()
+    }
+}
+
 export async function findInProgressWorkflows(
     messageId: string,
     workflowNames: string[]

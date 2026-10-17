@@ -115,6 +115,7 @@ export {
     getWorkflowBacklogContext,
     getWorkflowDebugSnapshot,
     recordWorkflowRun,
+    replaceWorkflowMessageText,
     type LatestWorkflowRunStatus,
     type WorkflowBacklogMessageContext,
     type WorkflowBacklogRunContext,

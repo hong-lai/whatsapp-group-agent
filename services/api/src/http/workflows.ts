@@ -11,6 +11,7 @@ import {
     getWorkflowBacklogContext,
     getWorkflowDebugSnapshot,
     listDailySiteReportMessageIds,
+    replaceWorkflowMessageText,
 } from '../../../../packages/shared/src/db/index.js'
 import {
     listLlmModels,
@@ -26,6 +27,26 @@ import {
     resolveTargetWorkflowNames,
 } from './helpers.js'
 
+const MAX_WORKFLOW_MESSAGE_TEXT = 100_000
+const MIN_WORKFLOW_MESSAGE_TEXT = 30
+
+/** Optional admin correction of the message the daily site report workflow reads. */
+function parseReplacementMessageText(value: unknown): string | undefined {
+    if (value == null) return undefined
+    if (typeof value !== 'string') throw new Error('Invalid message text')
+    const text = value.replace(/\r\n/g, '\n').trim()
+    if (text.length < MIN_WORKFLOW_MESSAGE_TEXT) {
+        throw new Error(
+            `Invalid message text: at least ${MIN_WORKFLOW_MESSAGE_TEXT} characters are required`
+        )
+    }
+    if (text.length > MAX_WORKFLOW_MESSAGE_TEXT) {
+        throw new Error(
+            `Invalid message text: exceeds ${MAX_WORKFLOW_MESSAGE_TEXT} characters`
+        )
+    }
+    return text
+}
 
 export function registerWorkflowRoutes(app: Express): void {
     app.get(
@@ -142,7 +163,7 @@ export function registerWorkflowRoutes(app: Express): void {
     app.post(
         '/api/debug/workflows/reenqueue',
         requireAdmin,
-        express.json({ limit: '256kb' }),
+        express.json({ limit: '2mb' }),
         async (request, response) => {
             if (!config.workflowsEnabled) {
                 response.status(503).json({ error: 'Workflows are disabled (WORKFLOWS_ENABLED=false)' })
@@ -154,6 +175,7 @@ export function registerWorkflowRoutes(app: Express): void {
                 classifierPrompt?: unknown
                 extractorPrompt?: unknown
                 workflowNames?: unknown
+                textContent?: unknown
             }
             const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : ''
             if (!messageId) throw new Error('messageId is required')
@@ -165,6 +187,7 @@ export function registerWorkflowRoutes(app: Express): void {
             const classifierPrompt = optionalPromptOverride(body.classifierPrompt)
             const extractorPrompt = optionalPromptOverride(body.extractorPrompt)
             const workflowNames = parseWorkflowNames(body.workflowNames)
+            const replacementText = parseReplacementMessageText(body.textContent)
             const targetWorkflows = resolveTargetWorkflowNames(workflowNames)
             if (targetWorkflows.length === 0) {
                 response.status(503).json({ error: 'No workflows enabled' })
@@ -181,9 +204,17 @@ export function registerWorkflowRoutes(app: Express): void {
                 return
             }
 
-            const event: MessageEventType = message.isEdited
-                ? 'message.edited'
-                : 'message.created'
+            let textUpdated = false
+            if (replacementText !== undefined) {
+                textUpdated = await replaceWorkflowMessageText(message.messageId, replacementText)
+                if (!textUpdated) {
+                    response.status(404).json({ error: 'Message not found' })
+                    return
+                }
+            }
+
+            const event: MessageEventType =
+                textUpdated || message.isEdited ? 'message.edited' : 'message.created'
 
             const enqueued = await enqueueMessageEvent({
                 event,
@@ -198,7 +229,13 @@ export function registerWorkflowRoutes(app: Express): void {
                 workflowNames: targetWorkflows,
             })
             if (!enqueued) {
-                response.status(503).json({ error: 'Failed to enqueue workflow job' })
+                response.status(503).json({
+                    error: 'Failed to enqueue workflow job',
+                    textUpdated,
+                    ...(textUpdated && replacementText !== undefined
+                        ? { textContent: replacementText, textLength: replacementText.length }
+                        : {}),
+                })
                 return
             }
 
@@ -217,6 +254,8 @@ export function registerWorkflowRoutes(app: Express): void {
                     workflowNames: targetWorkflows,
                     classifierPromptOverride: Boolean(classifierPrompt),
                     extractorPromptOverride: Boolean(extractorPrompt),
+                    textUpdated,
+                    textLength: replacementText?.length ?? null,
                 },
                 'workflow.debug_reenqueued'
             )
@@ -230,6 +269,10 @@ export function registerWorkflowRoutes(app: Express): void {
                 workflowNames: targetWorkflows,
                 classifierPromptOverride: Boolean(classifierPrompt),
                 extractorPromptOverride: Boolean(extractorPrompt),
+                textUpdated,
+                ...(textUpdated && replacementText !== undefined
+                    ? { textContent: replacementText, textLength: replacementText.length }
+                    : {}),
             })
         }
     )

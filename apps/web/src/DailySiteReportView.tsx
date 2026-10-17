@@ -58,6 +58,38 @@ async function getJson<T>(url: string, signal?: AbortSignal): Promise<T> {
     return body
 }
 
+function normalizeMessageDraft(value: string): string {
+    return value.replace(/\r\n/g, '\n').trim()
+}
+
+type WorkflowReenqueueResult = {
+    ok?: boolean
+    error?: string
+    llmModel?: string
+    textContent?: string
+    textUpdated?: boolean
+    textLength?: number
+}
+
+async function reenqueueWorkflow(
+    password: string,
+    payload: {
+        messageId: string
+        textContent?: string
+        llmModel?: string
+        classifierPrompt?: string
+        extractorPrompt?: string
+    }
+): Promise<{ response: Response; body: WorkflowReenqueueResult }> {
+    const response = await fetch('/api/debug/workflows/reenqueue', {
+        method: 'POST',
+        headers: adminHeaders(password, true),
+        body: JSON.stringify(payload),
+    })
+    const body = (await response.json()) as WorkflowReenqueueResult
+    return { response, body }
+}
+
 function joinList(items: string[]): string {
     return items.length ? items.join('、') : '—'
 }
@@ -929,21 +961,228 @@ function ReportDeleteDialog({
     )
 }
 
+function AdminOriginalMessageEditor({
+    report,
+    onRefresh,
+}: {
+    report: DailySiteReport
+    onRefresh: () => void
+}) {
+    const { adminPassword, logout } = useAdminAuth()
+    const [draft, setDraft] = useState(report.sourceText ?? '')
+    const [baseline, setBaseline] = useState(report.sourceText ?? '')
+    const [saving, setSaving] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const [note, setNote] = useState<string | null>(null)
+    const draftRef = useRef(draft)
+    const baselineRef = useRef(baseline)
+    const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const onRefreshRef = useRef(onRefresh)
+    draftRef.current = draft
+    baselineRef.current = baseline
+    onRefreshRef.current = onRefresh
+
+    useEffect(() => {
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current)
+        }
+    }, [])
+
+    useEffect(() => {
+        const next = report.sourceText ?? ''
+        if (normalizeMessageDraft(draftRef.current) !== normalizeMessageDraft(baselineRef.current)) {
+            return
+        }
+        if (next === baselineRef.current) return
+        setDraft(next)
+        setBaseline(next)
+    }, [report.sourceText, report.updatedAt])
+
+    useEffect(() => {
+        if (!adminPassword) return undefined
+        const password = adminPassword
+        const controller = new AbortController()
+        void (async () => {
+            try {
+                const response = await fetch(
+                    `/api/debug/workflows?messageId=${encodeURIComponent(report.messageId)}&limit=1`,
+                    { headers: adminHeaders(password), signal: controller.signal }
+                )
+                if (response.status === 401) {
+                    logout()
+                    return
+                }
+                if (!response.ok) return
+                const body = (await response.json()) as {
+                    snapshot?: { message?: { textContent?: string | null } }
+                }
+                const fromMessage = body.snapshot?.message?.textContent
+                if (typeof fromMessage !== 'string') return
+                if (
+                    normalizeMessageDraft(draftRef.current) !==
+                    normalizeMessageDraft(baselineRef.current)
+                ) {
+                    return
+                }
+                setDraft(fromMessage)
+                setBaseline(fromMessage)
+            } catch (reason) {
+                if ((reason as Error).name === 'AbortError') return
+            }
+        })()
+        return () => controller.abort()
+    }, [adminPassword, logout, report.messageId])
+
+    const trimmed = normalizeMessageDraft(draft)
+    const dirty = trimmed !== normalizeMessageDraft(baseline)
+    const tooShort = trimmed.length < 30
+
+    async function handleSaveAndRerun() {
+        if (!adminPassword) {
+            logout()
+            return
+        }
+        if (!dirty) return
+        if (tooShort) {
+            setError(
+                'The original message must be at least 30 characters, or the workflow will skip and delete this report.'
+            )
+            return
+        }
+        setSaving(true)
+        setError(null)
+        setNote(null)
+        const submitted = draft
+        try {
+            const { response, body } = await reenqueueWorkflow(adminPassword, {
+                messageId: report.messageId,
+                textContent: submitted,
+            })
+            if (response.status === 401) {
+                logout()
+                return
+            }
+            if (typeof body.textContent === 'string') {
+                const stored = body.textContent
+                setBaseline(stored)
+                setDraft((current) =>
+                    normalizeMessageDraft(current) === normalizeMessageDraft(submitted)
+                        ? stored
+                        : current
+                )
+            }
+            if (!response.ok) {
+                throw new Error(body.error || `Re-enqueue failed (${response.status})`)
+            }
+            setNote(
+                `Queued (${body.llmModel ?? 'default'}). Extracting again from the corrected message…`
+            )
+            onRefreshRef.current()
+            if (pollRef.current) clearInterval(pollRef.current)
+            let attempts = 0
+            pollRef.current = setInterval(() => {
+                attempts += 1
+                onRefreshRef.current()
+                if (attempts >= 8 && pollRef.current) {
+                    clearInterval(pollRef.current)
+                    pollRef.current = null
+                }
+            }, 1500)
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : 'Could not rerun the edited message')
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    return (
+        <div className="report-sheet-row is-source">
+            <dt>Original message</dt>
+            <dd>
+                <div className="report-source-editor">
+                    <textarea
+                        value={draft}
+                        disabled={saving}
+                        rows={8}
+                        aria-label="Original message"
+                        onChange={(change) => setDraft(change.target.value)}
+                    />
+                    <div className="report-source-actions">
+                        <p>
+                            {dirty
+                                ? 'The correction is saved on the original message, then the daily site report workflow runs again.'
+                                : 'Fix wording here, then extract again.'}
+                            {dirty && tooShort && (
+                                <span className="workflow-debug-warn"> Fewer than 30 characters.</span>
+                            )}
+                        </p>
+                        <div className="report-source-buttons">
+                            <button
+                                type="button"
+                                className="workflow-debug-refresh"
+                                disabled={saving || !dirty}
+                                onClick={() => {
+                                    setDraft(baseline)
+                                    setError(null)
+                                }}
+                            >
+                                Reset
+                            </button>
+                            <button
+                                type="button"
+                                className="report-debug-trigger"
+                                disabled={saving || !dirty || tooShort}
+                                onClick={() => void handleSaveAndRerun()}
+                            >
+                                {saving ? 'Queuing…' : 'Save & rerun'}
+                            </button>
+                        </div>
+                    </div>
+                    {error && <p className="report-source-error">{error}</p>}
+                    {note && <p className="report-source-note">{note}</p>}
+                </div>
+            </dd>
+        </div>
+    )
+}
+
 function ReportDetail({
     report,
     onDeleted,
     onReran,
+    onUpdated,
     onModalOpenChange,
 }: {
     report: DailySiteReport
     onDeleted: (id: number) => void
     onReran?: () => void
+    onUpdated?: (report: DailySiteReport) => void
     onModalOpenChange?: (open: boolean) => void
 }) {
     const { role } = useAdminAuth()
     const isAdmin = role === 'admin'
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [debugOpen, setDebugOpen] = useState(false)
+    const onReranRef = useRef(onReran)
+    const onUpdatedRef = useRef(onUpdated)
+    onReranRef.current = onReran
+    onUpdatedRef.current = onUpdated
+
+    const refreshReport = useCallback(() => {
+        onReranRef.current?.()
+        void (async () => {
+            try {
+                const response = await fetch(
+                    `/api/daily-site-reports/by-message/${encodeURIComponent(report.messageId)}`
+                )
+                if (!response.ok) return
+                const body = (await response.json()) as { report?: DailySiteReport }
+                if (body.report) onUpdatedRef.current?.(body.report)
+            } catch {
+                // The list reload still updates the table.
+            }
+        })()
+    }, [report.messageId])
 
     useEffect(() => {
         onModalOpenChange?.(deleteOpen || debugOpen)
@@ -1002,13 +1241,21 @@ function ReportDetail({
                         <dd>{row.value}</dd>
                     </div>
                 ))}
-                {report.sourceText && (
-                    <div className="report-sheet-row is-source">
-                        <dt>原始訊息</dt>
-                        <dd>
-                            <pre className="report-sheet-source">{report.sourceText}</pre>
-                        </dd>
-                    </div>
+                {isAdmin ? (
+                    <AdminOriginalMessageEditor
+                        key={report.messageId}
+                        report={report}
+                        onRefresh={refreshReport}
+                    />
+                ) : (
+                    report.sourceText && (
+                        <div className="report-sheet-row is-source">
+                            <dt>Original message</dt>
+                            <dd>
+                                <pre className="report-sheet-source">{report.sourceText}</pre>
+                            </dd>
+                        </div>
+                    )
                 )}
             </dl>
             {isAdmin && (
@@ -1032,7 +1279,7 @@ function ReportDetail({
                             <path d="M14 11v6" />
                             <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
                         </svg>
-                        刪除報告
+                        Delete report
                     </button>
                 </div>
             )}
@@ -1042,7 +1289,7 @@ function ReportDetail({
                         open={debugOpen}
                         messageId={report.messageId}
                         onClose={() => setDebugOpen(false)}
-                        onReran={onReran}
+                        onReran={refreshReport}
                     />
                     <ReportDeleteDialog
                         open={deleteOpen}
@@ -1116,11 +1363,19 @@ function WorkflowDebugDialog({
     const [extractorPrompt, setExtractorPrompt] = useState('')
     const [baselineClassifier, setBaselineClassifier] = useState('')
     const [baselineExtractor, setBaselineExtractor] = useState('')
+    const [messageText, setMessageText] = useState('')
+    const [baselineMessageText, setBaselineMessageText] = useState('')
     const [rerunning, setRerunning] = useState(false)
     const [rerunNote, setRerunNote] = useState<string | null>(null)
     const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
     const busyRef = useRef(false)
     const promptsReadyRef = useRef(false)
+    const messageTextReadyRef = useRef(false)
+    const messageTextRef = useRef('')
+    const baselineMessageTextRef = useRef('')
+    const loadSeq = useRef(0)
+    messageTextRef.current = messageText
+    baselineMessageTextRef.current = baselineMessageText
     const onCloseRef = useRef(onClose)
     const onReranRef = useRef(onReran)
     const logoutRef = useRef(logout)
@@ -1146,7 +1401,10 @@ function WorkflowDebugDialog({
             setExtractorPrompt('')
             setBaselineClassifier('')
             setBaselineExtractor('')
+            setMessageText('')
+            setBaselineMessageText('')
             promptsReadyRef.current = false
+            messageTextReadyRef.current = false
             return
         }
         const previous = document.body.style.overflow
@@ -1170,6 +1428,7 @@ function WorkflowDebugDialog({
 
     const loadDebug = useCallback(
         async (password: string) => {
+            const seq = ++loadSeq.current
             setLoading(true)
             setError(null)
             try {
@@ -1178,6 +1437,7 @@ function WorkflowDebugDialog({
                     { headers: adminHeaders(password) }
                 )
                 const body = (await response.json()) as WorkflowDebugResponse & { error?: string }
+                if (seq !== loadSeq.current) return
                 if (response.status === 401) {
                     logoutRef.current()
                     onCloseRef.current()
@@ -1190,18 +1450,29 @@ function WorkflowDebugDialog({
                 setLlmModel((current) => current || body.defaultModel)
                 const nextClassifier = body.prompts.classifierPrompt ?? ''
                 const nextExtractor = body.prompts.extractorPrompt ?? ''
+                const nextText = body.snapshot.message?.textContent ?? ''
+                const localClean =
+                    !messageTextReadyRef.current ||
+                    normalizeMessageDraft(messageTextRef.current) ===
+                        normalizeMessageDraft(baselineMessageTextRef.current)
                 setBaselineClassifier(nextClassifier)
                 setBaselineExtractor(nextExtractor)
+                setBaselineMessageText(nextText)
                 if (!promptsReadyRef.current) {
                     setClassifierPrompt(nextClassifier)
                     setExtractorPrompt(nextExtractor)
                     promptsReadyRef.current = true
                 }
+                if (localClean) {
+                    setMessageText(nextText)
+                    messageTextReadyRef.current = true
+                }
             } catch (reason) {
+                if (seq !== loadSeq.current) return
                 setError(reason instanceof Error ? reason.message : 'Could not load workflow debug')
                 setData(null)
             } finally {
-                setLoading(false)
+                if (seq === loadSeq.current) setLoading(false)
             }
         },
         [messageId]
@@ -1226,34 +1497,64 @@ function WorkflowDebugDialog({
             setError('Classifier and extractor prompts cannot be empty')
             return
         }
+        const draftTrimmed = normalizeMessageDraft(messageText)
+        const messageDirty = draftTrimmed !== normalizeMessageDraft(baselineMessageText)
+        if (messageDirty && draftTrimmed.length < 30) {
+            setError(
+                'Original message must be at least 30 characters, or the workflow will drop this report'
+            )
+            return
+        }
+        loadSeq.current += 1
+        setLoading(false)
         setRerunning(true)
         setError(null)
         setRerunNote(null)
         const password = adminPassword
         try {
-            const response = await fetch('/api/debug/workflows/reenqueue', {
-                method: 'POST',
-                headers: adminHeaders(password, true),
-                body: JSON.stringify({
-                    messageId,
-                    llmModel: llmModel.trim(),
-                    classifierPrompt,
-                    extractorPrompt,
-                }),
+            const { response, body } = await reenqueueWorkflow(password, {
+                messageId,
+                llmModel: llmModel.trim(),
+                classifierPrompt,
+                extractorPrompt,
+                ...(messageDirty ? { textContent: messageText } : {}),
             })
-            const body = (await response.json()) as {
-                error?: string
-                llmModel?: string
-            }
             if (response.status === 401) {
                 logout()
                 onClose()
                 return
             }
+            if (typeof body.textContent === 'string') {
+                const stored = body.textContent
+                setBaselineMessageText(stored)
+                setMessageText((current) =>
+                    normalizeMessageDraft(current) === draftTrimmed ? stored : current
+                )
+                setData((current) => {
+                    if (!current?.snapshot.message) return current
+                    return {
+                        ...current,
+                        snapshot: {
+                            ...current.snapshot,
+                            message: {
+                                ...current.snapshot.message,
+                                textContent: stored,
+                                textLength: stored.length,
+                                isEdited: true,
+                            },
+                        },
+                    }
+                })
+            }
             if (!response.ok) {
                 throw new Error(body.error || `Re-enqueue failed (${response.status})`)
             }
-            setRerunNote(`Queued (${body.llmModel ?? llmModel}), waiting for worker…`)
+            setRerunNote(
+                messageDirty
+                    ? `Saved and queued (${body.llmModel ?? llmModel}), waiting for worker…`
+                    : `Queued (${body.llmModel ?? llmModel}), waiting for worker…`
+            )
+            onReranRef.current?.()
             if (pollRef.current) clearInterval(pollRef.current)
             let attempts = 0
             pollRef.current = setInterval(() => {
@@ -1282,6 +1583,9 @@ function WorkflowDebugDialog({
     const models = data?.models ?? []
     const promptsDirty =
         classifierPrompt !== baselineClassifier || extractorPrompt !== baselineExtractor
+    const trimmedMessage = normalizeMessageDraft(messageText)
+    const messageDirty = trimmedMessage !== normalizeMessageDraft(baselineMessageText)
+    const messageTooShort = trimmedMessage.length < 30
 
     return createPortal(
         <div
@@ -1302,7 +1606,7 @@ function WorkflowDebugDialog({
                     <div>
                         <h3 id="workflow-debug-title">Workflow debug</h3>
                         <p className="workflow-debug-dialog-summary">
-                            Inspect workflow inputs and rerun this message
+                            Edit the original message, then rerun it
                         </p>
                     </div>
                     <button
@@ -1357,8 +1661,8 @@ function WorkflowDebugDialog({
                                 <div>
                                     <dt>textLength</dt>
                                     <dd>
-                                        {message.textLength}
-                                        {message.textLength < 30 && (
+                                        {trimmedMessage.length}
+                                        {messageTooShort && (
                                             <span className="workflow-debug-warn">
                                                 {' '}
                                                 (&lt;30, LLM will be skipped)
@@ -1393,8 +1697,33 @@ function WorkflowDebugDialog({
                         )}
 
                         <div className="workflow-debug-input">
-                            <div className="workflow-debug-input-label">LLM input (text_content)</div>
-                            <pre>{message?.textContent?.trim() || '—'}</pre>
+                            <div className="workflow-debug-runs-head">
+                                <div className="workflow-debug-input-label">
+                                    Original message
+                                    {messageDirty && (
+                                        <span className="workflow-debug-warn"> · edited</span>
+                                    )}
+                                </div>
+                                <button
+                                    type="button"
+                                    className="workflow-debug-refresh"
+                                    disabled={rerunning || !messageDirty}
+                                    onClick={() => setMessageText(baselineMessageText)}
+                                >
+                                    Reset
+                                </button>
+                            </div>
+                            <p className="workflow-debug-hint">
+                                Word fixes are saved on this message, then the rerun uses the edited
+                                text.
+                            </p>
+                            <textarea
+                                value={messageText}
+                                disabled={rerunning}
+                                rows={8}
+                                aria-label="Original message"
+                                onChange={(change) => setMessageText(change.target.value)}
+                            />
                         </div>
 
                         <label className="workflow-debug-model">
@@ -1513,10 +1842,14 @@ function WorkflowDebugDialog({
                             <button
                                 type="button"
                                 className="workflow-debug-submit"
-                                disabled={rerunning || !data.workflowsEnabled}
+                                disabled={
+                                    rerunning ||
+                                    !data.workflowsEnabled ||
+                                    (messageDirty && messageTooShort)
+                                }
                                 onClick={() => void handleRerun()}
                             >
-                                {rerunning ? 'Queuing…' : 'Rerun'}
+                                {rerunning ? 'Queuing…' : messageDirty ? 'Save & rerun' : 'Rerun'}
                             </button>
                         </div>
                     </>
@@ -2166,6 +2499,12 @@ export default function DailySiteReportView({
                         onReran={() => {
                             setReloadKey((key) => key + 1)
                             onLiveUpdate?.()
+                        }}
+                        onUpdated={(next) => {
+                            setSelected(next)
+                            setReports((current) =>
+                                current.map((item) => (item.id === next.id ? next : item))
+                            )
                         }}
                     />
                 )}
