@@ -349,10 +349,13 @@ class DailySiteReport(BaseModel):
     workers: List[str] = Field(
         description=(
             "Union of names from every 工人 / 司機 / 科文 / Foreman / 主管 / 管工 / 棚架工 "
-            "line in the message, not only the 工人 line. A standalone 主管： line is a "
-            "worker even when it appears above RSS and even when 工人/司機 also exist. "
-            "主管 is not RSS. Exclude only the RSS person. Plain names only, no role "
-            "prefixes. Do not omit 主管, 司機, or Foreman. One array item per person. "
+            "line in the message, not only the 工人 line. Positions such as 司機 are workers; "
+            "there is no separate driver field. A 司機 line directly under 工人 and directly "
+            "above 總共 / 共N人 / 開工人數 is still a worker — do not stop after 工人. "
+            "A standalone 主管： line is a worker even when it appears above RSS and even "
+            "when 工人/司機 also exist. 主管 is not RSS. Exclude only the RSS person. "
+            "Plain names only, no role prefixes. Do not omit 主管, 司機, or Foreman. "
+            "One array item per person. "
             "Chinese/CJK names have no internal space: '張偉明 林美玲' is two people. "
             "Latin names may keep an internal space: 'John Smith' is one person."
         )

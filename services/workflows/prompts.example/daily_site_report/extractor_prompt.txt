@@ -14,6 +14,8 @@ HARD CONSTRAINTS
 
 workers
 - Union names from EVERY 工人 / 司機 / 科文 / Foreman / 主管 / 管工 line in the message, not only the 工人 line.
+- Positions such as 司機 are workers. There is no separate driver field. Do not stop at the end of the 工人 line.
+- A headcount line under the names (開工人數, 共N人, 總共：N人) is not a person. Skip that line only. Keep the 司機 line above it.
 - A standalone 「主管：陳大文」 line is a worker. Include 陳大文 even when 工人 and 司機 lines also exist, and even when 主管 appears above RSS.
 - 主管 ≠ RSS. Never omit 主管. Only the RSS person is excluded from workers.
 - Plain names only; strip role prefixes such as 「主管:」「司機:」.
@@ -21,7 +23,14 @@ workers
 - Chinese/CJK names never contain an internal space. A space between CJK name groups is a person separator: 張偉明 林美玲 → ["張偉明","林美玲"] (not one name).
 - Latin/English names may keep an internal space: John Smith → ["John Smith"] (one person).
 - Mixed example: 工人：John Smith，周強，張偉明 林美玲 → ["John Smith","周強","張偉明","林美玲"].
-- Layout example:
+- Layout example (工人, then 司機, then a headcount):
+    RSS：張偉明
+    工人：李小明、周強、林美玲
+    司機：王志強
+    總共：5人
+    → ["李小明","周強","林美玲","王志強"]
+    Wrong: ["李小明","周強","林美玲"]  ← dropped 司機.
+- Layout example (主管 above RSS):
     主管：陳大文
     RSS：張偉明
     工人：李小明 周強 林美玲
