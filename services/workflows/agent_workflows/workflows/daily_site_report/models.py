@@ -104,6 +104,8 @@ def split_worker_names(names: List[str]) -> List[str]:
 
 
 _DATE_LABEL = re.compile(r"日期\s*[：:]")
+# A handwritten or typed zero in a date is often the letter O. Date digits only.
+_DATE_LETTER_O = "OoＯｏ"
 
 
 def parse_labeled_report_date(text: str) -> str | None:
@@ -131,13 +133,22 @@ def parse_labeled_report_date(text: str) -> str | None:
     return f"{year_n:04d}-{month_n:02d}-{day_n:02d}"
 
 
+def _date_digit(ch: str) -> str | None:
+    if ch.isdigit():
+        return ch
+    if ch in _DATE_LETTER_O:
+        return "0"
+    return None
+
+
 def _digits_until(s: str, stops: str) -> tuple[str | None, str]:
     digits: list[str] = []
     for i, ch in enumerate(s):
         if ch in stops:
             return ("".join(digits) or None, s[i + 1 :])
-        if ch.isdigit():
-            digits.append(ch)
+        digit = _date_digit(ch)
+        if digit is not None:
+            digits.append(digit)
         elif ch.isspace() or ch == "\u3000":
             continue
         elif digits:
@@ -149,8 +160,9 @@ def _leading_digits(s: str) -> str:
     digits: list[str] = []
     started = False
     for ch in s:
-        if ch.isdigit():
-            digits.append(ch)
+        digit = _date_digit(ch)
+        if digit is not None:
+            digits.append(digit)
             started = True
         elif ch.isspace() or ch == "\u3000":
             continue
@@ -160,6 +172,7 @@ def _leading_digits(s: str) -> str:
 
 
 _FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+_DATE_LETTER_O_TO_ZERO = str.maketrans({ch: "0" for ch in _DATE_LETTER_O})
 # Longer label first so 累計開坑長度 is not cut short by 累計開坑.
 _METRIC_LABELS: tuple[tuple[str, re.Pattern[str], bool], ...] = (
     ("trench_length", re.compile(r"累計(?:開坑長度|開坑|坑數)\s*[：:]"), False),
@@ -298,7 +311,7 @@ def normalize_report_date(value: object) -> str:
     """
     if value is None:
         return ""
-    text = str(value).strip().translate(_FULLWIDTH_DIGITS)
+    text = str(value).strip().translate(_FULLWIDTH_DIGITS).translate(_DATE_LETTER_O_TO_ZERO)
     if not text:
         return ""
     iso = _calendar_iso_date(text)
@@ -322,6 +335,8 @@ class DailySiteReport(BaseModel):
             "Scan left to right: all digits until 年 are YEAR, until 月 are MONTH, "
             "until 日/號/号 are DAY. Spaces or line breaks between digits JOIN "
             "(do not apply worker name-splitting to dates). "
+            "In this date only, the letter O or o (any case, halfwidth or fullwidth) "
+            "is the digit 0; keep collecting, do not end the number there. "
             "DAY is every digit before 日/號/号, never only the first: "
             "2026年09月1 6日（星期三） → 2026-09-16 (not 2026-09-01); "
             "1 2號 → day 12 (not 01); 1 5號 → day 15 (not 01). "
