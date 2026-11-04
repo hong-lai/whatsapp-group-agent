@@ -7,10 +7,8 @@ import {
     type WASocket,
 } from '@whiskeysockets/baileys'
 import {
-    getAppSetting,
     getGroupMessageAfter,
     getLatestGroupMessage,
-    getLatestGroupMessageBefore,
     getOldestGroupMessage,
     listExhaustedMediaDownloadIds,
     listMissingMediaMessages,
@@ -24,57 +22,64 @@ import { config, matchesGroupPattern } from './config.js'
 import { fileTypes } from './media.js'
 import { settleDelayMs, waitHistoryRequest } from './rateLimit.js'
 
-// v2: v1 could be marked done while catchup.no_anchor left groups unfinished,
-// so groups that still have missing files get one more walk.
+/**
+ * One backward walk per group.
+ *
+ * Baileys only returns messages older than a real message key. After the
+ * phone's history burst settles, each tracked group gets a single walk:
+ *
+ *   fill   — newest head is ahead of stored messages (a hole or a reconnect)
+ *   extend — page back from the oldest stored message toward the 2-day floor
+ *   media  — page across rows that were saved with no file
+ *
+ * After that walk, a live notify is saved and does not start a history request.
+ * A chat head that never shows up as a notify means WhatsApp moved the head
+ * without delivering the messages in between, so one fill runs back to the
+ * stored neighbor. Reconnect and history batches still fill those gaps too.
+ * Empty on-demand replies have no group id. An empty reply is applied only
+ * when one request is in flight, which is the only time it names a group.
+ * That anchor is retried once. A second empty reply ends the walk, and the
+ * same message id is not requested again for the rest of the session.
+ */
+
+// v2: v1 could be marked done while no-anchor left groups unfinished.
 const MEDIA_GAP_BACKFILL_KEY = 'media_gap_backfill_v2'
-const MEDIA_GAP_REASON = 'media-gap'
-/** Ids already paged in this process. Reconnects must not start the walk again; a new process can. */
+const AWAITING_TIMEOUT_MS = 90_000
+const BULK_HISTORY_WAIT_MS = 180_000
+const ADJACENT_SECONDS = 2
+/** Chat head waits this long for the same id to arrive as a live notify. */
+const HEAD_CONFIRM_MS = 5_000
+/** Extra attempt after the first empty on-demand reply. A second empty ends the walk. */
+const EMPTY_REPLY_RETRIES = 1
+const LIVE_IDS_PER_GROUP = 50
+const RETRY_MEDIA_LATER = new Set(['awaiting-timeout', 'request-failed', 'no-anchor', 'no-target'])
+
+/** Ids already paged in this process. A new process may walk them again. */
 const pagedMissingMediaIds = new Set<string>()
 
-type MediaGapMessage = {
-    messageId: string
-    timestamp: number
-}
+type WalkKind = 'extend' | 'fill' | 'media'
 
-type MediaGapTarget = {
-    oldestTs: number
-    newestTs: number
-    missingCount: number
-    messages: MediaGapMessage[]
-    newestMessageId: string
-    newestSenderJid: string | null
-}
-
-type MediaGapBackfillState = {
-    done: boolean
-    finishedGroups: string[]
-}
-
-function parseMediaGapState(value: unknown): MediaGapBackfillState {
-    if (!value || typeof value !== 'object') return { done: false, finishedGroups: [] }
-    const record = value as { done?: unknown; finishedGroups?: unknown }
-    const finishedGroups = Array.isArray(record.finishedGroups)
-        ? record.finishedGroups.filter((jid): jid is string => typeof jid === 'string')
-        : []
-    return { done: record.done === true, finishedGroups }
-}
-
-function mediaGapMessageTypes(): string[] {
-    return Object.keys(fileTypes).filter((type) => type !== 'stickerMessage')
-}
-
-function isBackfillReason(reason: string): boolean {
-    return reason === 'tracked-backfill' || reason === 'on_demand_continue'
-}
-
-const AWAITING_TIMEOUT_MS = 90_000
-
-type CatchupJob = {
+type Walk = {
     groupJid: string
+    kind: WalkKind
     key: WAMessageKey
     timestamp: number
-    reason: string
+    /** Non-empty pages received for this walk. */
+    pages: number
+    /** Requests sent. Caps timeouts and errors. Empty replies use `emptyRetries` instead. */
+    sends: number
+    emptyRetries: number
+    /** Hole fill: stop when a page reaches the stored message on the far side. */
+    stopAt?: number
 }
+
+type MediaTarget = {
+    oldestTs: number
+    missingCount: number
+    messages: { messageId: string; timestamp: number }[]
+}
+
+type Anchor = { key: WAMessageKey; timestamp: number }
 
 function unixSeconds(value: unknown): number {
     const n = Number(value)
@@ -113,13 +118,8 @@ function isBulkHistorySync(syncType: unknown): boolean {
     )
 }
 
-function shouldSettleOnSyncStatus(syncType: unknown): boolean {
-    const n = historySyncNumber(syncType)
-    return (
-        n === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
-        n === proto.HistorySync.HistorySyncType.FULL ||
-        n === proto.HistorySync.HistorySyncType.RECENT
-    )
+function mediaMessageTypes(): string[] {
+    return Object.keys(fileTypes).filter((type) => type !== 'stickerMessage')
 }
 
 export function asCatchupMessage(value: unknown): WAMessage | undefined {
@@ -133,27 +133,23 @@ export function asCatchupMessage(value: unknown): WAMessage | undefined {
 }
 
 export function createCatchup(sock: WASocket, opts: { existingSession?: boolean } = {}) {
-    const pages = new Map<string, number>()
-    const jobs = new Map<string, CatchupJob>()
-    const awaitingOnDemand = new Set<string>()
-    const pendingPdoOrder: string[] = []
-    const backfillFinished = new Set<string>()
-    const pdoAttempts = new Map<string, number>()
-    const fetchAttempts = new Map<string, number>()
-    const awaitingSince = new Map<string, number>()
-    const chatHeads = new Map<string, { key: WAMessageKey; timestamp: number }>()
+    const pending = new Map<string, Walk>()
+    const awaiting = new Map<string, Walk>()
+    const awaitingTimers = new Map<string, ReturnType<typeof setTimeout>>()
+    const backfillDone = new Set<string>()
+    const deferredHoles = new Map<string, { key: WAMessageKey; timestamp: number; stopAt: number }>()
+    const deepPages = new Map<string, number>()
+    const chatHeads = new Map<string, Anchor>()
+    const liveMessageIds = new Map<string, string[]>()
+    const headConfirms = new Map<string, { timer: ReturnType<typeof setTimeout>; messageId: string }>()
     const storedAtConnect = new Map<string, number>()
-    const mediaGapTargets = new Map<string, MediaGapTarget>()
-    const mediaGapFinished = new Set<string>()
-    const mediaGapAwaiting = new Set<string>()
-    const mediaGapOrder: string[] = []
-    const mediaGapPages = new Map<string, number>()
-    const mediaGapEmpty = new Map<string, number>()
-    const mediaGapLastJob = new Map<string, CatchupJob>()
-    const mediaGapTimers = new Map<string, ReturnType<typeof setTimeout>>()
-    const mediaGapEndings = new Map<string, string>()
-    let mediaGapPersist: Promise<void> = Promise.resolve()
-    let mediaGapStartPromise: Promise<void> | undefined
+    const mediaTargets = new Map<string, MediaTarget>()
+    const mediaClaimed = new Set<string>()
+    const mediaEndings = new Map<string, string>()
+    /** Anchors WhatsApp already answered with an empty on-demand sync. */
+    const emptyAnchors = new Set<string>()
+    let mediaPersist: Promise<void> = Promise.resolve()
+    let exhaustedTask: Promise<Set<string>> | undefined
     let trackedJids: string[] = []
     let seenBulkHistory = false
     const existingSession = Boolean(opts.existingSession)
@@ -163,63 +159,23 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
     let settleTimer: ReturnType<typeof setTimeout> | undefined
     let stopped = false
 
-    function notifyFloor(): number {
-        return Math.floor(Date.now() / 1000) - config.catchupWindowSeconds
-    }
-
-    function backfillFloor(): number {
+    function deepFloor(): number {
         return Math.floor(Date.now() / 1000) - config.catchupBackfillSeconds
     }
 
-    function pageLimit(reason: string): number {
-        return isBackfillReason(reason) ? config.catchupBackfillMaxPages : config.catchupMaxPages
+    function pageBudget(walk: Walk): number {
+        return walk.kind === 'media' ? config.mediaGapMaxPages : config.catchupBackfillMaxPages
+    }
+
+    function exhaustedSet(): Promise<Set<string>> {
+        exhaustedTask ??= listExhaustedMediaDownloadIds().then((ids) => new Set(ids))
+        return exhaustedTask
     }
 
     async function isTrackedGroup(groupJid: string): Promise<boolean> {
         if (trackedJids.includes(groupJid)) return true
         const cached = await getGroupMetadata(groupJid)
         return cached ? matchesGroupPattern(cached.subject) : false
-    }
-
-    function clearAwaiting(groupJid: string): void {
-        awaitingOnDemand.delete(groupJid)
-        awaitingSince.delete(groupJid)
-        const index = pendingPdoOrder.indexOf(groupJid)
-        if (index >= 0) pendingPdoOrder.splice(index, 1)
-    }
-
-    function finishBackfill(groupJid: string, why: string): void {
-        clearAwaiting(groupJid)
-        fetchAttempts.delete(groupJid)
-        backfillFinished.add(groupJid)
-        log.info({ groupJid, why, backfillUntil: backfillFloor() }, 'catchup.backfill_complete')
-        maybeStartMediaGap()
-    }
-
-    function rememberPendingPdo(groupJid: string): void {
-        if (!awaitingOnDemand.has(groupJid)) pendingPdoOrder.push(groupJid)
-        awaitingOnDemand.add(groupJid)
-        awaitingSince.set(groupJid, Date.now())
-    }
-
-    function rememberChatHead(m: WAMessage): void {
-        const groupJid = m.key.remoteJid
-        if (!groupJid || !isJidGroup(groupJid) || !m.key.id) return
-        const timestamp = unixSeconds(m.messageTimestamp)
-        const previous = chatHeads.get(groupJid)
-        if (!previous || timestamp >= previous.timestamp) {
-            chatHeads.set(groupJid, { key: m.key, timestamp })
-        }
-    }
-
-    function releaseStaleAwaiting(): void {
-        const now = Date.now()
-        for (const groupJid of [...awaitingOnDemand]) {
-            const since = awaitingSince.get(groupJid) ?? now
-            if (now - since < AWAITING_TIMEOUT_MS) continue
-            log.warn({ groupJid, waitedMs: now - since }, 'catchup.awaiting_timeout')
-            clearAwaiting(groupJid)
-        }
     }
 
     function historyKeyFromStored(groupJid: string, stored: LatestGroupMessage): WAMessageKey {
@@ -233,6 +189,16 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         }
     }
 
+    function rememberChatHead(m: WAMessage): void {
+        const groupJid = m.key.remoteJid
+        if (!groupJid || !isJidGroup(groupJid) || !m.key.id) return
+        const timestamp = unixSeconds(m.messageTimestamp)
+        const previous = chatHeads.get(groupJid)
+        if (!previous || timestamp >= previous.timestamp) {
+            chatHeads.set(groupJid, { key: m.key, timestamp })
+        }
+    }
+
     function clearSettleTimer(): void {
         if (settleTimer) {
             clearTimeout(settleTimer)
@@ -240,47 +206,177 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         }
     }
 
-    function isReconnectSession(): boolean {
-        return existingSession
+    function clearHeadConfirms(): void {
+        for (const confirm of headConfirms.values()) clearTimeout(confirm.timer)
+        headConfirms.clear()
+    }
+
+    function rememberLiveMessage(groupJid: string, messageId: string): void {
+        const ids = liveMessageIds.get(groupJid) ?? []
+        if (!ids.includes(messageId)) ids.push(messageId)
+        while (ids.length > LIVE_IDS_PER_GROUP) ids.shift()
+        liveMessageIds.set(groupJid, ids)
+        const confirm = headConfirms.get(groupJid)
+        if (confirm?.messageId === messageId) {
+            clearTimeout(confirm.timer)
+            headConfirms.delete(groupJid)
+        }
+    }
+
+    function wasLiveMessage(groupJid: string, messageId: string): boolean {
+        return liveMessageIds.get(groupJid)?.includes(messageId) ?? false
+    }
+
+    function clearAwaiting(groupJid: string): void {
+        awaiting.delete(groupJid)
+        const timer = awaitingTimers.get(groupJid)
+        if (timer) clearTimeout(timer)
+        awaitingTimers.delete(groupJid)
+    }
+
+    function markAwaiting(walk: Walk): void {
+        if (pending.get(walk.groupJid) === walk) pending.delete(walk.groupJid)
+        awaiting.set(walk.groupJid, walk)
+        const existing = awaitingTimers.get(walk.groupJid)
+        if (existing) clearTimeout(existing)
+        awaitingTimers.set(
+            walk.groupJid,
+            setTimeout(() => {
+                awaitingTimers.delete(walk.groupJid)
+                if (stopped || !awaiting.has(walk.groupJid)) return
+                if (walk.kind === 'media') {
+                    log.warn({ groupJid: walk.groupJid }, 'media_gap.awaiting_timeout')
+                    finishMedia(walk.groupJid, 'awaiting-timeout')
+                    return
+                }
+                log.warn({ groupJid: walk.groupJid, waitedMs: AWAITING_TIMEOUT_MS }, 'catchup.awaiting_timeout')
+                clearAwaiting(walk.groupJid)
+                if (walk.stopAt !== undefined && walk.sends < pageBudget(walk)) enqueue(walk)
+            }, AWAITING_TIMEOUT_MS)
+        )
+    }
+
+    function anchorToken(groupJid: string, messageId: string): string {
+        return `${groupJid}\0${messageId}`
+    }
+
+    function rememberEmptyAnchor(walk: Walk): void {
+        if (walk.key.id) emptyAnchors.add(anchorToken(walk.groupJid, walk.key.id))
+    }
+
+    function forgetEmptyAnchor(walk: Walk): void {
+        if (walk.key.id) emptyAnchors.delete(anchorToken(walk.groupJid, walk.key.id))
+    }
+
+    function isEmptyAnchor(walk: Walk): boolean {
+        return Boolean(walk.key.id && emptyAnchors.has(anchorToken(walk.groupJid, walk.key.id)))
+    }
+
+    function stopEmptyAnchor(walk: Walk): void {
+        log.info(
+            { groupJid: walk.groupJid, messageId: walk.key.id, kind: walk.kind },
+            'catchup.skip_empty_anchor'
+        )
+        if (walk.kind === 'media') {
+            finishMedia(walk.groupJid, 'empty-on-demand')
+            return
+        }
+        if (walk.stopAt !== undefined) {
+            closeHole(walk.groupJid, 'empty-on-demand')
+            return
+        }
+        if (!backfillDone.has(walk.groupJid)) finishBackfill(walk.groupJid, 'empty-on-demand')
+    }
+
+    function enqueue(walk: Walk): void {
+        if (stopped || !walk.key.id || awaiting.has(walk.groupJid)) return
+        // A fresh walk of an anchor that already came back empty would burn the
+        // page budget. The one allowed retry keeps emptyRetries > 0.
+        if (walk.emptyRetries === 0 && isEmptyAnchor(walk)) {
+            stopEmptyAnchor(walk)
+            return
+        }
+        if (walk.pages >= pageBudget(walk) || walk.sends >= pageBudget(walk)) {
+            stopForBudget(walk)
+            return
+        }
+        if (walk.kind !== 'media' && walk.timestamp <= deepFloor()) return
+        pending.set(walk.groupJid, walk)
+        if (allowingRequests) void drain()
+    }
+
+    function stopForBudget(walk: Walk): void {
+        if (walk.kind === 'media') {
+            finishMedia(walk.groupJid, 'page-limit')
+            return
+        }
+        if (walk.stopAt !== undefined) {
+            closeHole(walk.groupJid, 'page-limit')
+            return
+        }
+        if (!backfillDone.has(walk.groupJid)) finishBackfill(walk.groupJid, 'page-limit')
+    }
+
+    function finishBackfill(groupJid: string, why: string): void {
+        if (awaiting.get(groupJid)?.kind !== 'media') clearAwaiting(groupJid)
+        if (!backfillDone.has(groupJid)) {
+            backfillDone.add(groupJid)
+            log.info({ groupJid, why, backfillUntil: deepFloor() }, 'catchup.backfill_complete')
+        }
+        if (startDeferredHole(groupJid)) return
+        if (!pending.has(groupJid) && !awaiting.has(groupJid)) scheduleMedia(groupJid)
+    }
+
+    function closeHole(groupJid: string, why: string): void {
+        if (awaiting.get(groupJid)?.stopAt !== undefined) clearAwaiting(groupJid)
+        if (pending.get(groupJid)?.stopAt !== undefined) pending.delete(groupJid)
+        log.info({ groupJid, why }, 'catchup.hole_closed')
+        if (!backfillDone.has(groupJid)) {
+            finishBackfill(groupJid, why)
+            return
+        }
+        if (startDeferredHole(groupJid)) return
+        if (!pending.has(groupJid) && !awaiting.has(groupJid)) scheduleMedia(groupJid)
+    }
+
+    function startDeferredHole(groupJid: string): boolean {
+        const hole = deferredHoles.get(groupJid)
+        if (!hole || awaiting.has(groupJid)) return false
+        deferredHoles.delete(groupJid)
+        enqueue(messageWalk(groupJid, 'fill', hole.key, hole.timestamp, 0, hole.stopAt))
+        return pending.has(groupJid)
+    }
+
+    function rememberHole(groupJid: string, key: WAMessageKey, timestamp: number, stopAt: number): void {
+        const existing = deferredHoles.get(groupJid)
+        if (existing && existing.timestamp >= timestamp) return
+        deferredHoles.set(groupJid, { key, timestamp, stopAt })
     }
 
     function scheduleSettle(reason: string): void {
         if (stopped) return
         const keepDraining =
-            isReconnectSession() &&
-            (reason === 'waiting-bulk-history' || reason === 'waiting-chat-heads')
+            existingSession && (reason === 'waiting-bulk-history' || reason === 'waiting-chat-heads')
         if (!keepDraining) allowingRequests = false
         clearSettleTimer()
         const waitMs = settleDelayMs()
-        log.debug({ waitMs, reason, pending: jobs.size }, 'catchup.settling')
+        log.debug({ waitMs, reason, pending: pending.size }, 'catchup.settling')
         settleTimer = setTimeout(() => {
             void (async () => {
                 if (stopped) return
                 allowingRequests = true
-                await enqueueTrackedBackfill()
-                if (reason !== 'waiting-bulk-history' && reason !== 'waiting-chat-heads') {
-                    log.info(
-                        {
-                            pending: jobs.size,
-                            reason,
-                            backfillUntil: backfillFloor(),
-                            backfillSeconds: config.catchupBackfillSeconds,
-                        },
-                        'catchup.ready'
-                    )
-                }
-                void drain()
+                await planTracked(reason)
             })()
         }, waitMs)
         if (keepDraining && allowingRequests) void drain()
     }
 
-    async function enqueueTrackedBackfill(): Promise<void> {
-        if (!seenBulkHistory && Date.now() - startedAt > 180_000) {
+    async function planTracked(settleReason: string): Promise<void> {
+        if (!seenBulkHistory && Date.now() - startedAt > BULK_HISTORY_WAIT_MS) {
             seenBulkHistory = true
             log.info('catchup.bulk_history_timeout')
         }
-        if (!seenBulkHistory && isReconnectSession()) {
+        if (!seenBulkHistory && existingSession) {
             seenBulkHistory = true
             log.info('catchup.reconnect_skip_bulk_wait')
         }
@@ -288,140 +384,177 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             scheduleSettle('waiting-bulk-history')
             return
         }
-        releaseStaleAwaiting()
-        const until = backfillFloor()
+        const until = deepFloor()
         let waitingForHeads = false
-        for (const groupJid of trackedJids) {
-            if (backfillFinished.has(groupJid) || jobs.has(groupJid) || awaitingOnDemand.has(groupJid)) {
+        for (const groupJid of [...trackedJids]) {
+            if (backfillDone.has(groupJid)) {
+                scheduleMedia(groupJid)
                 continue
             }
-            const attempts = pdoAttempts.get(groupJid) ?? 0
-            if (attempts >= config.catchupBackfillMaxPages) {
+            if (pending.has(groupJid) || awaiting.has(groupJid)) continue
+            if ((deepPages.get(groupJid) ?? 0) >= config.catchupBackfillMaxPages) {
                 finishBackfill(groupJid, 'page-limit')
                 continue
             }
-            const page = pages.get(groupJid) ?? 0
-            if (page >= config.catchupBackfillMaxPages) {
-                finishBackfill(groupJid, 'page-limit')
-                continue
-            }
-            const oldest = await getOldestGroupMessage(groupJid)
-            const latest = await getLatestGroupMessage(groupJid)
-            const head = chatHeads.get(groupJid)
-            const knownAtConnect = storedAtConnect.get(groupJid) ?? 0
-            const reconnectHole =
-                knownAtConnect > 0 &&
-                head != null &&
-                Boolean(head.key.id) &&
-                head.timestamp > until &&
-                head.timestamp > knownAtConnect + 2
-            if (reconnectHole && head?.key.id) {
-                enqueue({
-                    groupJid,
-                    key: head.key,
-                    timestamp: head.timestamp,
-                    reason: 'tracked-backfill',
-                })
-                continue
-            }
-            if (!oldest?.messageId) {
-                if (head?.key.id && head.timestamp > until) {
-                    enqueue({
-                        groupJid,
-                        key: head.key,
-                        timestamp: head.timestamp,
-                        reason: 'tracked-backfill',
-                    })
-                } else if (head?.key.id || Date.now() - startedAt >= 180_000 || !isReconnectSession()) {
-                    // No stored message and no recent chat head. Finish once so this group
-                    // does not block the one-time missing-media walk on every settle.
-                    log.warn({ groupJid, hasHead: Boolean(head?.key.id) }, 'catchup.no_anchor')
-                    finishBackfill(groupJid, 'no-anchor')
-                } else {
-                    waitingForHeads = true
-                }
-                continue
-            }
-            if (oldest.timestamp <= until) {
-                if (latest && latest.timestamp < until) {
-                    finishBackfill(groupJid, 'inactive')
-                    continue
-                }
-                if (head?.key.id || Date.now() - startedAt >= 180_000 || !isReconnectSession()) {
-                    finishBackfill(groupJid, 'already-covers-window')
-                    continue
-                }
-                waitingForHeads = true
-                continue
-            }
-            enqueue({
-                groupJid,
-                key: historyKeyFromStored(groupJid, oldest),
-                timestamp: oldest.timestamp,
-                reason: 'tracked-backfill',
-            })
+            const decision = await decideBackfill(groupJid, until)
+            if (decision === 'wait-head') waitingForHeads = true
         }
-        if (waitingForHeads) scheduleSettle('waiting-chat-heads')
+        if (waitingForHeads) {
+            scheduleSettle('waiting-chat-heads')
+            return
+        }
+        log.info(
+            {
+                pending: pending.size,
+                reason: settleReason,
+                backfillUntil: until,
+                backfillSeconds: config.catchupBackfillSeconds,
+            },
+            'catchup.ready'
+        )
+        void drain()
     }
 
-    async function requestFromAnchor(job: CatchupJob): Promise<'done' | 'retry'> {
-        if (job.reason === MEDIA_GAP_REASON) return requestMediaGap(job)
-        const { groupJid, key, timestamp, reason } = job
-        const outsideNotifyWindow = !isBackfillReason(reason) && timestamp < notifyFloor()
-        const page = pages.get(groupJid) ?? 0
-        if (!key.id || outsideNotifyWindow) return 'done'
-        if (page >= pageLimit(reason)) return 'done'
-        if (isBackfillReason(reason) && timestamp <= backfillFloor()) return 'done'
-
-        try {
-            // The anchor is often the message that just revealed the hole, and it is
-            // already stored by the time this runs. Compare the row before it.
-            const predecessor = await getLatestGroupMessageBefore(groupJid, timestamp)
-            const adjacent = predecessor != null && timestamp - predecessor.timestamp <= 2
-            if (adjacent && !isBackfillReason(reason)) return 'done'
-
-            const waitedMs = await waitHistoryRequest()
-            if (stopped) return 'done'
-            if (!allowingRequests) return 'retry'
-
-            await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
-            fetchAttempts.delete(groupJid)
-            if (isBackfillReason(reason)) {
-                rememberPendingPdo(groupJid)
-                if (reason === 'tracked-backfill') {
-                    pdoAttempts.set(groupJid, (pdoAttempts.get(groupJid) ?? 0) + 1)
-                }
-            } else {
-                pages.set(groupJid, page + 1)
+    /** Structural backfill from what is already stored. Holes from new messages are separate. */
+    async function decideBackfill(groupJid: string, until: number): Promise<'wait-head' | 'planned'> {
+        const head = chatHeads.get(groupJid)
+        const oldest = await getOldestGroupMessage(groupJid)
+        const latest = await getLatestGroupMessage(groupJid)
+        const known = storedAtConnect.get(groupJid) ?? 0
+        const headAheadOfConnect = Boolean(
+            known > 0 && head?.key.id && head.timestamp > until && head.timestamp > known + ADJACENT_SECONDS
+        )
+        if (headAheadOfConnect && head?.key.id) {
+            enqueue(messageWalk(groupJid, 'fill', head.key, head.timestamp, deepPages.get(groupJid) ?? 0))
+            return 'planned'
+        }
+        if (!oldest?.messageId) {
+            if (head?.key.id && head.timestamp > until) {
+                enqueue(
+                    messageWalk(groupJid, 'fill', head.key, head.timestamp, deepPages.get(groupJid) ?? 0)
+                )
+                return 'planned'
             }
-            log.info(
-                {
-                    groupJid,
-                    messageId: key.id,
-                    page: page + 1,
-                    reason,
-                    waitedMs,
-                    backfillUntil: backfillFloor(),
-                    fromMe: key.fromMe,
-                },
-                'catchup.history_requested'
+            if (head?.key.id || Date.now() - startedAt >= BULK_HISTORY_WAIT_MS || !existingSession) {
+                log.warn({ groupJid, hasHead: Boolean(head?.key.id) }, 'catchup.no_anchor')
+                finishBackfill(groupJid, 'no-anchor')
+                return 'planned'
+            }
+            return 'wait-head'
+        }
+        if (oldest.timestamp <= until) {
+            if (latest && latest.timestamp < until) {
+                finishBackfill(groupJid, 'inactive')
+                return 'planned'
+            }
+            if (head?.key.id || Date.now() - startedAt >= BULK_HISTORY_WAIT_MS || !existingSession) {
+                finishBackfill(groupJid, 'already-covers-window')
+                return 'planned'
+            }
+            return 'wait-head'
+        }
+        enqueue(
+            messageWalk(
+                groupJid,
+                'extend',
+                historyKeyFromStored(groupJid, oldest),
+                oldest.timestamp,
+                deepPages.get(groupJid) ?? 0
             )
-            return 'done'
+        )
+        return 'planned'
+    }
+
+    function messageWalk(
+        groupJid: string,
+        kind: 'extend' | 'fill',
+        key: WAMessageKey,
+        timestamp: number,
+        pages: number,
+        stopAt?: number
+    ): Walk {
+        const walk: Walk = {
+            groupJid,
+            kind,
+            key,
+            timestamp,
+            pages,
+            sends: 0,
+            emptyRetries: 0,
+        }
+        if (stopAt !== undefined) walk.stopAt = stopAt
+        return walk
+    }
+
+    async function send(walk: Walk): Promise<'sent' | 'retry' | 'kept' | 'drop'> {
+        if (!walk.key.id) {
+            if (walk.kind === 'media') finishMedia(walk.groupJid, 'no-anchor')
+            return 'drop'
+        }
+        if (walk.pages >= pageBudget(walk) || walk.sends >= pageBudget(walk)) {
+            stopForBudget(walk)
+            return 'drop'
+        }
+        if (walk.kind !== 'media' && walk.timestamp <= deepFloor()) {
+            finishBackfill(walk.groupJid, 'reached-window')
+            return 'drop'
+        }
+        try {
+            const waitedMs = await waitHistoryRequest()
+            if (stopped) return 'drop'
+            if (!allowingRequests) return 'retry'
+            await sock.fetchMessageHistory(config.catchupPageSize, walk.key, walk.timestamp * 1000)
+            walk.sends += 1
+            markAwaiting(walk)
+            if (walk.kind === 'media') {
+                const target = mediaTargets.get(walk.groupJid)
+                log.info(
+                    {
+                        groupJid: walk.groupJid,
+                        messageId: walk.key.id,
+                        page: walk.pages + 1,
+                        waitedMs,
+                        oldestTarget: target?.oldestTs,
+                        missing: target?.missingCount,
+                    },
+                    'media_gap.history_requested'
+                )
+            } else {
+                log.info(
+                    {
+                        groupJid: walk.groupJid,
+                        messageId: walk.key.id,
+                        page: walk.pages + 1,
+                        kind: walk.kind,
+                        waitedMs,
+                        backfillUntil: deepFloor(),
+                        fromMe: walk.key.fromMe,
+                    },
+                    'catchup.history_requested'
+                )
+            }
+            return 'sent'
         } catch (err) {
-            const attempts = (fetchAttempts.get(groupJid) ?? 0) + 1
-            fetchAttempts.set(groupJid, attempts)
+            walk.sends += 1
+            if (walk.kind === 'media') {
+                log.warn({ err, groupJid: walk.groupJid, messageId: walk.key.id }, 'media_gap.history_request_failed')
+                finishMedia(walk.groupJid, 'request-failed')
+                return 'drop'
+            }
             log.warn(
-                { err, groupJid, messageId: key.id, reason, attempts },
+                { err, groupJid: walk.groupJid, messageId: walk.key.id, kind: walk.kind, sends: walk.sends },
                 'catchup.history_request_failed'
             )
-            return 'done'
+            if (walk.sends >= pageBudget(walk)) {
+                finishBackfill(walk.groupJid, 'page-limit')
+                return 'drop'
+            }
+            // A newer walk may have replaced this one while the request was in flight.
+            if (pending.get(walk.groupJid) !== walk) return 'drop'
+            pending.delete(walk.groupJid)
+            pending.set(walk.groupJid, walk)
+            return 'kept'
         }
-    }
-
-    function nextJob(): CatchupJob | undefined {
-        const pending = [...jobs.values()]
-        if (pending.length === 0) return undefined
-        return pending.find((job) => job.reason === MEDIA_GAP_REASON) ?? pending[0]
     }
 
     async function drain(): Promise<void> {
@@ -429,80 +562,182 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         draining = true
         try {
             while (!stopped && allowingRequests) {
-                const next = nextJob()
+                const next = pending.values().next().value
                 if (!next) break
-                if (next.reason !== MEDIA_GAP_REASON && mediaGapAwaiting.size > 0) break
-                const result = await requestFromAnchor(next)
+                const result = await send(next)
                 if (result === 'retry') break
-                if (jobs.get(next.groupJid) === next) jobs.delete(next.groupJid)
+                if (result === 'kept') continue
+                if (pending.get(next.groupJid) === next) pending.delete(next.groupJid)
             }
         } finally {
             draining = false
-            if (!stopped && allowingRequests && jobs.size > 0) {
-                const waitingOnMediaGap =
-                    mediaGapAwaiting.size > 0 &&
-                    ![...jobs.values()].some((job) => job.reason === MEDIA_GAP_REASON)
-                if (!waitingOnMediaGap) void drain()
-            }
-            if (
-                !stopped &&
-                allowingRequests &&
-                jobs.size === 0 &&
-                awaitingOnDemand.size === 0 &&
-                mediaGapAwaiting.size === 0
-            ) {
-                maybeStartMediaGap()
+            if (!stopped && allowingRequests && pending.size > 0) void drain()
+            if (!stopped && allowingRequests && pending.size === 0 && awaiting.size === 0) {
+                for (const groupJid of trackedJids) scheduleMedia(groupJid)
             }
         }
     }
 
-    function enqueue(job: CatchupJob): void {
-        if (stopped || !job.key.id) return
-        if (job.reason === MEDIA_GAP_REASON) {
-            const page = mediaGapPages.get(job.groupJid) ?? 0
-            if (page >= config.mediaGapMaxPages) {
-                finishMediaGap(job.groupJid, 'page-limit')
-                return
-            }
-            jobs.set(job.groupJid, job)
-            if (allowingRequests) void drain()
+    function onEmptyDemand(): void {
+        // An empty history reply carries no group. With several requests in
+        // flight it cannot be attributed, so leave them for a real page or the timeout.
+        if (awaiting.size !== 1) {
+            if (awaiting.size > 1) log.warn({ awaiting: awaiting.size }, 'catchup.empty_on_demand_ambiguous')
             return
         }
-        if (mediaGapTargets.has(job.groupJid)) return
-        if (!isBackfillReason(job.reason) && job.timestamp < notifyFloor()) return
-        if (isBackfillReason(job.reason) && job.timestamp <= backfillFloor()) return
-        const page = pages.get(job.groupJid) ?? 0
-        if (page >= pageLimit(job.reason)) return
-        jobs.set(job.groupJid, job)
-        if (allowingRequests) void drain()
+        const oldest = awaiting.entries().next().value
+        if (!oldest) return
+        const [groupJid, walk] = oldest
+        clearAwaiting(groupJid)
+        rememberEmptyAnchor(walk)
+        // A real page already arrived, so this empty reply is the end of history,
+        // not a stuck anchor. Do not spend another request on it.
+        const endOfHistory = walk.kind !== 'media' && walk.pages > 0
+        if (!endOfHistory) {
+            walk.emptyRetries += 1
+            if (walk.emptyRetries <= EMPTY_REPLY_RETRIES) {
+                log.warn(
+                    { groupJid, messageId: walk.key.id, kind: walk.kind, emptyRetries: walk.emptyRetries },
+                    walk.kind === 'media' ? 'media_gap.empty_on_demand_retry' : 'catchup.empty_on_demand_retry'
+                )
+                enqueue(walk)
+                return
+            }
+        }
+        log.info(
+            { groupJid, messageId: walk.key.id, kind: walk.kind, pages: walk.pages },
+            'catchup.empty_on_demand'
+        )
+        if (walk.kind === 'media') {
+            finishMedia(groupJid, 'empty-on-demand')
+            return
+        }
+        if (walk.stopAt !== undefined) closeHole(groupJid, 'empty-on-demand')
+        else finishBackfill(groupJid, 'empty-on-demand')
+    }
+
+    function continueFromPage(walk: Walk, oldest: WAMessage | undefined, count: number): void {
+        forgetEmptyAnchor(walk)
+        const oldestTs = oldest ? unixSeconds(oldest.messageTimestamp) : 0
+        if (walk.kind === 'media') {
+            continueMedia(walk, oldest, oldestTs, count)
+            return
+        }
+        walk.pages += 1
+        if (walk.stopAt === undefined && !backfillDone.has(walk.groupJid)) {
+            deepPages.set(walk.groupJid, walk.pages)
+        }
+        if (!oldest?.key.id) {
+            if (walk.stopAt !== undefined) closeHole(walk.groupJid, 'no-anchor')
+            else pokeMedia(walk.groupJid)
+            return
+        }
+        const lastPage = count < config.catchupPageSize
+        const reachedWindow = oldestTs <= deepFloor()
+        if (walk.stopAt !== undefined) {
+            const reachedStored = oldestTs <= walk.stopAt + ADJACENT_SECONDS
+            if (reachedWindow || reachedStored) {
+                closeHole(walk.groupJid, reachedStored ? 'reached-stored' : 'reached-window')
+                return
+            }
+            if (lastPage || walk.pages >= pageBudget(walk)) {
+                if (walk.pages >= pageBudget(walk)) {
+                    log.warn(
+                        { groupJid: walk.groupJid, pages: walk.pages, oldestTs, stopAt: walk.stopAt },
+                        'catchup.hole_page_limit'
+                    )
+                }
+                closeHole(walk.groupJid, lastPage ? 'short-page' : 'page-limit')
+                return
+            }
+            enqueue({ ...walk, key: oldest.key, timestamp: oldestTs, emptyRetries: 0 })
+            return
+        }
+        const known = storedAtConnect.get(walk.groupJid) ?? 0
+        const caughtUp = oldestTs <= known + ADJACENT_SECONDS
+        if (reachedWindow || caughtUp) {
+            finishBackfill(walk.groupJid, reachedWindow ? 'reached-window' : 'caught-up')
+            return
+        }
+        if (lastPage && known <= 0) {
+            finishBackfill(walk.groupJid, 'short-page')
+            return
+        }
+        if (walk.pages >= pageBudget(walk)) {
+            finishBackfill(walk.groupJid, 'page-limit')
+            return
+        }
+        enqueue({ ...walk, key: oldest.key, timestamp: oldestTs, emptyRetries: 0 })
+    }
+
+    function queueHole(
+        groupJid: string,
+        key: WAMessageKey,
+        timestamp: number,
+        stopAt: number | undefined,
+        trigger: string
+    ): void {
+        if (!key.id) return
+        if (awaiting.has(groupJid)) {
+            if (stopAt !== undefined) rememberHole(groupJid, key, timestamp, stopAt)
+            return
+        }
+        const existing = pending.get(groupJid)
+        if (existing?.kind === 'media') {
+            if (stopAt !== undefined) rememberHole(groupJid, key, timestamp, stopAt)
+            return
+        }
+        if (existing && existing.timestamp >= timestamp) return
+        log.debug({ groupJid, trigger, stopAt }, 'catchup.hole')
+        if (backfillDone.has(groupJid) && stopAt !== undefined) {
+            enqueue(messageWalk(groupJid, 'fill', key, timestamp, 0, stopAt))
+            return
+        }
+        enqueue(messageWalk(groupJid, 'fill', key, timestamp, deepPages.get(groupJid) ?? 0))
+    }
+
+    function scheduleHeadConfirm(groupJid: string, key: WAMessageKey, timestamp: number, stopAt: number): void {
+        if (!key.id) return
+        const pendingConfirm = headConfirms.get(groupJid)
+        if (pendingConfirm?.messageId === key.id) return
+        if (pendingConfirm) clearTimeout(pendingConfirm.timer)
+        const messageId = key.id
+        const anchor = { ...key }
+        const timer = setTimeout(() => {
+            headConfirms.delete(groupJid)
+            if (stopped || wasLiveMessage(groupJid, messageId)) return
+            queueHole(groupJid, anchor, timestamp, stopAt, 'chat-head')
+        }, HEAD_CONFIRM_MS)
+        headConfirms.set(groupJid, { timer, messageId })
     }
 
     async function considerMessage(m: WAMessage, reason: string): Promise<void> {
         const groupJid = m.key.remoteJid
         if (stopped || !groupJid || !isJidGroup(groupJid) || !m.key.id) return
         if (!(await isTrackedGroup(groupJid))) return
-
         const timestamp = unixSeconds(m.messageTimestamp)
-        if (timestamp <= backfillFloor()) return
-
+        if (timestamp <= deepFloor()) return
+        // A caught-up group already has this message from the socket. The time
+        // since the previous row is silence, not a hole.
+        if (reason === 'notify') {
+            rememberLiveMessage(groupJid, m.key.id)
+            if (backfillDone.has(groupJid)) return
+        }
         const previous = await getLatestGroupMessage(groupJid)
-        if (previous && previous.messageId === m.key.id) return
-        if (previous && previous.timestamp >= timestamp - 2) return
-
-        const jumpSeconds = previous ? timestamp - previous.timestamp : Number.POSITIVE_INFINITY
-        const reconnectGap = jumpSeconds > config.catchupWindowSeconds
-        const needsBackfill = !backfillFinished.has(groupJid) || reconnectGap
-        if (!needsBackfill && timestamp < notifyFloor()) return
-
-        const existing = jobs.get(groupJid)
-        if (existing && existing.timestamp >= timestamp) return
-
-        enqueue({
-            groupJid,
-            key: m.key,
-            timestamp,
-            reason: needsBackfill ? 'tracked-backfill' : reason,
-        })
+        if (previous && (previous.messageId === m.key.id || previous.timestamp >= timestamp - ADJACENT_SECONDS)) {
+            return
+        }
+        const stopAt = previous?.timestamp
+        if (
+            (reason === 'chat.upsert' || reason === 'chat.update') &&
+            backfillDone.has(groupJid) &&
+            stopAt !== undefined
+        ) {
+            if (wasLiveMessage(groupJid, m.key.id)) return
+            scheduleHeadConfirm(groupJid, m.key, timestamp, stopAt)
+            return
+        }
+        queueHole(groupJid, m.key, timestamp, stopAt, reason)
     }
 
     async function considerHistoryBatch(
@@ -511,34 +746,9 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         latestBefore: Map<string, number | undefined>
     ): Promise<void> {
         if (stopped || !isMessageHistorySync(syncType)) return
-        const onDemand =
-            historySyncNumber(syncType) === proto.HistorySync.HistorySyncType.ON_DEMAND
-        const until = backfillFloor()
+        const onDemand = historySyncNumber(syncType) === proto.HistorySync.HistorySyncType.ON_DEMAND
         if (onDemand && messages.length === 0) {
-            if (mediaGapAwaiting.size > 0 && awaitingOnDemand.size === 0) {
-                const groupJid = mediaGapOrder[0]
-                if (!groupJid) return
-                clearMediaGapWait(groupJid)
-                const empties = (mediaGapEmpty.get(groupJid) ?? 0) + 1
-                mediaGapEmpty.set(groupJid, empties)
-                const retryJob = mediaGapLastJob.get(groupJid)
-                if (empties < 2 && retryJob) {
-                    log.warn({ groupJid }, 'media_gap.empty_on_demand_retry')
-                    enqueue(retryJob)
-                    return
-                }
-                finishMediaGap(groupJid, 'empty-on-demand')
-                return
-            }
-            const groupJid = pendingPdoOrder[0]
-            if (!groupJid) return
-            const page = pages.get(groupJid) ?? 0
-            if (page > 0) {
-                finishBackfill(groupJid, 'empty-on-demand')
-            } else {
-                log.warn({ groupJid }, 'catchup.empty_on_demand_retry')
-                clearAwaiting(groupJid)
-            }
+            onEmptyDemand()
             return
         }
         if (messages.length === 0) return
@@ -553,147 +763,180 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         }
 
         for (const [groupJid, list] of byGroup) {
-            if (onDemand && mediaGapAwaiting.has(groupJid)) {
-                clearMediaGapWait(groupJid)
-                list.sort(
-                    (left, right) => unixSeconds(left.messageTimestamp) - unixSeconds(right.messageTimestamp)
-                )
-                const oldest = list[0]
-                const newest = list[list.length - 1]
-                if (newest) rememberChatHead(newest)
-                continueMediaGapPage(groupJid, oldest, list.length)
-                continue
-            }
-            if (onDemand) {
-                clearAwaiting(groupJid)
-                pages.set(groupJid, (pages.get(groupJid) ?? 0) + 1)
-            }
-            if (!(await isTrackedGroup(groupJid))) continue
-            list.sort(
-                (left, right) => unixSeconds(left.messageTimestamp) - unixSeconds(right.messageTimestamp)
-            )
+            list.sort((left, right) => unixSeconds(left.messageTimestamp) - unixSeconds(right.messageTimestamp))
             const oldest = list[0]
             const newest = list[list.length - 1]
-            if (!oldest?.key.id) continue
             if (newest) rememberChatHead(newest)
-            const oldestTs = unixSeconds(oldest.messageTimestamp)
-            if (onDemand) {
-                const knownAtConnect = storedAtConnect.get(groupJid) ?? 0
-                const reachedWindow = oldestTs <= until
-                const caughtUpToStored = oldestTs <= knownAtConnect + 2
-                const lastPage = list.length < config.catchupPageSize
-                if (reachedWindow || caughtUpToStored) {
-                    finishBackfill(groupJid, reachedWindow ? 'reached-window' : 'caught-up')
-                    continue
-                }
-                if (lastPage && knownAtConnect <= 0) {
-                    finishBackfill(groupJid, 'short-page')
-                    continue
-                }
-                enqueue({
-                    groupJid,
-                    key: oldest.key,
-                    timestamp: oldestTs,
-                    reason: 'on_demand_continue',
-                })
+            const waiting = awaiting.get(groupJid)
+            if (onDemand && waiting) {
+                clearAwaiting(groupJid)
+                continueFromPage(waiting, oldest, list.length)
                 continue
             }
+            if (!oldest?.key.id || !(await isTrackedGroup(groupJid))) continue
+            const oldestTs = unixSeconds(oldest.messageTimestamp)
             const previousTs = latestBefore.get(groupJid)
             const holeBeforeBatch =
-                previousTs !== undefined && previousTs + 2 < oldestTs && oldestTs > until
-            if (holeBeforeBatch) {
-                enqueue({
-                    groupJid,
-                    key: oldest.key,
-                    timestamp: oldestTs,
-                    reason: 'tracked-backfill',
-                })
+                previousTs !== undefined &&
+                previousTs + ADJACENT_SECONDS < oldestTs &&
+                oldestTs > deepFloor()
+            if (backfillDone.has(groupJid)) {
+                if (holeBeforeBatch && previousTs !== undefined) {
+                    if (awaiting.has(groupJid) || pending.get(groupJid)?.kind === 'media') {
+                        rememberHole(groupJid, oldest.key, oldestTs, previousTs)
+                    } else {
+                        const existing = pending.get(groupJid)
+                        if (!existing || existing.timestamp < oldestTs) {
+                            enqueue(messageWalk(groupJid, 'fill', oldest.key, oldestTs, 0, previousTs))
+                        }
+                    }
+                }
                 continue
             }
-            if (!backfillFinished.has(groupJid)) {
-                if (oldestTs <= until) continue
-                enqueue({
-                    groupJid,
-                    key: oldest.key,
-                    timestamp: oldestTs,
-                    reason: 'tracked-backfill',
-                })
-                continue
-            }
-            if (oldestTs < notifyFloor()) continue
-            if (previousTs !== undefined && previousTs >= oldestTs) continue
-            enqueue({
-                groupJid,
-                key: oldest.key,
-                timestamp: oldestTs,
-                reason: 'history.gap',
-            })
+            if (onDemand || awaiting.has(groupJid)) continue
+            if (!holeBeforeBatch || previousTs === undefined) continue
+            const existing = pending.get(groupJid)
+            if (existing && existing.timestamp >= oldestTs) continue
+            enqueue(messageWalk(groupJid, 'fill', oldest.key, oldestTs, deepPages.get(groupJid) ?? 0))
         }
     }
 
-    function clearMediaGapWait(groupJid: string): void {
-        mediaGapAwaiting.delete(groupJid)
-        const index = mediaGapOrder.indexOf(groupJid)
-        if (index >= 0) mediaGapOrder.splice(index, 1)
-        const timer = mediaGapTimers.get(groupJid)
-        if (timer) clearTimeout(timer)
-        mediaGapTimers.delete(groupJid)
+    function pokeMedia(groupJid: string): void {
+        if (!backfillDone.has(groupJid) || pending.has(groupJid) || awaiting.has(groupJid)) return
+        scheduleMedia(groupJid)
     }
 
-    function rememberMediaGapWait(groupJid: string): void {
-        if (!mediaGapAwaiting.has(groupJid)) mediaGapOrder.push(groupJid)
-        mediaGapAwaiting.add(groupJid)
-        const existing = mediaGapTimers.get(groupJid)
-        if (existing) clearTimeout(existing)
-        mediaGapTimers.set(
-            groupJid,
-            setTimeout(() => {
-                mediaGapTimers.delete(groupJid)
-                if (stopped || !mediaGapAwaiting.has(groupJid)) return
-                log.warn({ groupJid }, 'media_gap.awaiting_timeout')
-                finishMediaGap(groupJid, 'awaiting-timeout')
-            }, AWAITING_TIMEOUT_MS)
+    function scheduleMedia(groupJid: string): void {
+        if (stopped || config.skipMediaDownload || mediaClaimed.has(groupJid)) return
+        if (!backfillDone.has(groupJid) || !allowingRequests) return
+        if (pending.has(groupJid) || awaiting.has(groupJid)) return
+        mediaClaimed.add(groupJid)
+        void startMedia(groupJid).catch((err) => {
+            log.warn({ err, groupJid }, 'media_gap.start_failed')
+            if (!mediaTargets.has(groupJid) && !mediaEndings.has(groupJid)) mediaClaimed.delete(groupJid)
+        })
+    }
+
+    async function startMedia(groupJid: string): Promise<void> {
+        const [rows, exhausted] = await Promise.all([
+            listMissingMediaMessages([groupJid], mediaMessageTypes()),
+            exhaustedSet(),
+        ])
+        if (stopped || pending.has(groupJid) || awaiting.has(groupJid) || !backfillDone.has(groupJid)) {
+            mediaClaimed.delete(groupJid)
+            return
+        }
+        const missing = rows.filter(
+            (row) => !exhausted.has(row.messageId) && !pagedMissingMediaIds.has(row.messageId)
         )
+        if (rows.length === 0) {
+            mediaEndings.set(groupJid, 'nothing-missing')
+            log.info({ groupJid }, 'media_gap.nothing_missing')
+            persistMediaIfIdle()
+            return
+        }
+        if (missing.length === 0) {
+            mediaEndings.set(groupJid, 'already-done')
+            log.info({ groupJid, missing: rows.length }, 'media_gap.already_done')
+            persistMediaIfIdle()
+            return
+        }
+        const oldest = missing[0]
+        const newest = missing[missing.length - 1]
+        if (!oldest || !newest) {
+            finishMedia(groupJid, 'no-target')
+            return
+        }
+        mediaTargets.set(groupJid, {
+            oldestTs: oldest.timestamp,
+            missingCount: missing.length,
+            messages: missing.map((row) => ({ messageId: row.messageId, timestamp: row.timestamp })),
+        })
+        const newer = await getGroupMessageAfter(groupJid, newest.timestamp)
+        const head = chatHeads.get(groupJid)
+        const headIsNewer = Boolean(head?.key.id && head.timestamp > newest.timestamp)
+        if (!newer && !headIsNewer) {
+            log.info(
+                { groupJid, messageId: newest.messageId, missing: missing.length },
+                'media_gap.needs_newer_anchor'
+            )
+            finishMedia(groupJid, 'no-anchor')
+            return
+        }
+        const storedAnchor: LatestGroupMessage = newer ?? {
+            messageId: newest.messageId,
+            senderJid: newest.senderJid,
+            timestamp: newest.timestamp,
+        }
+        const key = headIsNewer && head ? head.key : historyKeyFromStored(groupJid, storedAnchor)
+        const timestamp = headIsNewer && head ? head.timestamp : storedAnchor.timestamp
+        if (!key.id) {
+            finishMedia(groupJid, 'no-anchor')
+            return
+        }
+        log.info(
+            {
+                groupJid,
+                messageId: key.id,
+                missing: missing.length,
+                oldestTarget: oldest.timestamp,
+                anchor: headIsNewer ? 'chat-head' : 'newer-message',
+            },
+            'media_gap.anchored'
+        )
+        log.info({ groupJid, missing: missing.length }, 'media_gap.start')
+        enqueue({
+            groupJid,
+            kind: 'media',
+            key,
+            timestamp,
+            pages: 0,
+            sends: 0,
+            emptyRetries: 0,
+        })
     }
 
-    function pokeDrain(): void {
-        if (stopped || !allowingRequests || jobs.size === 0) return
-        const waitingOnMediaGap =
-            mediaGapAwaiting.size > 0 &&
-            ![...jobs.values()].some((job) => job.reason === MEDIA_GAP_REASON)
-        if (!waitingOnMediaGap) void drain()
+    function continueMedia(walk: Walk, oldest: WAMessage | undefined, oldestTs: number, count: number): void {
+        const { groupJid } = walk
+        const target = mediaTargets.get(groupJid)
+        const pages = walk.pages + 1
+        if (!target || !oldest?.key.id) {
+            finishMedia(groupJid, 'no-target')
+            return
+        }
+        if (oldestTs <= target.oldestTs) {
+            finishMedia(groupJid, 'reached-gap')
+            return
+        }
+        if (count < config.catchupPageSize) {
+            finishMedia(groupJid, 'short-page', oldestTs)
+            return
+        }
+        if (pages >= config.mediaGapMaxPages) {
+            log.warn(
+                { groupJid, page: pages, oldestTs, oldestTarget: target.oldestTs, missing: target.missingCount },
+                'media_gap.page_limit'
+            )
+            finishMedia(groupJid, 'page-limit', oldestTs)
+            return
+        }
+        enqueue({
+            ...walk,
+            key: oldest.key,
+            timestamp: oldestTs,
+            pages,
+            sends: 0,
+            emptyRetries: 0,
+        })
     }
 
-    function scheduleMediaGapPersist(done: boolean): void {
-        const finishedGroups = [...mediaGapFinished]
-        mediaGapPersist = mediaGapPersist
-            .then(async () => {
-                await setAppSetting(MEDIA_GAP_BACKFILL_KEY, {
-                    done,
-                    finishedGroups,
-                    at: Date.now(),
-                })
-                if (done) log.info({ groups: finishedGroups.length }, 'media_gap.complete')
-            })
-            .catch((err) => {
-                log.warn({ err }, 'media_gap.persist_failed')
-            })
-    }
-
-    function finishMediaGap(groupJid: string, why: string, coveredThroughTs?: number): void {
-        const target = mediaGapTargets.get(groupJid)
-        clearMediaGapWait(groupJid)
-        mediaGapTargets.delete(groupJid)
-        mediaGapEndings.set(groupJid, why)
-        // no-anchor: history is requested before a newer message, so the newest missing
-        // file cannot appear in the page until something newer exists.
-        const retryLater =
-            why === 'awaiting-timeout' ||
-            why === 'request-failed' ||
-            why === 'no-anchor' ||
-            why === 'no-target'
+    function finishMedia(groupJid: string, why: string, coveredThroughTs?: number): void {
+        const target = mediaTargets.get(groupJid)
+        if (awaiting.get(groupJid)?.kind === 'media') clearAwaiting(groupJid)
+        if (pending.get(groupJid)?.kind === 'media') pending.delete(groupJid)
+        mediaTargets.delete(groupJid)
+        const retryLater = RETRY_MEDIA_LATER.has(why)
         if (!retryLater && target) {
-            mediaGapFinished.add(groupJid)
             const covered =
                 coveredThroughTs == null
                     ? target.messages
@@ -703,211 +946,42 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
                     ? []
                     : target.messages.filter((message) => message.timestamp < coveredThroughTs)
             for (const message of covered) pagedMissingMediaIds.add(message.messageId)
-            for (const message of uncovered) noteExhaustedMediaDownload(message.messageId)
+            for (const message of uncovered) {
+                noteExhaustedMediaDownload(message.messageId)
+                void exhaustedSet().then((ids) => ids.add(message.messageId))
+            }
         }
-        log.info({ groupJid, why, remaining: mediaGapTargets.size }, 'media_gap.group_complete')
-        if (mediaGapTargets.size > 0) {
-            if (!retryLater) scheduleMediaGapPersist(false)
-            pokeDrain()
-            return
-        }
-        const retry = [...mediaGapEndings.values()].some(
-            (ending) =>
-                ending === 'awaiting-timeout' ||
-                ending === 'request-failed' ||
-                ending === 'no-anchor' ||
-                ending === 'no-target'
-        )
-        scheduleMediaGapPersist(!retry && !stopped)
-        pokeDrain()
+        mediaEndings.set(groupJid, why)
+        log.info({ groupJid, why, remaining: mediaTargets.size }, 'media_gap.group_complete')
+        persistMediaIfIdle()
+        startDeferredHole(groupJid)
+        if (allowingRequests && pending.size > 0) void drain()
     }
 
-    function continueMediaGapPage(groupJid: string, oldest: WAMessage | undefined, count: number): void {
-        const page = (mediaGapPages.get(groupJid) ?? 0) + 1
-        mediaGapPages.set(groupJid, page)
-        const target = mediaGapTargets.get(groupJid)
-        const oldestTs = oldest ? unixSeconds(oldest.messageTimestamp) : 0
-        const lastPage = count < config.catchupPageSize
-        if (!target || !oldest?.key.id) {
-            finishMediaGap(groupJid, 'no-target')
-            return
-        }
-        if (oldestTs <= target.oldestTs) {
-            finishMediaGap(groupJid, 'reached-gap')
-            return
-        }
-        if (lastPage) {
-            finishMediaGap(groupJid, 'short-page', oldestTs)
-            return
-        }
-        if (page >= config.mediaGapMaxPages) {
-            log.warn(
-                {
-                    groupJid,
-                    page,
-                    oldestTs,
-                    oldestTarget: target.oldestTs,
-                    missing: target.missingCount,
-                },
-                'media_gap.page_limit'
-            )
-            finishMediaGap(groupJid, 'page-limit', oldestTs)
-            return
-        }
-        enqueue({
-            groupJid,
-            key: oldest.key,
-            timestamp: oldestTs,
-            reason: MEDIA_GAP_REASON,
-        })
-    }
-
-    async function requestMediaGap(job: CatchupJob): Promise<'done' | 'retry'> {
-        const { groupJid, key, timestamp } = job
-        const page = mediaGapPages.get(groupJid) ?? 0
-        if (!key.id) {
-            finishMediaGap(groupJid, 'no-anchor')
-            return 'done'
-        }
-        if (page >= config.mediaGapMaxPages) {
-            finishMediaGap(groupJid, 'page-limit')
-            return 'done'
-        }
-        mediaGapLastJob.set(groupJid, job)
-        try {
-            const waitedMs = await waitHistoryRequest()
-            if (stopped) return 'done'
-            if (!allowingRequests) return 'retry'
-            await sock.fetchMessageHistory(config.catchupPageSize, key, timestamp * 1000)
-            rememberMediaGapWait(groupJid)
-            const target = mediaGapTargets.get(groupJid)
-            log.info(
-                {
-                    groupJid,
-                    messageId: key.id,
-                    page: page + 1,
-                    waitedMs,
-                    oldestTarget: target?.oldestTs,
-                    missing: target?.missingCount,
-                },
-                'media_gap.history_requested'
-            )
-            return 'done'
-        } catch (err) {
-            log.warn({ err, groupJid, messageId: key.id }, 'media_gap.history_request_failed')
-            finishMediaGap(groupJid, 'request-failed')
-            return 'done'
-        }
-    }
-
-    function maybeStartMediaGap(): void {
-        if (mediaGapStartPromise || stopped || !allowingRequests) return
-        if (config.skipMediaDownload) return
-        if (jobs.size > 0 || awaitingOnDemand.size > 0 || mediaGapAwaiting.size > 0) return
+    function persistMediaIfIdle(): void {
         if (trackedJids.length === 0) return
-        if (trackedJids.some((jid) => !backfillFinished.has(jid))) return
-        mediaGapStartPromise = startMediaGap().catch((err) => {
-            log.warn({ err }, 'media_gap.start_failed')
-            if (mediaGapTargets.size === 0) mediaGapStartPromise = undefined
+        if (trackedJids.some((groupJid) => !backfillDone.has(groupJid) || !mediaEndings.has(groupJid))) return
+        if ([...pending.values()].some((walk) => walk.kind === 'media')) return
+        if ([...awaiting.values()].some((walk) => walk.kind === 'media')) return
+        const finishedGroups = [...mediaEndings.entries()]
+            .filter(([, why]) => !RETRY_MEDIA_LATER.has(why))
+            .map(([groupJid]) => groupJid)
+        const done = trackedJids.every((groupJid) => {
+            const why = mediaEndings.get(groupJid)
+            return why !== undefined && !RETRY_MEDIA_LATER.has(why)
         })
-    }
-
-    async function startMediaGap(): Promise<void> {
-        const state = parseMediaGapState(await getAppSetting(MEDIA_GAP_BACKFILL_KEY))
-        if (stopped || jobs.size > 0 || awaitingOnDemand.size > 0 || !allowingRequests) {
-            mediaGapStartPromise = undefined
-            return
-        }
-        const [rows, exhaustedIds] = await Promise.all([
-            listMissingMediaMessages(trackedJids, mediaGapMessageTypes()),
-            listExhaustedMediaDownloadIds(),
-        ])
-        if (stopped || jobs.size > 0 || awaitingOnDemand.size > 0 || !allowingRequests) {
-            mediaGapStartPromise = undefined
-            return
-        }
-        const exhausted = new Set(exhaustedIds)
-        const pending = rows.filter(
-            (row) => !exhausted.has(row.messageId) && !pagedMissingMediaIds.has(row.messageId)
-        )
-        if (rows.length === 0) {
-            if (!state.done) scheduleMediaGapPersist(true)
-            log.info('media_gap.nothing_missing')
-            return
-        }
-        if (pending.length === 0) {
-            log.info({ missing: rows.length }, 'media_gap.already_done')
-            return
-        }
-        const byGroup = new Map<string, typeof pending>()
-        for (const row of pending) {
-            const list = byGroup.get(row.groupJid) ?? []
-            list.push(row)
-            byGroup.set(row.groupJid, list)
-        }
-        log.info({ groups: byGroup.size, missing: pending.length }, 'media_gap.start')
-        for (const [groupJid, list] of byGroup) {
-            const oldest = list[0]
-            const newest = list[list.length - 1]
-            if (!oldest || !newest) continue
-            mediaGapTargets.set(groupJid, {
-                oldestTs: oldest.timestamp,
-                newestTs: newest.timestamp,
-                missingCount: list.length,
-                messages: list.map((row) => ({
-                    messageId: row.messageId,
-                    timestamp: row.timestamp,
-                })),
-                newestMessageId: newest.messageId,
-                newestSenderJid: newest.senderJid,
+        const snapshot = [...finishedGroups]
+        mediaPersist = mediaPersist
+            .then(async () => {
+                await setAppSetting(MEDIA_GAP_BACKFILL_KEY, { done, finishedGroups: snapshot, at: Date.now() })
+                if (done) log.info({ groups: snapshot.length }, 'media_gap.complete')
             })
-        }
-        for (const [groupJid, target] of [...mediaGapTargets]) {
-            const newer = await getGroupMessageAfter(groupJid, target.newestTs)
-            const head = chatHeads.get(groupJid)
-            const headIsNewer = Boolean(head?.key.id && head.timestamp > target.newestTs)
-            if (!newer && !headIsNewer) {
-                log.info(
-                    { groupJid, messageId: target.newestMessageId, missing: target.missingCount },
-                    'media_gap.needs_newer_anchor'
-                )
-                finishMediaGap(groupJid, 'no-anchor')
-                continue
-            }
-            const storedAnchor: LatestGroupMessage = newer ?? {
-                messageId: target.newestMessageId,
-                senderJid: target.newestSenderJid,
-                timestamp: target.newestTs,
-            }
-            const key = headIsNewer && head ? head.key : historyKeyFromStored(groupJid, storedAnchor)
-            const timestamp = headIsNewer && head ? head.timestamp : storedAnchor.timestamp
-            if (!key.id) {
-                finishMediaGap(groupJid, 'no-anchor')
-                continue
-            }
-            log.info(
-                {
-                    groupJid,
-                    messageId: key.id,
-                    missing: target.missingCount,
-                    oldestTarget: target.oldestTs,
-                    anchor: headIsNewer ? 'chat-head' : 'newer-message',
-                },
-                'media_gap.anchored'
-            )
-            enqueue({
-                groupJid,
-                key,
-                timestamp,
-                reason: MEDIA_GAP_REASON,
+            .catch((err) => {
+                log.warn({ err }, 'media_gap.persist_failed')
             })
-        }
     }
 
     return {
-        get windowStart() {
-            return notifyFloor()
-        },
         setTrackedGroups(jids: string[]) {
             trackedJids = [...new Set([...trackedJids, ...jids])]
         },
@@ -925,19 +999,13 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             rememberChatHead(m)
         },
         noteHistoryChunk(syncType?: unknown) {
-            if (isBulkHistorySync(syncType)) seenBulkHistory = true
-            const n = historySyncNumber(syncType)
-            if (
-                n === proto.HistorySync.HistorySyncType.INITIAL_BOOTSTRAP ||
-                n === proto.HistorySync.HistorySyncType.FULL ||
-                n === proto.HistorySync.HistorySyncType.RECENT
-            ) {
-                scheduleSettle('history.chunk')
-            }
+            if (!isBulkHistorySync(syncType)) return
+            seenBulkHistory = true
+            scheduleSettle('history.chunk')
         },
         noteHistoryStatus(syncType: unknown, status?: string) {
-            if (!shouldSettleOnSyncStatus(syncType)) return
-            if (isBulkHistorySync(syncType)) seenBulkHistory = true
+            if (!isBulkHistorySync(syncType)) return
+            seenBulkHistory = true
             scheduleSettle(status === 'paused' ? 'history.paused' : 'history.complete')
         },
         considerMessage,
@@ -945,9 +1013,11 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         stop() {
             stopped = true
             allowingRequests = false
-            jobs.clear()
+            pending.clear()
+            deferredHoles.clear()
+            clearHeadConfirms()
             clearSettleTimer()
-            for (const groupJid of [...mediaGapAwaiting]) clearMediaGapWait(groupJid)
+            for (const groupJid of [...awaiting.keys()]) clearAwaiting(groupJid)
         },
     }
 }
