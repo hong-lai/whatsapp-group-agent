@@ -18,7 +18,10 @@ export const config = {
     mediaDownloadTimeoutMs: envInt('MEDIA_DOWNLOAD_TIMEOUT_MS', 180_000),
     /** When true, save message rows but skip downloading media files (faster text-only ingest). */
     skipMediaDownload: env('SKIP_MEDIA_DOWNLOAD', 'false') === 'true',
-    /** Reconnect catchup: only fill gaps newer than now - this many seconds. */
+    /**
+     * Reconnect catch-up: stored messages at least this far apart on the
+     * current HKT day are a hole. The fill walks back across that gap.
+     */
     catchupWindowSeconds: envInt('CATCHUP_WINDOW_SECONDS', 15 * 60),
     /** First login / deep backfill: keep/fetch at most this many seconds of history. */
     catchupBackfillSeconds: envInt('CATCHUP_BACKFILL_SECONDS', 2 * 24 * 60 * 60),

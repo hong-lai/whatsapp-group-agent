@@ -356,6 +356,8 @@ const DOWNLOADABLE_MEDIA_TYPES = [
     'audioMessage',
 ]
 
+const RETRYABLE_MEDIA_TYPES = [...DOWNLOADABLE_MEDIA_TYPES, 'stickerMessage']
+
 export type MediaDownloadGap = {
     messageId: string
     groupJid: string
@@ -435,6 +437,43 @@ export async function getMediaDownloadStatus(exhaustedIds: string[]): Promise<Me
     }
 }
 
+/** Saved media rows that still have no file, including stickers. Deleted rows are left out. */
+export async function listMediaRetryTargets(messageIds: string[]): Promise<MissingMediaMessage[]> {
+    const ids = [...new Set(messageIds.filter(Boolean))]
+    if (ids.length === 0) return []
+    const result = await pool.query<{
+        group_jid: string
+        message_id: string
+        sender_jid: string | null
+        timestamp: string | null
+    }>(
+        `SELECT
+            group_jid,
+            message_id,
+            sender_jid,
+            EXTRACT(EPOCH FROM timestamp)::bigint::text AS timestamp
+         FROM messages
+         WHERE message_id = ANY($1::text[])
+           AND media_path IS NULL
+           AND is_deleted = FALSE
+           AND timestamp IS NOT NULL
+           AND message_type = ANY($2::text[])`,
+        [ids, RETRYABLE_MEDIA_TYPES]
+    )
+    return result.rows.flatMap((row) => {
+        const timestamp = Number(row.timestamp)
+        if (!Number.isFinite(timestamp)) return []
+        return [
+            {
+                groupJid: row.group_jid,
+                messageId: row.message_id,
+                senderJid: row.sender_jid,
+                timestamp,
+            },
+        ]
+    })
+}
+
 /** Latest stored message strictly older than `timestampSeconds`. */
 export async function getLatestGroupMessageBefore(
     groupJid: string,
@@ -466,6 +505,72 @@ export async function getLatestGroupMessageBefore(
         senderJid: row.sender_jid,
         timestamp,
     }
+}
+
+/**
+ * Older side of the earliest large gap on the HKT day of the newest stored
+ * message, including the last message before that day.
+ *
+ * `verifiedSeconds` limits the scan to messages at or after an anchor that
+ * was already walked. `0` scans the current day plus the message before it,
+ * which is the overnight gap where the oldest messages of the day sit.
+ */
+export async function currentDayGapStop(
+    groupJid: string,
+    verifiedSeconds: number,
+    minGapSeconds: number
+): Promise<number | undefined> {
+    const verified = Number.isFinite(verifiedSeconds) && verifiedSeconds > 0 ? verifiedSeconds : 0
+    const result = await pool.query<{ stop_at: string | null }>(
+        `WITH newest AS (
+            SELECT MAX(timestamp) AS latest_ts
+            FROM messages
+            WHERE group_jid = $1 AND timestamp IS NOT NULL
+        ),
+        day_start AS (
+            SELECT (date_trunc('day', latest_ts AT TIME ZONE 'Asia/Hong_Kong')
+                    AT TIME ZONE 'Asia/Hong_Kong') AS start_ts
+            FROM newest
+            WHERE latest_ts IS NOT NULL
+        ),
+        scoped AS (
+            SELECT timestamp AS ts
+            FROM messages
+            WHERE group_jid = $1
+              AND timestamp IS NOT NULL
+              AND (
+                ($2::float8 > 0 AND timestamp >= to_timestamp($2::float8))
+                OR ($2::float8 <= 0 AND timestamp >= (SELECT start_ts FROM day_start))
+              )
+            UNION ALL
+            SELECT timestamp
+            FROM messages
+            WHERE $2::float8 <= 0
+              AND group_jid = $1
+              AND timestamp IS NOT NULL
+              AND timestamp = (
+                SELECT MAX(timestamp)
+                FROM messages
+                WHERE group_jid = $1
+                  AND timestamp IS NOT NULL
+                  AND timestamp < (SELECT start_ts FROM day_start)
+              )
+        ),
+        pairs AS (
+            SELECT EXTRACT(EPOCH FROM ts) AS epoch,
+                   EXTRACT(EPOCH FROM LEAD(ts) OVER (ORDER BY ts DESC)) AS older_epoch
+            FROM scoped
+        )
+        SELECT MIN(older_epoch)::text AS stop_at
+        FROM pairs
+        WHERE older_epoch IS NOT NULL
+          AND epoch - older_epoch >= $3`,
+        [groupJid, verified, minGapSeconds]
+    )
+    const raw = result.rows[0]?.stop_at
+    if (raw == null) return undefined
+    const stopAt = Number(raw)
+    return Number.isFinite(stopAt) ? stopAt : undefined
 }
 
 /** Earliest stored message strictly newer than `timestampSeconds`. */

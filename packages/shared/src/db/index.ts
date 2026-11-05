@@ -22,10 +22,12 @@ export {
 } from './groups.js'
 export {
     fillMessageSecretIfMissing,
+    currentDayGapStop,
     getGroupMessageAfter,
     getLatestGroupMessage,
     getLatestGroupMessageBefore,
     getMediaDownloadStatus,
+    listMediaRetryTargets,
     listMissingMediaMessages,
     listMissingMediaSpans,
     getMessageEditTarget,
