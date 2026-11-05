@@ -103,6 +103,35 @@ export function contentForIngest(message: proto.IMessage | null | undefined): pr
     return normalizeMessageContent(message) || message
 }
 
+/** iPhone Live Photo / motion-photo companion clips are a few seconds. A longer file is a real video. */
+const LIVE_PHOTO_MAX_SECONDS = 6
+
+function asProtoNumber(value: unknown): number | null {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null
+    if (typeof value === 'bigint') {
+        const n = Number(value)
+        return Number.isFinite(n) ? n : null
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+        const n = Number(value)
+        return Number.isFinite(n) ? n : null
+    }
+    if (
+        value &&
+        typeof value === 'object' &&
+        'toNumber' in value &&
+        typeof (value as { toNumber: unknown }).toNumber === 'function'
+    ) {
+        try {
+            const n = (value as { toNumber: () => number }).toNumber()
+            return Number.isFinite(n) ? n : null
+        } catch {
+            return null
+        }
+    }
+    return null
+}
+
 export function isLivePhotoMotionVideo(
     raw: proto.IMessage | null | undefined,
     content: proto.IMessage | null | undefined
@@ -110,14 +139,28 @@ export function isLivePhotoMotionVideo(
     if (raw?.imageMessage) return false
     const video = content?.videoMessage || content?.ptvMessage || raw?.videoMessage || raw?.ptvMessage
     if (!video) return false
-    const association =
+    // Android stamps motionPhotoPresentationOffsetMs on ordinary camera mp4s
+    // (often 0, sometimes the poster-frame time). Duration is the guard:
+    // a 1-minute VIDEO-*.mp4 is not the short Live Photo companion clip.
+    const seconds = asProtoNumber(video.seconds)
+    if (seconds != null && seconds > LIVE_PHOTO_MAX_SECONDS) return false
+
+    const association = asProtoNumber(
         raw?.messageContextInfo?.messageAssociation?.associationType ??
-        content?.messageContextInfo?.messageAssociation?.associationType
+            content?.messageContextInfo?.messageAssociation?.associationType
+    )
     if (association === proto.MessageAssociation.AssociationType.MOTION_PHOTO) return true
-    if (video.contextInfo?.pairedMediaType === proto.ContextInfo.PairedMediaType.MOTION_PHOTO_CHILD) {
-        return true
-    }
-    return video.motionPhotoPresentationOffsetMs != null
+    const paired = asProtoNumber(video.contextInfo?.pairedMediaType)
+    if (paired === proto.ContextInfo.PairedMediaType.MOTION_PHOTO_CHILD) return true
+
+    const offsetMs = asProtoNumber(video.motionPhotoPresentationOffsetMs)
+    return (
+        offsetMs != null &&
+        offsetMs > 0 &&
+        seconds != null &&
+        seconds > 0 &&
+        seconds <= LIVE_PHOTO_MAX_SECONDS
+    )
 }
 
 export function messageForMediaDownload(m: WAMessage): WAMessage {
