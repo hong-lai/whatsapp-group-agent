@@ -26,7 +26,9 @@ import {
     noteDisconnected,
     startConnectionHeartbeat,
 } from '../../../packages/shared/src/connectionStatus.js'
-import { createCatchup, asCatchupMessage } from './catchup.js'
+import { createCatchup, asCatchupMessage, requestMissingMediaScan } from './catchup.js'
+import { MEDIA_SCAN_CHANNEL } from '../../../packages/shared/src/events/mediaScan.js'
+import { createRedisSubscriber } from '../../../packages/shared/src/redis.js'
 import { config, matchesGroupPattern } from './config.js'
 import {
     addSkippedGroup,
@@ -546,6 +548,12 @@ async function connectToWhatsApp() {
         )
         await initDb()
         await loadFilenameFormatSettings()
+        const mediaScanSubscriber = createRedisSubscriber()
+        await mediaScanSubscriber.subscribe(MEDIA_SCAN_CHANNEL)
+        mediaScanSubscriber.on('message', (channel) => {
+            if (channel !== MEDIA_SCAN_CHANNEL) return
+            requestMissingMediaScan()
+        })
         startConnectionHeartbeat()
         const shutdown = async (signal: string) => {
             await markIngestShutdown(`ingest stopped (${signal})`)

@@ -90,6 +90,17 @@ const pagedMissingMediaIds = new Set<string>()
 /** Admin retries waiting for this group's history walk to be free. */
 const pendingManualMediaIds = new Set<string>()
 let kickManualMediaRetry: (() => void) | undefined
+let kickMissingMediaScan: (() => void) | undefined
+let missingMediaScanWaiting = false
+
+/** Walk every missing non-sticker file, using the exhausted list currently in the database. */
+export function requestMissingMediaScan(): void {
+    if (kickMissingMediaScan) {
+        kickMissingMediaScan()
+        return
+    }
+    missingMediaScanWaiting = true
+}
 
 export function requestManualMediaRetry(messageId: string): void {
     const id = messageId.trim()
@@ -194,6 +205,9 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
     const storedAtConnect = new Map<string, number>()
     const mediaTargets = new Map<string, MediaTarget>()
     const mediaClaimed = new Set<string>()
+    /** Groups whose current walk started before Retry missing, so they scan once when it ends. */
+    const rescanGroups = new Set<string>()
+    let scanWaiting = false
     const mediaEndings = new Map<string, string>()
     const manualMediaIds = new Map<string, Set<string>>()
     /** Anchors WhatsApp already answered with an empty on-demand sync. */
@@ -394,7 +408,9 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             log.info({ groupJid, why, backfillUntil: deepFloor() }, 'catchup.backfill_complete')
         }
         if (startDeferredHole(groupJid)) return
-        if (!pending.has(groupJid) && !awaiting.has(groupJid)) scheduleMedia(groupJid)
+        if (pending.has(groupJid) || awaiting.has(groupJid)) return
+        if (claimRescan(groupJid)) return
+        scheduleMedia(groupJid)
     }
 
     function failReconnectHole(walk: Walk | undefined, why: string): void {
@@ -413,7 +429,9 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             return
         }
         if (startDeferredHole(groupJid)) return
-        if (!pending.has(groupJid) && !awaiting.has(groupJid)) scheduleMedia(groupJid)
+        if (pending.has(groupJid) || awaiting.has(groupJid)) return
+        if (claimRescan(groupJid)) return
+        scheduleMedia(groupJid)
     }
 
     function startDeferredHole(groupJid: string): boolean {
@@ -465,7 +483,7 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         let waitingForHeads = false
         for (const groupJid of [...trackedJids]) {
             if (backfillDone.has(groupJid)) {
-                scheduleMedia(groupJid)
+                if (!rescanGroups.has(groupJid)) scheduleMedia(groupJid)
                 continue
             }
             if (pending.has(groupJid) || awaiting.has(groupJid)) continue
@@ -480,6 +498,7 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             scheduleSettle('waiting-chat-heads')
             return
         }
+        if (scanWaiting) runMissingMediaScan()
         log.info(
             {
                 pending: pending.size,
@@ -732,7 +751,9 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             draining = false
             if (!stopped && allowingRequests && pending.size > 0) void drain()
             if (!stopped && allowingRequests && pending.size === 0 && awaiting.size === 0) {
-                for (const groupJid of trackedJids) scheduleMedia(groupJid)
+                for (const groupJid of trackedJids) {
+                    if (!claimRescan(groupJid)) scheduleMedia(groupJid)
+                }
             }
         }
     }
@@ -1177,7 +1198,8 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         if (pending.get(groupJid)?.kind === 'media') pending.delete(groupJid)
         mediaTargets.delete(groupJid)
         const retryLater = RETRY_MEDIA_LATER.has(why)
-        if (!retryLater && target) {
+        const deferExhaust = rescanGroups.has(groupJid)
+        if (!retryLater && target && !deferExhaust) {
             const covered =
                 coveredThroughTs == null
                     ? target.messages
@@ -1195,8 +1217,9 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         mediaEndings.set(groupJid, why)
         manualMediaIds.delete(groupJid)
         log.info({ groupJid, why, remaining: mediaTargets.size }, 'media_gap.group_complete')
-        persistMediaIfIdle()
         startDeferredHole(groupJid)
+        if (deferExhaust) claimRescan(groupJid)
+        persistMediaIfIdle()
         if (allowingRequests && pending.size > 0) void drain()
         void drainManualMediaRetries()
     }
@@ -1222,6 +1245,71 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             .catch((err) => {
                 log.warn({ err }, 'media_gap.persist_failed')
             })
+    }
+
+    function mediaWalkActive(groupJid: string): boolean {
+        return (
+            pending.get(groupJid)?.kind === 'media' ||
+            awaiting.get(groupJid)?.kind === 'media' ||
+            (mediaClaimed.has(groupJid) && !mediaEndings.has(groupJid))
+        )
+    }
+
+    /** One follow-up scan for a group that was busy when Retry missing was clicked. */
+    function claimRescan(groupJid: string): boolean {
+        if (!rescanGroups.has(groupJid)) return false
+        if (stopped || !allowingRequests || !backfillDone.has(groupJid)) return false
+        if (pending.has(groupJid) || awaiting.has(groupJid)) return false
+        rescanGroups.delete(groupJid)
+        exhaustedTask = undefined
+        mediaClaimed.delete(groupJid)
+        mediaEndings.delete(groupJid)
+        scheduleMedia(groupJid)
+        return true
+    }
+
+    function runMissingMediaScan(): void {
+        if (stopped) return
+        if (config.skipMediaDownload) {
+            scanWaiting = false
+            log.info('media_gap.startup_retry_skipped')
+            return
+        }
+        if (!allowingRequests) {
+            scanWaiting = true
+            for (const groupJid of trackedJids) rescanGroups.add(groupJid)
+            log.info('media_gap.startup_retry_waiting')
+            return
+        }
+        scanWaiting = false
+        exhaustedTask = undefined
+        pagedMissingMediaIds.clear()
+        let groups = 0
+        for (const groupJid of trackedJids) {
+            if (!backfillDone.has(groupJid)) {
+                rescanGroups.add(groupJid)
+                continue
+            }
+            if (pending.has(groupJid) || awaiting.has(groupJid) || mediaWalkActive(groupJid)) {
+                rescanGroups.add(groupJid)
+                continue
+            }
+            rescanGroups.delete(groupJid)
+            mediaClaimed.delete(groupJid)
+            mediaEndings.delete(groupJid)
+            scheduleMedia(groupJid)
+            groups += 1
+        }
+        log.info({ groups, waiting: rescanGroups.size }, 'media_gap.startup_retry')
+    }
+
+    const kickScan = () => {
+        runMissingMediaScan()
+    }
+    kickMissingMediaScan = kickScan
+    if (missingMediaScanWaiting) {
+        missingMediaScanWaiting = false
+        runMissingMediaScan()
     }
 
     const kick = () => {
@@ -1261,12 +1349,15 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         stop() {
             stopped = true
             allowingRequests = false
+            scanWaiting = false
+            rescanGroups.clear()
             pending.clear()
             deferredHoles.clear()
             clearHeadConfirms()
             clearSettleTimer()
             for (const groupJid of [...awaiting.keys()]) clearAwaiting(groupJid)
             if (kickManualMediaRetry === kick) kickManualMediaRetry = undefined
+            if (kickMissingMediaScan === kickScan) kickMissingMediaScan = undefined
         },
     }
 }

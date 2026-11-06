@@ -10,6 +10,9 @@ export {
     getAppSetting,
     listExhaustedMediaDownloadIds,
     noteExhaustedMediaDownload,
+    noteFailedMediaDownload,
+    releaseFailedMediaDownload,
+    shouldKeepMessageAfterFailedMedia,
     setAppSetting,
 } from './settings.js'
 export {

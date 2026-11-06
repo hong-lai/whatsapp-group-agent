@@ -14,6 +14,9 @@ import {
     getMessageMediaState,
     markMessagesDeleted,
     noteExhaustedMediaDownload,
+    noteFailedMediaDownload,
+    releaseFailedMediaDownload,
+    shouldKeepMessageAfterFailedMedia,
     updateMessageMediaPath,
 } from '../../../packages/shared/src/db/index.js'
 import {
@@ -209,8 +212,29 @@ function enqueueMediaReady(meta: MediaStoreMeta, mediaPath: string): void {
     })
 }
 
+const deferredDeletes = new Set<string>()
+
+function applyDeferredDelete(messageId: string): void {
+    if (!deferredDeletes.delete(messageId)) return
+    void markDeletedAndRenameMedia([messageId])
+}
+
 export async function markDeletedAndRenameMedia(messageIds: string[]): Promise<void> {
-    const rows = await markMessagesDeleted(messageIds)
+    const deletable: string[] = []
+    for (const messageId of messageIds) {
+        if (inFlightMediaDownloads.has(messageId)) {
+            deferredDeletes.add(messageId)
+            log.info({ messageId }, 'messages.delete_deferred_media')
+            continue
+        }
+        if (await shouldKeepMessageAfterFailedMedia(messageId)) {
+            log.info({ messageId }, 'messages.delete_skipped_media_failed')
+            continue
+        }
+        deletable.push(messageId)
+    }
+    if (deletable.length === 0) return
+    const rows = await markMessagesDeleted(deletable)
     for (const row of rows) {
         if (!row.mediaPath) continue
         const deletedPath = suffixDeletedMediaFile(row.mediaPath)
@@ -221,7 +245,7 @@ export async function markDeletedAndRenameMedia(messageIds: string[]): Promise<v
             'media.deleted_renamed'
         )
     }
-    for (const messageId of messageIds) {
+    for (const messageId of deletable) {
         void enqueueMessageEvent({
             event: 'message.deleted',
             messageId,
@@ -471,6 +495,8 @@ function logMediaDownloadFailure(
     meta: MediaStoreMeta,
     attempts: number
 ): void {
+    deferredDeletes.delete(meta.messageId)
+    noteFailedMediaDownload(meta.messageId)
     noteExhaustedMediaDownload(meta.messageId)
     if (meta.isHistory && isTimeoutMediaError(err)) {
         log.debug(
@@ -506,7 +532,7 @@ async function retryMediaDownload(
     fileName: string,
     firstErr: unknown,
     sockGeneration: number
-): Promise<void> {
+): Promise<boolean> {
     const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
     let err = firstErr
 
@@ -524,11 +550,11 @@ async function retryMediaDownload(
     }
 
     for (let failedAttempt = 1; failedAttempt < maxAttempts; failedAttempt++) {
-        if (abortedByReconnect(failedAttempt)) return
+        if (abortedByReconnect(failedAttempt)) return false
         if (!isRetryableMediaError(err)) {
             forgetPendingMedia(meta.messageId)
             logMediaDownloadFailure(err, meta, failedAttempt)
-            return
+            return false
         }
         const nextAttempt = failedAttempt + 1
         const delayMs = retryBackoffMs(failedAttempt, config.mediaRetryMinMs, config.mediaRetryMaxMs)
@@ -549,10 +575,10 @@ async function retryMediaDownload(
         )
         await sleep(delayMs)
         // Disconnect may have happened during backoff — re-check before touching the socket.
-        if (abortedByReconnect(failedAttempt)) return
+        if (abortedByReconnect(failedAttempt)) return false
         if (await mediaAlreadyStored(meta.messageId)) {
             forgetPendingMedia(meta.messageId)
-            return
+            return true
         }
         try {
             await downloadMediaOnce(m, sock, fileName)
@@ -570,14 +596,15 @@ async function retryMediaDownload(
                 },
                 'media.download_recovered'
             )
-            return
+            return true
         } catch (nextErr) {
             err = nextErr
         }
     }
-    if (sockGeneration !== mediaSocketGeneration) return
+    if (sockGeneration !== mediaSocketGeneration) return false
     forgetPendingMedia(meta.messageId)
     logMediaDownloadFailure(err, meta, maxAttempts)
+    return false
 }
 
 export async function storeMediaFile(
@@ -600,6 +627,7 @@ export async function storeMediaFile(
 
     inFlightMediaDownloads.add(meta.messageId)
     rememberPendingMedia(m, meta)
+    let recoveredNow = false
     const logDownload = meta.isHistory ? log.debug.bind(log) : log.info.bind(log)
     logDownload(
         {
@@ -613,14 +641,15 @@ export async function storeMediaFile(
     )
     const sockGeneration = mediaSocketGeneration
     let handoffToRetry = false
+    let storedPath: string | null = null
     try {
         const fileName = await mediaDestPath(m, meta, fallbackExt)
         try {
             await downloadMediaOnce(m, sock, fileName)
-            const storedPath = await persistMediaPath(meta.messageId, fileName)
+            storedPath = await persistMediaPath(meta.messageId, fileName)
             forgetPendingMedia(meta.messageId)
             enqueueMediaReady(meta, storedPath)
-            return storedPath
+            recoveredNow = true
         } catch (err) {
             const maxAttempts = Math.max(1, config.mediaRetryMaxAttempts)
             if (isRetryableMediaError(err) && maxAttempts > 1) {
@@ -636,8 +665,23 @@ export async function storeMediaFile(
                             'media.retry_loop_failed'
                         )
                     })
+                    .then(async (recovered) => {
+                        if (!recovered) return false
+                        try {
+                            await releaseFailedMediaDownload(meta.messageId)
+                        } catch (releaseErr) {
+                            log.warn(
+                                { err: releaseErr, messageId: meta.messageId },
+                                'media.keep_release_failed'
+                            )
+                        }
+                        return true
+                    })
                     .finally(() => {
                         releaseMediaInFlight(meta.messageId, sockGeneration)
+                    })
+                    .then((recovered) => {
+                        if (recovered) applyDeferredDelete(meta.messageId)
                     })
                 return null
             }
@@ -645,9 +689,21 @@ export async function storeMediaFile(
             logMediaDownloadFailure(err, meta, 1)
             return null
         }
+        if (recoveredNow) {
+            try {
+                await releaseFailedMediaDownload(meta.messageId)
+            } catch (releaseErr) {
+                log.warn(
+                    { err: releaseErr, messageId: meta.messageId },
+                    'media.keep_release_failed'
+                )
+            }
+        }
     } finally {
         if (!handoffToRetry) releaseMediaInFlight(meta.messageId, sockGeneration)
     }
+    if (recoveredNow) applyDeferredDelete(meta.messageId)
+    return storedPath
 }
 
 export async function recoverPendingMediaDownloads(sock: WASocket): Promise<void> {

@@ -613,14 +613,20 @@ function ConnectionStatus({
     live,
     unreachable,
     media,
+    isAdmin = false,
+    onRetryMissing,
 }: {
     state: AgentConnectionState
     events: AgentConnectionEvent[]
     live?: boolean
     unreachable?: boolean
     media: MediaDownloadStatus | null
+    isAdmin?: boolean
+    onRetryMissing?: () => Promise<void>
 }) {
     const [open, setOpen] = useState(false)
+    const [retryingMissing, setRetryingMissing] = useState(false)
+    const [retryError, setRetryError] = useState<string | null>(null)
     const rootRef = useRef<HTMLDivElement>(null)
     const missing = media?.enabled ? media.missing : 0
     const health = media ? mediaHealthText(media) : 'Media status is loading.'
@@ -690,6 +696,27 @@ function ConnectionStatus({
                             {missing > media.gaps.length && (
                                 <p>{missing - media.gaps.length} older files are also missing.</p>
                             )}
+                            {isAdmin && onRetryMissing && missing > 0 && (
+                                <button
+                                    type="button"
+                                    className="media-scan-btn"
+                                    disabled={retryingMissing}
+                                    onClick={() => {
+                                        setRetryError(null)
+                                        setRetryingMissing(true)
+                                        void onRetryMissing()
+                                            .catch((err: unknown) => {
+                                                setRetryError(
+                                                    err instanceof Error ? err.message : 'Retry failed'
+                                                )
+                                            })
+                                            .finally(() => setRetryingMissing(false))
+                                    }}
+                                >
+                                    {retryingMissing ? 'Retrying…' : 'Retry missing'}
+                                </button>
+                            )}
+                            {retryError && <p className="media-scan-error">{retryError}</p>}
                         </section>
                     )}
                     <strong>Connection log</strong>
@@ -2288,7 +2315,7 @@ function SkeletonMessages() {
 }
 
 export default function App() {
-    const { role, login, logout } = useAdminAuth()
+    const { role, login, logout, adminPassword } = useAdminAuth()
     const isAdmin = role === 'admin'
     const initialParams = new URLSearchParams(window.location.search)
     const today = hongKongDate()
@@ -2570,6 +2597,17 @@ export default function App() {
             setAgentState('disconnected')
         }
     }
+
+    const retryMissingMedia = useCallback(async () => {
+        if (!adminPassword) throw new Error('Sign in as admin to retry')
+        const response = await fetch('/api/admin/media/retry-missing', {
+            method: 'POST',
+            headers: adminHeaders(adminPassword),
+        })
+        const body = (await response.json().catch(() => ({}))) as { error?: string }
+        if (!response.ok) throw new Error(body.error || `Retry failed (${response.status})`)
+        await refreshConnection()
+    }, [adminPassword])
 
     useVisibleInterval(refreshConnection, 4000)
 
@@ -3156,6 +3194,8 @@ export default function App() {
                             live={connectionState === 'connected' && livePulse}
                             unreachable={linkDown}
                             media={mediaDownload}
+                            isAdmin={isAdmin}
+                            onRetryMissing={retryMissingMedia}
                         />
                     </div>
                     <button
@@ -3244,6 +3284,8 @@ export default function App() {
                                     live={connectionState === 'connected' && livePulse}
                                     unreachable={linkDown}
                                     media={mediaDownload}
+                                    isAdmin={isAdmin}
+                                    onRetryMissing={retryMissingMedia}
                                 />
                             </div>
                         )}

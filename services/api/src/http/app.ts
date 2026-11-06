@@ -7,6 +7,7 @@ import {
     getMediaDownloadStatus,
     listExhaustedMediaDownloadIds,
 } from '../../../../packages/shared/src/db/index.js'
+import { publishMediaScan } from '../../../../packages/shared/src/events/mediaScan.js'
 import { log } from '../../../../packages/shared/src/log.js'
 import { handleReportProcessedSse, handleWorkflowStatusSse } from '../sse.js'
 import { registerAlbumRoutes } from './album.js'
@@ -54,6 +55,11 @@ export function createApiApp() {
     })
 
     app.post('/api/admin/verify', requireAdmin, (_request, response) => {
+        response.json({ ok: true })
+    })
+
+    app.post('/api/admin/media/retry-missing', requireAdmin, async (_request, response) => {
+        await publishMediaScan()
         response.json({ ok: true })
     })
 

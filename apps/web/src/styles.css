@@ -245,6 +245,29 @@ svg {
     word-break: break-all;
 }
 
+.media-scan-btn {
+    margin-top: 8px;
+    padding: 4px 10px;
+    border: 1px solid #e4b4b4;
+    border-radius: 999px;
+    background: #fff;
+    color: #9a3412;
+    font: 700 0.72rem var(--sans);
+    cursor: pointer;
+}
+
+.media-scan-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+.media-scan-error {
+    margin: 6px 0 0;
+    color: #9a3412;
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
 .connection-log {
     width: min(360px, calc(100vw - 32px));
     position: absolute;
