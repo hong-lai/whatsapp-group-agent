@@ -15,6 +15,7 @@ import {
     listMediaRetryTargets,
     listMissingMediaMessages,
     noteExhaustedMediaDownload,
+    releaseExhaustedMediaDownloads,
     setAppSetting,
     type LatestGroupMessage,
 } from '../../../packages/shared/src/db/index.js'
@@ -93,7 +94,7 @@ let kickManualMediaRetry: (() => void) | undefined
 let kickMissingMediaScan: (() => void) | undefined
 let missingMediaScanWaiting = false
 
-/** Walk every missing non-sticker file, using the exhausted list currently in the database. */
+/** Walk every missing non-sticker file again, including ones whose retries already finished. */
 export function requestMissingMediaScan(): void {
     if (kickMissingMediaScan) {
         kickMissingMediaScan()
@@ -207,6 +208,8 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
     const mediaClaimed = new Set<string>()
     /** Groups whose current walk started before Retry missing, so they scan once when it ends. */
     const rescanGroups = new Set<string>()
+    /** Ids this admin retry must walk even if a failure mark lands again first. */
+    const forcedRetryIds = new Set<string>()
     let scanWaiting = false
     const mediaEndings = new Map<string, string>()
     const manualMediaIds = new Map<string, Set<string>>()
@@ -1082,6 +1085,10 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         }
         const byId = new Map<string, (typeof rows)[number]>()
         for (const row of rows) {
+            if (forcedRetryIds.delete(row.messageId)) {
+                byId.set(row.messageId, row)
+                continue
+            }
             if (exhausted.has(row.messageId) || pagedMissingMediaIds.has(row.messageId)) continue
             byId.set(row.messageId, row)
         }
@@ -1268,7 +1275,15 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         return true
     }
 
+    let mediaScanChain: Promise<void> = Promise.resolve()
+
     function runMissingMediaScan(): void {
+        mediaScanChain = mediaScanChain.then(() => scanMissingMedia()).catch((err) => {
+            log.warn({ err }, 'media_gap.startup_retry_failed')
+        })
+    }
+
+    async function scanMissingMedia(): Promise<void> {
         if (stopped) return
         if (config.skipMediaDownload) {
             scanWaiting = false
@@ -1281,9 +1296,23 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             log.info('media_gap.startup_retry_waiting')
             return
         }
+        const missing = await listMissingMediaMessages(trackedJids, mediaMessageTypes())
+        const released = await releaseExhaustedMediaDownloads(missing.map((row) => row.messageId))
+        if (stopped) return
+        if (!allowingRequests) {
+            scanWaiting = true
+            for (const groupJid of trackedJids) rescanGroups.add(groupJid)
+            log.info({ released }, 'media_gap.startup_retry_waiting')
+            return
+        }
         scanWaiting = false
         exhaustedTask = undefined
         pagedMissingMediaIds.clear()
+        const exhausted = await exhaustedSet()
+        for (const row of missing) {
+            exhausted.delete(row.messageId)
+            forcedRetryIds.add(row.messageId)
+        }
         let groups = 0
         for (const groupJid of trackedJids) {
             if (!backfillDone.has(groupJid)) {
@@ -1300,7 +1329,7 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
             scheduleMedia(groupJid)
             groups += 1
         }
-        log.info({ groups, waiting: rescanGroups.size }, 'media_gap.startup_retry')
+        log.info({ groups, waiting: rescanGroups.size, released }, 'media_gap.startup_retry')
     }
 
     const kickScan = () => {

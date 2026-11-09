@@ -10,7 +10,7 @@ function exhaustedIds(value: unknown): string[] {
     return ids.filter((id): id is string => typeof id === 'string')
 }
 
-/** Message ids whose media download has given up. Startup catchup will not page these again. */
+/** Message ids whose media download has given up. A restart will not page these again. */
 export async function listExhaustedMediaDownloadIds(): Promise<string[]> {
     return exhaustedIds(await getAppSetting(EXHAUSTED_MEDIA_KEY))
 }
@@ -102,6 +102,31 @@ export function releaseFailedMediaDownload(messageId: string): Promise<void> {
 /** The download itself failed. Keep the row even if WhatsApp then sends a delete. */
 export function noteFailedMediaDownload(messageId: string): void {
     rememberKeptAfterFailedMedia(messageId)
+}
+
+/**
+ * Drop these ids from the given-up list. An admin retry walks the files again.
+ * Serialized with noteExhaustedMediaDownload so a late failure cannot restore them.
+ */
+export function releaseExhaustedMediaDownloads(messageIds: readonly string[]): Promise<number> {
+    const drop = new Set(messageIds.filter((id) => id.length > 0))
+    if (drop.size === 0) return Promise.resolve(0)
+    const run = exhaustChain.then(async () => {
+        const ids = new Set(await listExhaustedMediaDownloadIds())
+        let released = 0
+        for (const id of drop) {
+            if (!ids.delete(id)) continue
+            released += 1
+        }
+        if (released === 0) return 0
+        await setAppSetting(EXHAUSTED_MEDIA_KEY, { messageIds: [...ids] })
+        return released
+    })
+    exhaustChain = run.then(
+        () => undefined,
+        () => undefined
+    )
+    return run
 }
 
 export function noteExhaustedMediaDownload(messageId: string): void {

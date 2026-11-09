@@ -10,6 +10,7 @@ export {
     getAppSetting,
     listExhaustedMediaDownloadIds,
     noteExhaustedMediaDownload,
+    releaseExhaustedMediaDownloads,
     noteFailedMediaDownload,
     releaseFailedMediaDownload,
     shouldKeepMessageAfterFailedMedia,
