@@ -262,7 +262,13 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         const timestamp = unixSeconds(m.messageTimestamp)
         const previous = chatHeads.get(groupJid)
         if (!previous || timestamp >= previous.timestamp) {
+            const advanced = !previous || timestamp > previous.timestamp + ADJACENT_SECONDS
             chatHeads.set(groupJid, { key: m.key, timestamp })
+            // A newer head can unlock an overnight day-gap fill while we are still
+            // waiting for chat heads after reconnect.
+            if (advanced && !backfillDone.has(groupJid) && !stopped) {
+                scheduleSettle('chat-head')
+            }
         }
     }
 
@@ -520,18 +526,35 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         const oldest = await getOldestGroupMessage(groupJid)
         const latest = await getLatestGroupMessage(groupJid)
         const known = storedAtConnect.get(groupJid) ?? 0
+        const dayStart = hktDayStartSeconds()
+        const storedBeforeToday = Boolean(latest && latest.timestamp < dayStart)
+        const headAheadOfStored = Boolean(
+            head?.key.id && latest && head.timestamp > latest.timestamp + ADJACENT_SECONDS
+        )
         const headAheadOfConnect = Boolean(
             known > 0 && head?.key.id && head.timestamp > until && head.timestamp > known + ADJACENT_SECONDS
         )
-        if (headAheadOfConnect && head?.key.id) {
+        // Overnight gap: last stored row is before today. A head ahead of that
+        // row is the only history anchor that can pull today's missing messages.
+        const fillFromHead = Boolean(
+            head?.key.id &&
+                head.timestamp > until &&
+                (headAheadOfConnect || (storedBeforeToday && headAheadOfStored))
+        )
+        if (fillFromHead && head?.key.id) {
             let stopAt: number | undefined
-            if (existingSession && oldest && oldest.timestamp <= until) {
+            if ((existingSession || storedBeforeToday) && oldest && oldest.timestamp <= until) {
                 const storedTs = latest?.timestamp ?? known
-                const dayStop = await currentDayGapStop(
-                    groupJid,
-                    reconnectHoleVerified.get(groupJid) ?? 0,
-                    config.catchupWindowSeconds
-                )
+                // currentDayGapStop scopes to the HKT day of the newest stored
+                // row. When that row is before today it cannot describe the
+                // overnight hole — stop at the stored neighbor instead.
+                const dayStop = storedBeforeToday
+                    ? undefined
+                    : await currentDayGapStop(
+                          groupJid,
+                          reconnectHoleVerified.get(groupJid) ?? 0,
+                          config.catchupWindowSeconds
+                      )
                 stopAt = dayStop !== undefined && dayStop < storedTs ? dayStop : storedTs
             }
             enqueue(
@@ -563,6 +586,17 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         if (oldest.timestamp <= until) {
             if (latest && latest.timestamp < until) {
                 finishBackfill(groupJid, 'inactive')
+                return 'planned'
+            }
+            // Stale head (== yesterday's last) must not mean "caught up" when we
+            // still have no message from today. Wait for a newer head; without one
+            // history cannot walk into this morning.
+            if (storedBeforeToday) {
+                const waitedLongEnough = Date.now() - startedAt >= BULK_HISTORY_WAIT_MS
+                if (!waitedLongEnough) {
+                    return 'wait-head'
+                }
+                finishBackfill(groupJid, 'day-gap-no-head')
                 return 'planned'
             }
             if (existingSession && latest?.messageId && (await queueReconnectHole(groupJid, latest))) {
@@ -926,8 +960,13 @@ export function createCatchup(sock: WASocket, opts: { existingSession?: boolean 
         // After catch-up, a live pause is silence. A notify opens a hole only
         // when it lands on the connect snapshot and the stored neighbor is at
         // least the reconnect window older — the offline tail, not a quiet hour.
+        // An overnight gap (stored before today, notify today) always opens.
         const known = storedAtConnect.get(groupJid) ?? 0
-        if (reason === 'notify' && backfillDone.has(groupJid)) {
+        const dayStart = hktDayStartSeconds()
+        const overnightGap = Boolean(
+            previous && previous.timestamp < dayStart && timestamp >= dayStart
+        )
+        if (reason === 'notify' && backfillDone.has(groupJid) && !overnightGap) {
             if (!previous || previous.timestamp > known + ADJACENT_SECONDS) return
             if (timestamp <= previous.timestamp + config.catchupWindowSeconds) return
         }
