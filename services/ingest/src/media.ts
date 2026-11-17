@@ -433,8 +433,10 @@ async function downloadMediaOnce(
     const bumpPromise = mediaBump.promise
     let abandoned = false
     let stream: Readable | undefined
+    // Queue wait is outside the CDN timeout. A history page can enqueue dozens
+    // of downloads; counting that wait against the timeout marked them failed.
+    await waitMediaDownload()
     const attempt = (async () => {
-        await waitMediaDownload()
         if (abandoned) throw new Error('media download timed out')
         // Baileys waits forever inside reuploadRequest when the CDN returns 404/410.
         beginMediaPipeGuard()
